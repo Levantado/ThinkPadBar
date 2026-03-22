@@ -1,0 +1,13 @@
+pub mod clock;
+pub mod workspaces;
+pub mod brightness;
+pub mod audio;
+pub mod fan;
+pub mod battery;
+pub mod power;
+pub mod wifi;
+pub mod bluetooth;
+pub mod system;
+pub mod mic;
+pub mod keyboard;
+pub mod tray;

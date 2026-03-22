@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-iced = { version = "0.13", features = ["tokio", "advanced"] }
-iced_layershell = "0.7"
+iced = { git = "https://github.com/MalpenZibo/iced", rev = "daccb115c0827bd67fb11bf767db15b2066ed9df", features = ["tokio", "multi-window", "wayland", "winit", "advanced", "image"] }
 tokio = { version = "1.0", features = ["full"] }
 chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
+serde_json = "1.0.149"
+sysinfo = "0.38.4"
+system-tray = "0.8.5"

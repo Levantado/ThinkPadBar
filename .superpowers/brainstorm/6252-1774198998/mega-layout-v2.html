@@ -1,0 +1,119 @@
+<h2>ThinkPadBar: Концепция "Все-в-одном"</h2>
+<p class="subtitle">Полная замена Waybar для Arch Linux на Rust (iced)</p>
+
+<div class="mockup">
+  <div class="mockup-header">Рабочий стол (Hyprland + ThinkPadBar)</div>
+  <div class="mockup-body" style="background: #1a1b26; padding: 0; min-height: 250px; display: flex; flex-direction: column;">
+    
+    <!-- СТАТУС БАР (ВЕРХНИЙ) -->
+    <div style="background: rgba(26, 27, 38, 0.98); height: 36px; border-bottom: 2px solid #7aa2f7; display: flex; align-items: center; padding: 0 15px; color: #cfc9c2; font-family: 'JetBrains Mono', monospace; font-size: 13px;">
+      
+      <!-- СЛЕВА: Лаунчер и Воркспейсы -->
+      <div style="flex: 1; display: flex; gap: 12px; align-items: center;">
+         <span style="color: #7aa2f7; font-weight: bold; font-size: 16px;">󰣇</span>
+         <div style="display: flex; gap: 5px;">
+           <span style="background: #7aa2f7; color: #1a1b26; padding: 2px 8px; border-radius: 4px;">1</span>
+           <span style="border: 1px solid #414868; padding: 2px 8px; border-radius: 4px;">2</span>
+           <span style="border: 1px solid #414868; padding: 2px 8px; border-radius: 4px;">3</span>
+         </div>
+         <span style="color: #565f89; margin-left: 10px;">󰖲 Special</span>
+      </div>
+      
+      <!-- ЦЕНТР: Время и Календарь -->
+      <div style="flex: 1; text-align: center; color: #c0caf5; cursor: pointer;">
+        <span style="background: #24283b; padding: 4px 12px; border-radius: 15px; border: 1px solid #414868;">
+          󰃭 22 Mar, 15:30 [RU]
+        </span>
+      </div>
+      
+      <!-- СПРАВА: Системные ресурсы и Железо -->
+      <div style="flex: 1; display: flex; justify-content: flex-end; gap: 15px; align-items: center;">
+        <span style="color: #9ece6a;">󰻠 12%</span>
+        <span style="color: #e0af68;">󰍛 4.2G</span>
+        <span style="color: #7aa2f7;">󰈀 2.4M/s</span>
+        <span style="color: #bb9af7; font-weight: bold;">󰈐 FAN: AUTO</span>
+        <span style="color: #f7768e;">󰁹 98%</span>
+      </div>
+    </div>
+
+    <!-- КОНТРОЛЬ-ЦЕНТР (ПОПАП ПРИ КЛИКЕ НА ЖЕЛЕЗО) -->
+    <div style="position: absolute; right: 20px; top: 45px; background: #24283b; border: 1px solid #7aa2f7; border-radius: 10px; width: 340px; box-shadow: 0 15px 35px rgba(0,0,0,0.7); padding: 20px;">
+       <h3 style="margin: 0 0 15px 0; font-size: 16px; color: #7aa2f7; display: flex; align-items: center; gap: 10px;">
+         󰓇 ThinkPad T14 Dashboard
+       </h3>
+       
+       <!-- СЕКЦИЯ INPUT (TrackPoint/Pad) -->
+       <div class="section" style="background: #1a1b26; padding: 12px; border-radius: 8px; margin-bottom: 12px;">
+          <div style="font-size: 11px; color: #565f89; margin-bottom: 8px; text-transform: uppercase;">TrackPoint / TrackPad</div>
+          <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+             <span style="font-size: 11px;">Sens:</span>
+             <div style="flex: 1; height: 4px; background: #414868; border-radius: 2px; position: relative;">
+                <div style="width: 75%; height: 100%; background: #7aa2f7; border-radius: 2px;"></div>
+                <div style="position: absolute; left: 75%; top: -6px; width: 16px; height: 16px; background: #c0caf5; border-radius: 50%;"></div>
+             </div>
+          </div>
+          <div style="display: flex; justify-content: space-between;">
+             <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+               <div style="width: 14px; height: 14px; border: 2px solid #9ece6a; background: #9ece6a; border-radius: 3px;"></div>
+               <span style="font-size: 12px;">TrackPoint</span>
+             </label>
+             <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+               <div style="width: 14px; height: 14px; border: 2px solid #414868; border-radius: 3px;"></div>
+               <span style="font-size: 12px;">TrackPad</span>
+             </label>
+          </div>
+       </div>
+
+       <!-- СЕКЦИЯ ГРОМКОСТИ И ЯРКОСТИ -->
+       <div class="section" style="background: #1a1b26; padding: 12px; border-radius: 8px; margin-bottom: 12px;">
+          <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+             <span style="color: #7aa2f7; width: 20px;">󰕾</span>
+             <div style="flex: 1; height: 4px; background: #414868; border-radius: 2px;"><div style="width: 65%; height: 100%; background: #7aa2f7;"></div></div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px;">
+             <span style="color: #e0af68; width: 20px;">󰃠</span>
+             <div style="flex: 1; height: 4px; background: #414868; border-radius: 2px;"><div style="width: 80%; height: 100%; background: #e0af68;"></div></div>
+          </div>
+       </div>
+
+       <!-- СЕТЬ И BLUETOOTH -->
+       <div style="display: flex; gap: 10px; margin-bottom: 12px;">
+          <div style="flex: 1; background: #1a1b26; padding: 10px; border-radius: 8px; border: 1px solid #414868;">
+             <span style="color: #7dcfff;">󰖩 WiFi: ON</span>
+             <div style="font-size: 10px; color: #565f89; margin-top: 4px;">TP-Link_5G</div>
+          </div>
+          <div style="flex: 1; background: #1a1b26; padding: 10px; border-radius: 8px; border: 1px solid #414868;">
+             <span style="color: #9ece6a;">󰂯 BT: ON</span>
+             <div style="font-size: 10px; color: #565f89; margin-top: 4px;">Buds Pro</div>
+          </div>
+       </div>
+
+       <!-- БАТАРЕЯ И ПОРОГИ -->
+       <div class="section" style="background: #1a1b26; padding: 12px; border-radius: 8px;">
+          <div style="font-size: 11px; color: #565f89; margin-bottom: 8px;">CHARGE THRESHOLD</div>
+          <div style="display: flex; gap: 5px;">
+             <button style="flex: 1; background: #414868; border: none; padding: 6px; border-radius: 4px; color: white; cursor: pointer; font-size: 11px;">Home (80%)</button>
+             <button style="flex: 1; background: #7aa2f7; border: none; padding: 6px; border-radius: 4px; color: #1a1b26; font-weight: bold; cursor: pointer; font-size: 11px;">Full (100%)</button>
+          </div>
+       </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="options" data-multiselect>
+  <div class="option" data-choice="native" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Нативный Rust (Модульный)</h3>
+      <p>Всё в одном бинарнике. Максимальная скорость и надежность.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="hybrid" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Скриптовый Гибрид</h3>
+      <p>Данные из bash/python скриптов. Легче менять "на лету" без пересборки.</p>
+    </div>
+  </div>
+</div>

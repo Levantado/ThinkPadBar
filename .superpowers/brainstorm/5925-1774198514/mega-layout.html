@@ -1,0 +1,112 @@
+<h2>ThinkPadBar: Концепция "Все-в-одном"</h2>
+<p class="subtitle">Полная замена Waybar для Arch Linux на Rust (iced)</p>
+
+<div class="mockup">
+  <div class="mockup-header">Рабочий стол (Hyprland + ThinkPadBar)</div>
+  <div class="mockup-body" style="background: #1a1b26; padding: 0; min-height: 250px; display: flex; flex-direction: column;">
+    
+    <!-- СТАТУС БАР (ВЕРХНИЙ) -->
+    <div style="background: rgba(26, 27, 38, 0.98); height: 36px; border-bottom: 2px solid #7aa2f7; display: flex; align-items: center; padding: 0 15px; color: #cfc9c2; font-family: 'JetBrains Mono', monospace; font-size: 13px;">
+      
+      <!-- СЛЕВА: Лаунчер и Воркспейсы -->
+      <div style="flex: 1; display: flex; gap: 12px; align-items: center;">
+         <span style="color: #7aa2f7; font-weight: bold; font-size: 16px;">󰣇</span>
+         <div style="display: flex; gap: 5px;">
+           <span style="background: #7aa2f7; color: #1a1b26; padding: 2px 8px; border-radius: 4px;">1</span>
+           <span style="border: 1px solid #414868; padding: 2px 8px; border-radius: 4px;">2</span>
+           <span style="border: 1px solid #414868; padding: 2px 8px; border-radius: 4px;">3</span>
+         </div>
+         <span style="color: #565f89; margin-left: 10px;">󰖲 Special</span>
+      </div>
+      
+      <!-- ЦЕНТР: Время и Календарь -->
+      <div style="flex: 1; text-align: center; color: #c0caf5; cursor: pointer;">
+        <span style="background: #24283b; padding: 4px 12px; border-radius: 15px; border: 1px solid #414868;">
+          󰃭 22 Mar, 15:30 [RU]
+        </span>
+      </div>
+      
+      <!-- СПРАВА: Системные ресурсы и Железо -->
+      <div style="flex: 1; display: flex; justify-content: flex-end; gap: 15px; align-items: center;">
+        <span style="color: #9ece6a;">󰻠 12%</span>
+        <span style="color: #e0af68;">󰍛 4.2G</span>
+        <span style="color: #7aa2f7;">󰈀 2.4M/s</span>
+        <span style="color: #bb9af7; font-weight: bold;">󰈐 FAN: AUTO</span>
+        <span style="color: #f7768e;">󰁹 98%</span>
+      </div>
+    </div>
+
+    <!-- КОНТРОЛЬ-ЦЕНТР (ПОПАП ПРИ КЛИКЕ НА ЖЕЛЕЗО) -->
+    <div style="position: absolute; right: 20px; top: 45px; background: #24283b; border: 1px solid #7aa2f7; border-radius: 10px; width: 320px; box-shadow: 0 15px 35px rgba(0,0,0,0.7); padding: 20px;">
+       <h3 style="margin: 0 0 15px 0; font-size: 16px; color: #7aa2f7; display: flex; align-items: center; gap: 10px;">
+         󰓇 ThinkPad T14 Dashboard
+       </h3>
+       
+       <!-- СЕКЦИЯ INPUT -->
+       <div class="section" style="background: #1a1b26; padding: 12px; border-radius: 8px; margin-bottom: 12px;">
+          <div style="font-size: 11px; color: #565f89; margin-bottom: 8px; text-transform: uppercase;">TrackPoint / Pad</div>
+          <div style="display: flex; align-items: center; gap: 10px;">
+             <span>Sens:</span>
+             <div style="flex: 1; height: 4px; background: #414868; border-radius: 2px; position: relative;">
+                <div style="width: 75%; height: 100%; background: #7aa2f7; border-radius: 2px;"></div>
+                <div style="position: absolute; left: 75%; top: -6px; width: 16px; height: 16px; background: #c0caf5; border-radius: 50%;"></div>
+             </div>
+          </div>
+          <div style="margin-top: 10px; display: flex; justify-content: space-between;">
+             <span style="color: #9ece6a;">󰍽 TrackPoint: ON</span>
+             <span style="color: #f7768e;">󰍽 TrackPad: OFF</span>
+          </div>
+       </div>
+
+       <!-- СЕКЦИЯ ПИТАНИЯ -->
+       <div class="section" style="background: #1a1b26; padding: 12px; border-radius: 8px;">
+          <div style="font-size: 11px; color: #565f89; margin-bottom: 8px; text-transform: uppercase;">Battery Health</div>
+          <div style="display: flex; gap: 8px;">
+             <button style="flex: 1; background: #414868; border: none; padding: 6px; border-radius: 4px; color: white; cursor: pointer;">Home (80%)</button>
+             <button style="flex: 1; background: #7aa2f7; border: none; padding: 6px; border-radius: 4px; color: #1a1b26; font-weight: bold; cursor: pointer;">Full (100%)</button>
+          </div>
+       </div>
+
+       <!-- СЕТЬ И BLUETOOTH -->
+       <div style="margin-top: 15px; display: flex; justify-content: space-between; font-size: 12px;">
+          <span style="color: #7dcfff;">󰖩 TP-Link_5G</span>
+          <span style="color: #9ece6a;">󰂯 Buds Pro</span>
+       </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="pros-cons">
+  <div class="pros">
+    <h4>Почему Iced + Rust?</h4>
+    <ul>
+      <li><b>Изоляция модулей</b>: Каждый компонент (WiFi, Fan, CPU) живет в своем потоке и не тормозит панель.</li>
+      <li><b>Типобезопасность</b>: Никаких ошибок в конфигах или падений из-за кривого JS (как в AGS).</li>
+      <li><b>Низкое потребление</b>: На 16-поточном Ryzen 7 вы даже не увидите загрузку в 0.1%.</li>
+    </ul>
+  </div>
+  <div class="cons">
+    <h4>Сложности</h4>
+    <ul>
+      <li><b>Настройка UI</b>: В Iced сложнее верстать, чем в CSS (но мы будем использовать гибкую архитектуру).</li>
+      <li><b>Доступ к железу</b>: Для некоторых функций (яркость, пороги заряда) могут понадобиться udev-правила или запуск через `setuid`.</li>
+    </ul>
+  </div>
+
+<div class="options">
+  <div class="option" data-choice="modular" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Модульный подход</h3>
+      <p>Каждый виджет (громкость, сеть) — это отдельный Rust-файл. Легко добавлять новые.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="scriptable" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Скриптовый подход</h3>
+      <p>Панель умеет запускать внешние bash/python скрипты для данных (как Waybar).</p>
+    </div>
+  </div>
+</div>
