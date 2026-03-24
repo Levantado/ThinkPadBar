@@ -1,3 +1,5 @@
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use std::{collections::HashSet, process::Command};
 
 use zbus::{proxy, Connection};
@@ -184,6 +186,37 @@ fn discover_iwd_paths() -> Option<(String, String)> {
     None
 }
 
+#[derive(Clone)]
+struct PathCache {
+    value: Option<(String, String)>,
+    at: Instant,
+}
+
+fn discover_iwd_paths_cached() -> Option<(String, String)> {
+    const DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(30);
+    static CACHE: OnceLock<Mutex<PathCache>> = OnceLock::new();
+
+    let cache = CACHE.get_or_init(|| {
+        Mutex::new(PathCache {
+            value: None,
+            at: Instant::now() - DISCOVERY_CACHE_TTL,
+        })
+    });
+
+    if let Ok(guard) = cache.lock() {
+        if guard.at.elapsed() < DISCOVERY_CACHE_TTL {
+            return guard.value.clone();
+        }
+    }
+
+    let refreshed = discover_iwd_paths();
+    if let Ok(mut guard) = cache.lock() {
+        guard.value = refreshed.clone();
+        guard.at = Instant::now();
+    }
+    refreshed
+}
+
 fn candidate_paths(adapter_path: &str, station_path: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -197,7 +230,7 @@ fn candidate_paths(adapter_path: &str, station_path: &str) -> Vec<(String, Strin
         };
 
     // Prefer runtime discovery first to avoid stale config paths.
-    if let Some((a, s)) = discover_iwd_paths() {
+    if let Some((a, s)) = discover_iwd_paths_cached() {
         push_unique(a, s, &mut out, &mut seen);
     }
     if are_config_paths_valid(adapter_path, station_path) {
@@ -392,7 +425,7 @@ pub async fn scan_networks(conn: &Connection, station_path: &str) -> Vec<WifiNet
     if is_valid_object_path(station_path) {
         candidates.push(station_path.to_string());
     }
-    if let Some((_, s)) = discover_iwd_paths() {
+    if let Some((_, s)) = discover_iwd_paths_cached() {
         if !candidates.iter().any(|v| v == &s) {
             candidates.push(s);
         }
@@ -403,21 +436,29 @@ pub async fn scan_networks(conn: &Connection, station_path: &str) -> Vec<WifiNet
         if let Ok(station_builder) = StationProxy::builder(conn).path(station_path.as_str()) {
             if let Ok(station) = station_builder.build().await {
                 let _ = station.scan().await;
-                tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
-                if let Ok(ordered) = station.get_ordered_networks().await {
-                    for (path, _) in ordered {
-                        if let Ok(network_builder) = NetworkProxy::builder(conn).path(path) {
-                            if let Ok(network) = network_builder.build().await {
-                                if let (Ok(name), Ok(sec)) =
-                                    (network.name().await, network.type_().await)
-                                {
-                                    if !networks.iter().any(|n: &WifiNetwork| n.ssid == name) {
-                                        networks.push(WifiNetwork {
-                                            ssid: name,
-                                            security: sec,
-                                        });
-                                    }
+                let mut ordered_networks = Vec::new();
+                for _ in 0..10 {
+                    if let Ok(ordered) = station.get_ordered_networks().await {
+                        if !ordered.is_empty() {
+                            ordered_networks = ordered;
+                            break;
+                        }
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+                }
+
+                for (path, _) in ordered_networks {
+                    if let Ok(network_builder) = NetworkProxy::builder(conn).path(path) {
+                        if let Ok(network) = network_builder.build().await {
+                            if let (Ok(name), Ok(sec)) =
+                                (network.name().await, network.type_().await)
+                            {
+                                if !networks.iter().any(|n: &WifiNetwork| n.ssid == name) {
+                                    networks.push(WifiNetwork {
+                                        ssid: name,
+                                        security: sec,
+                                    });
                                 }
                             }
                         }
@@ -445,7 +486,7 @@ pub async fn connect_network(
     if is_valid_object_path(station_path) {
         candidates.push(station_path.to_string());
     }
-    if let Some((_, s)) = discover_iwd_paths() {
+    if let Some((_, s)) = discover_iwd_paths_cached() {
         if !candidates.iter().any(|v| v == &s) {
             candidates.push(s);
         }

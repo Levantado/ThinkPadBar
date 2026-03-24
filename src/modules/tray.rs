@@ -24,6 +24,7 @@ pub enum TrayMessage {
 pub struct Tray {
     pub items: HashMap<String, TrayItem>,
     pub activate_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    icon_cache: HashMap<String, Handle>,
 }
 
 impl Tray {
@@ -31,7 +32,17 @@ impl Tray {
         Self {
             items: HashMap::new(),
             activate_tx: None,
+            icon_cache: HashMap::new(),
         }
+    }
+
+    fn resolve_icon_cached(&mut self, name: &str, theme_path: Option<&str>) -> Option<Handle> {
+        if let Some(icon) = self.icon_cache.get(name) {
+            return Some(icon.clone());
+        }
+        let found = find_icon(name, theme_path)?;
+        self.icon_cache.insert(name.to_string(), found.clone());
+        Some(found)
     }
 
     pub fn update(&mut self, message: TrayMessage) {
@@ -40,7 +51,8 @@ impl Tray {
                 let mut icon_handle = get_icon_handle(&item);
                 if icon_handle.is_none() {
                     if let Some(ref name) = item.icon_name {
-                        icon_handle = find_icon(name, item.icon_theme_path.as_deref());
+                        icon_handle =
+                            self.resolve_icon_cached(name, item.icon_theme_path.as_deref());
                     }
                 }
                 self.items.insert(
@@ -54,6 +66,7 @@ impl Tray {
                 );
             }
             TrayMessage::ItemUpdated(id, event) => {
+                let mut cache_lookup_name: Option<String> = None;
                 if let Some(item) = self.items.get_mut(&id) {
                     match event {
                         UpdateEvent::Title(title) => item.title = title,
@@ -64,7 +77,7 @@ impl Tray {
                             if let Some(name) = icon_name {
                                 item.icon_name = Some(name.clone());
                                 if item.icon_handle.is_none() {
-                                    item.icon_handle = find_icon(&name, None);
+                                    cache_lookup_name = Some(name);
                                 }
                             }
                             if let Some(pixmap) = icon_pixmap {
@@ -72,6 +85,14 @@ impl Tray {
                             }
                         }
                         _ => {}
+                    }
+                }
+                if let Some(name) = cache_lookup_name {
+                    let resolved = self.resolve_icon_cached(&name, None);
+                    if let Some(item) = self.items.get_mut(&id) {
+                        if item.icon_handle.is_none() {
+                            item.icon_handle = resolved;
+                        }
                     }
                 }
             }

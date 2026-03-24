@@ -69,7 +69,7 @@ impl SysMonitor {
     }
 
     pub fn update(&mut self, fast: bool) -> SysData {
-        let mut data = self.last_data.clone();
+        let mut data = std::mem::take(&mut self.last_data);
 
         // 1. CPU Usage
         if let Ok(mut file) = File::open("/proc/stat") {
@@ -223,8 +223,8 @@ impl SysMonitor {
             }
         }
 
-        self.last_data = data.clone();
-        data
+        self.last_data = data;
+        self.last_data.clone()
     }
 }
 

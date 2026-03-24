@@ -74,7 +74,7 @@ pub fn subscription() -> iced::Subscription<crate::app::Message> {
 
                 while let Ok(Some(line)) = reader.next_line().await {
                     if line.contains("sink") || line.contains("source") || line.contains("server") {
-                        let _ = output.try_send(crate::app::Message::Tick(chrono::Local::now()));
+                        let _ = output.try_send(crate::app::Message::RefreshAudioMic);
                     }
                 }
                 // If pactl fails, wait before retry
