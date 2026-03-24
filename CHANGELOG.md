@@ -2,6 +2,190 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.26] - 2026-03-24
+
+### Fixed
+- Launcher process lifecycle hardened: after spawning `rofi`, thinkpadbar now explicitly waits for child exit in a background reaper thread.
+- This prevents accumulation of zombie `rofi` processes after manual launcher close.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.25] - 2026-03-24
+
+### Fixed
+- Launcher command now uses `rofi -replace -show drun` to force reopening even when a stale/background `rofi` process remains after manual close.
+
+### Quality
+- Updated launcher regression test to validate `-replace` argument in command mapping.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.24] - 2026-03-24
+
+### Changed
+- Launcher button behavior simplified: it now always runs `rofi -show drun` and no longer attempts toggle/kill logic.
+- Removed launcher process discovery/kill path (`pgrep/pkill`) to avoid false-positive "running" states that blocked reopening after manual close.
+
+### Quality
+- Removed obsolete launcher toggle command tests and kept launcher command mapping regression test.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.23] - 2026-03-24
+
+### Fixed
+- Launcher toggle now uses process discovery (`pgrep -x rofi`) and close (`pkill -x rofi`) instead of tracking spawned child PID, which fixes reopen-after-manual-close regressions.
+- Suppressed launcher command stdout/stderr in toggle path to prevent PID spam in terminal logs.
+
+### Quality
+- Added regression tests for launcher check/close command mappings (`pgrep -x rofi`, `pkill -x rofi`).
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.22] - 2026-03-24
+
+### Fixed
+- Launcher button now toggles `rofi`: second click closes launcher (`pkill -x rofi`) instead of spawning additional instances.
+- Launcher button icon changed from emoji rocket to Nerd Font glyph (``) to avoid missing-glyph square rendering on systems without emoji font support.
+
+### Quality
+- Added regression test for launcher close command mapping (`pkill -x rofi`).
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.21] - 2026-03-24
+
+### Added
+- Added launcher button (`🚀`) to the left of workspace buttons in the main bar.
+- Added launcher action that opens system launch manager via `rofi -show drun`.
+- Added regression test verifying launcher command mapping (`rofi`, `-show`, `drun`).
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.20] - 2026-03-24
+
+### Fixed
+- Popup layer-surface handling now explicitly enforces `exclusive_zone = 0`:
+  - at popup surface creation,
+  - on popup show,
+  - on popup hide.
+- This hardens against compositor-side stale input-region behavior where hidden popup surfaces could still interfere with pointer input.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.19] - 2026-03-24
+
+### Fixed
+- Bluetooth toggle path hardened to reduce permission-failure regressions:
+  - tries `bluetoothctl power on|off`,
+  - falls back to `rfkill block|unblock bluetooth`,
+  - then to direct sysfs write (`/sys/class/rfkill/.../state`).
+- Reduced repeated Bluetooth permission error spam by stopping after first matching rfkill device write failure.
+- Bluetooth state updates now refresh via `TickSlow` after toggle request instead of optimistic local state flip.
+
+### Added
+- Added Control Center action button to launch `overskride` (with `flatpak run io.github.kaii_lb.Overskride` fallback).
+- Added parser tests for `bluetoothctl show` powered-state extraction.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.18] - 2026-03-24
+
+### Changed
+- Performance profile button in Control Center now displays effective live intervals directly:
+  - format: `Perf <badge> <brightness>/<thermal>/<slow>`,
+  - example: `Perf NRM 1/2/10`.
+- This provides immediate visual feedback for runtime profile switches and applied interval values.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.17] - 2026-03-24
+
+### Added
+- Added runtime performance profile cycling in Control Center (`Perf NRM/LP/HR` button).
+- Added `PerformanceConfig` helpers:
+  - profile normalization,
+  - compact profile badge label,
+  - runtime cycling logic (`normal -> low_power -> high_responsiveness -> normal`).
+- Added regression test for runtime profile cycle behavior.
+
+### Changed
+- Runtime profile cycle now applies profile defaults immediately by resetting explicit tick overrides to profile-driven mode.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.16] - 2026-03-24
+
+### Added
+- Added performance profile support in config:
+  - `performance.profile = "normal" | "low_power" | "high_responsiveness"`.
+- Added profile-based effective interval resolver with explicit per-field override support.
+- Added tests for:
+  - default profile behavior,
+  - low_power profile mapping,
+  - explicit interval override precedence.
+
+### Changed
+- App subscriptions now use profile-resolved effective intervals instead of raw values only.
+- Updated config example and README with profile-driven tuning guidance.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.15] - 2026-03-24
+
+### Added
+- Added configurable refresh intervals in config:
+  - `performance.tick_brightness_secs`
+  - `performance.tick_thermal_secs`
+  - `performance.tick_slow_secs`
+- Added defaults for the new performance section with backward-compatible parsing when section is absent.
+- Added config tests for default intervals and missing-section fallback parsing.
+
+### Changed
+- App subscriptions now use configured performance intervals (with safety clamp to at least 1 second).
+- Updated `config.toml.example` and README with performance tuning examples.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.14] - 2026-03-24
+
+### Added
+- Added runtime metrics tool: `scripts/runtime-metrics.sh`.
+  - Collects sampled `%CPU`, `RSS`, threads, FD count, and context-switch deltas.
+  - Produces CSV output suitable for before/after optimization comparisons.
+- Added documentation: `docs/validation/runtime-metrics.md`.
+- Added README section with quick metrics examples.
+
+### Quality
+- Script syntax validated with `bash -n`.
+- Validation passed: `cargo check`.
+
+## [0.6.13] - 2026-03-24
+
+### Changed
+- Wi-Fi iwd path discovery now uses a short TTL cache (30s), reducing repeated `busctl tree` process launches in steady state.
+- Wi-Fi scanning switched from fixed `sleep(1500ms)` to adaptive retry polling (`10 x 150ms` with early exit), improving perceived menu responsiveness when networks appear quickly.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.12] - 2026-03-24
+
+### Changed
+- Reduced redundant runtime polling:
+  - `Tick` no longer force-refreshes audio/mic every second;
+  - audio event subscription now sends dedicated `RefreshAudioMic` update instead of full `Tick`;
+  - `UpdateWorkspaces` no longer triggers extra audio/mic probes.
+- Added tray icon resolution cache (`icon_name -> image handle`) to avoid repeated filesystem icon lookups on recurring tray updates.
+- Reduced `SysMonitor` copy overhead by replacing clone-at-start path with move-based update (`mem::take`) and a single clone on return.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.11] - 2026-03-24
 
 ### Fixed

@@ -69,6 +69,7 @@ pub enum Message {
     TickBrightness(chrono::DateTime<chrono::Local>),
     TickThermal(chrono::DateTime<chrono::Local>),
     TickSlow(chrono::DateTime<chrono::Local>),
+    RefreshAudioMic,
     UpdateWorkspaces,
     WorkspacesUpdated(
         Vec<crate::modules::workspaces::WorkspaceInfo>,
@@ -82,6 +83,7 @@ pub enum Message {
     SetFanLevel(String),
     SetBrightness(u32),
     SetPowerProfile(String),
+    CyclePerformanceProfile,
     ToggleWifiMenu,
     NetworksScanned(Vec<crate::modules::wifi::WifiNetwork>),
     SelectWifiNetwork(String, String),
@@ -108,8 +110,10 @@ pub enum Message {
     PowerProfileUpdated(String),
     WifiUpdated(crate::modules::wifi::WifiInfo),
     BluetoothUpdated(bool),
+    OpenOverskride,
     DBusConnected(zbus::Connection),
     PopupWindowUnfocused(Id),
+    OpenLauncher,
 }
 
 impl ThinkPadBar {
@@ -137,11 +141,13 @@ impl ThinkPadBar {
 
     fn popup_hide_tasks(&self) -> Vec<Task<Message>> {
         use iced::platform_specific::shell::commands::layer_surface::{
-            set_keyboard_interactivity, set_layer, set_size, KeyboardInteractivity, Layer,
+            set_exclusive_zone, set_keyboard_interactivity, set_layer, set_size,
+            KeyboardInteractivity, Layer,
         };
 
         let mut tasks = Vec::new();
         if let Some(pid) = self.popup_window_id {
+            tasks.push(set_exclusive_zone(pid, 0));
             tasks.push(set_layer(pid, Layer::Background));
             tasks.push(set_keyboard_interactivity(pid, KeyboardInteractivity::None));
             tasks.push(set_size(pid, Some(1), Some(1)));
@@ -151,12 +157,14 @@ impl ThinkPadBar {
 
     fn popup_show_tasks(&self, popup: Popup) -> Vec<Task<Message>> {
         use iced::platform_specific::shell::commands::layer_surface::{
-            set_keyboard_interactivity, set_layer, set_size, KeyboardInteractivity, Layer,
+            set_exclusive_zone, set_keyboard_interactivity, set_layer, set_size,
+            KeyboardInteractivity, Layer,
         };
 
         let mut tasks = Vec::new();
         let (width, height) = self.popup_size_for(popup);
         if let Some(pid) = self.popup_window_id {
+            tasks.push(set_exclusive_zone(pid, 0));
             tasks.push(set_layer(pid, Layer::Top));
             tasks.push(set_keyboard_interactivity(
                 pid,
@@ -173,6 +181,24 @@ impl ThinkPadBar {
         unfocused_window: Id,
     ) -> bool {
         *popup != Popup::None && popup_window_id.is_some_and(|id| id == unfocused_window)
+    }
+
+    fn launcher_command() -> (&'static str, &'static [&'static str]) {
+        ("rofi", &["-replace", "-show", "drun"])
+    }
+
+    fn spawn_command_and_reap(bin: &str, args: &[&str]) {
+        if let Ok(mut child) = std::process::Command::new(bin)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            // Reap the child process to avoid zombies when launcher exits.
+            std::mem::drop(std::thread::spawn(move || {
+                let _ = child.wait();
+            }));
+        }
     }
 
     pub fn new(config: crate::config::Config) -> impl FnOnce() -> (Self, Task<Message>) {
@@ -212,6 +238,7 @@ impl ThinkPadBar {
                 namespace: "thinkpadbar-popup".to_string(),
                 // Keep popup surface effectively hidden until user opens a popup.
                 size: Some((Some(1), Some(1))),
+                exclusive_zone: 0,
                 layer: Layer::Background,
                 keyboard_interactivity: KeyboardInteractivity::None,
                 anchor: Anchor::TOP | Anchor::RIGHT,
@@ -293,6 +320,9 @@ impl ThinkPadBar {
             Message::Tick(now) => {
                 self.clock = now.format("%a %d %b %H:%M").to_string();
                 self.sys_data = self.sys_monitor.update(true);
+                return Task::none();
+            }
+            Message::RefreshAudioMic => {
                 return Task::batch(vec![
                     Task::perform(
                         async { crate::modules::audio::get_info() },
@@ -382,26 +412,20 @@ impl ThinkPadBar {
                     return Task::batch(self.popup_hide_tasks());
                 }
             }
+            Message::OpenLauncher => {
+                let (bin, args) = Self::launcher_command();
+                Self::spawn_command_and_reap(bin, args);
+            }
             Message::UpdateWorkspaces => {
-                return Task::batch(vec![
-                    Task::perform(
-                        async {
-                            let ws = crate::modules::workspaces::get_workspaces();
-                            let title = crate::modules::workspaces::get_active_window_title();
-                            let layout = crate::modules::keyboard::get_layout();
-                            (ws, title, layout)
-                        },
-                        |(ws, title, layout)| Message::WorkspacesUpdated(ws, title, layout),
-                    ),
-                    Task::perform(
-                        async { crate::modules::audio::get_info() },
-                        Message::AudioUpdated,
-                    ),
-                    Task::perform(
-                        async { crate::modules::mic::get_info() },
-                        Message::MicUpdated,
-                    ),
-                ]);
+                return Task::perform(
+                    async {
+                        let ws = crate::modules::workspaces::get_workspaces();
+                        let title = crate::modules::workspaces::get_active_window_title();
+                        let layout = crate::modules::keyboard::get_layout();
+                        (ws, title, layout)
+                    },
+                    |(ws, title, layout)| Message::WorkspacesUpdated(ws, title, layout),
+                );
             }
             Message::WorkspacesUpdated(workspaces, title, layout) => {
                 let prev_title = self.active_window.clone();
@@ -503,6 +527,9 @@ impl ThinkPadBar {
                     async move { crate::modules::power::set_profile(&prof).await },
                     |_| Message::TickSlow(chrono::Local::now()),
                 );
+            }
+            Message::CyclePerformanceProfile => {
+                self.config.performance.cycle_profile_runtime();
             }
             Message::ToggleWifiMenu => {
                 self.show_wifi_menu = !self.show_wifi_menu;
@@ -613,10 +640,19 @@ impl ThinkPadBar {
                 self.wifi_status_message = "D-Bus недоступен: переключение невозможно".to_string();
             }
             Message::ToggleBluetooth(enable) => {
-                self.bluetooth = enable;
                 return Task::perform(
-                    async move { crate::modules::bluetooth::toggle_bluetooth(enable) },
+                    async move {
+                        let _ = crate::modules::bluetooth::toggle_bluetooth(enable);
+                    },
                     |_| Message::TickSlow(chrono::Local::now()),
+                );
+            }
+            Message::OpenOverskride => {
+                return Task::perform(
+                    async {
+                        let _ = crate::modules::bluetooth::open_overskride();
+                    },
+                    |_| Message::UpdateWorkspaces,
                 );
             }
             Message::NextKeyboardLayout => {
@@ -818,6 +854,23 @@ impl ThinkPadBar {
         let left = Row::new()
             .spacing(12)
             .align_y(Alignment::Center)
+            .push(
+                button(text("").size(13))
+                    .padding(Padding::from([2, 8]))
+                    .on_press(Message::OpenLauncher)
+                    .style(|_, _| iced::widget::button::Style {
+                        background: Some(iced::Background::Color(Color {
+                            a: self.config.appearance.opacity,
+                            ..Color::from_rgb8(0x29, 0x2e, 0x42)
+                        })),
+                        text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                        border: iced::Border {
+                            radius: 10.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+            )
             .push(container(ws_row).width(Length::Fixed(280.0)));
 
         // Center: Active Window Title
@@ -1754,6 +1807,25 @@ impl ThinkPadBar {
                 }
             }
         });
+        let bt_app_btn = button(
+            Row::new()
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .push(text("󰳋").size(16))
+                .push(text("Overskride").size(11)),
+        )
+        .width(Length::FillPortion(1))
+        .padding(Padding::from([8, 10]))
+        .on_press(Message::OpenOverskride)
+        .style(|_, _| iced::widget::button::Style {
+            background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
+            text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+            border: iced::Border {
+                radius: 12.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
 
         let bat_cap = self.battery.capacity;
         let bat_status = &self.battery.status;
@@ -1789,6 +1861,7 @@ impl ThinkPadBar {
                 },
                 ..Default::default()
             };
+        let (perf_b, perf_t, perf_s) = self.config.performance.effective_intervals();
 
         let top_row = Row::new()
             .align_y(Alignment::Center)
@@ -1818,6 +1891,21 @@ impl ThinkPadBar {
                     ),
             )
             .push(iced::widget::Space::with_width(Length::Fill))
+            .push(
+                button(
+                    text(format!(
+                        "Perf {} {}/{}/{}",
+                        self.config.performance.profile_badge(),
+                        perf_b,
+                        perf_t,
+                        perf_s
+                    ))
+                    .size(12),
+                )
+                .padding(8)
+                .on_press(Message::CyclePerformanceProfile)
+                .style(circular_btn_style),
+            )
             .push(
                 button(text("󰌾").size(16))
                     .padding(8)
@@ -1909,7 +1997,8 @@ impl ThinkPadBar {
             .spacing(20)
             .push(top_row)
             .push(sliders_col)
-            .push(Row::new().spacing(16).push(wifi_btn).push(bt_btn));
+            .push(Row::new().spacing(16).push(wifi_btn).push(bt_btn))
+            .push(Row::new().spacing(16).push(bt_app_btn));
 
         if self.show_wifi_menu {
             let mut inner_col = Column::new().spacing(8);
@@ -2062,13 +2151,16 @@ impl ThinkPadBar {
     }
 
     pub fn subscription(&self) -> iced::Subscription<Message> {
+        let (brightness_secs, thermal_secs, slow_secs) =
+            self.config.performance.effective_intervals();
+
         iced::Subscription::batch(vec![
             crate::modules::clock::tick(),
-            iced::time::every(std::time::Duration::from_secs(1))
+            iced::time::every(std::time::Duration::from_secs(brightness_secs))
                 .map(|_| Message::TickBrightness(chrono::Local::now())),
-            iced::time::every(std::time::Duration::from_secs(2))
+            iced::time::every(std::time::Duration::from_secs(thermal_secs))
                 .map(|_| Message::TickThermal(chrono::Local::now())),
-            iced::time::every(std::time::Duration::from_secs(10))
+            iced::time::every(std::time::Duration::from_secs(slow_secs))
                 .map(|_| Message::TickSlow(chrono::Local::now())),
             crate::modules::workspaces::subscription(),
             crate::modules::tray::Tray::subscription().map(Message::TrayMessage),
@@ -2112,5 +2204,12 @@ mod tests {
             &Popup::None,
             popup_id,
         ));
+    }
+
+    #[test]
+    fn launcher_command_points_to_rofi_replace_drun() {
+        let (bin, args) = ThinkPadBar::launcher_command();
+        assert_eq!(bin, "rofi");
+        assert_eq!(args, &["-replace", "-show", "drun"]);
     }
 }
