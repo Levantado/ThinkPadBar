@@ -1,1 +1,24 @@
-/target
+/target/
+
+# Local agent/runtime state
+.codex/
+.gemini/
+
+# Local config overrides
+config.toml
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Editor/OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Local binaries and temp files
+*.tmp
+*.swp
+*.swo
+fan_test

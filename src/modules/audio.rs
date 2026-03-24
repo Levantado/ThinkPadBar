@@ -1,5 +1,6 @@
 use std::process::Command;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioInfo {
     pub volume: u32,
     pub muted: bool,
@@ -13,7 +14,7 @@ pub fn get_info() -> AudioInfo {
         if let Ok(s) = String::from_utf8(output.stdout) {
             let s = s.trim();
             let muted = s.contains("[MUTED]");
-            
+
             if let Some(vol_part) = s.split_whitespace().nth(1) {
                 if let Ok(vol) = vol_part.parse::<f32>() {
                     return AudioInfo {
@@ -24,7 +25,10 @@ pub fn get_info() -> AudioInfo {
             }
         }
     }
-    AudioInfo { volume: 0, muted: false }
+    AudioInfo {
+        volume: 0,
+        muted: false,
+    }
 }
 
 pub fn set_volume(percent: u32) {
@@ -38,4 +42,44 @@ pub fn toggle_mute() {
     let _ = Command::new("wpctl")
         .args(["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"])
         .output();
+}
+
+pub fn subscription() -> iced::Subscription<crate::app::Message> {
+    struct AudioListener;
+    iced::Subscription::run_with_id(
+        std::any::TypeId::of::<AudioListener>(),
+        iced::stream::channel(1, |mut output| async move {
+            use std::process::Stdio;
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            use tokio::process::Command as AsyncCommand;
+
+            loop {
+                let mut child = match AsyncCommand::new("pactl")
+                    .arg("subscribe")
+                    .stdout(Stdio::piped())
+                    .spawn()
+                {
+                    Ok(child) => child,
+                    Err(_) => {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        continue;
+                    }
+                };
+
+                let Some(stdout) = child.stdout.take() else {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                };
+                let mut reader = BufReader::new(stdout).lines();
+
+                while let Ok(Some(line)) = reader.next_line().await {
+                    if line.contains("sink") || line.contains("source") || line.contains("server") {
+                        let _ = output.try_send(crate::app::Message::Tick(chrono::Local::now()));
+                    }
+                }
+                // If pactl fails, wait before retry
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }),
+    )
 }

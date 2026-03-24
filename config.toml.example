@@ -1,0 +1,36 @@
+# Пример конфигурации ThinkPadBar
+# Скопируйте этот файл в ~/.config/thinkpadbar/config.toml
+
+# Путь к шрифту в системе
+font_path = "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf"
+
+# Имя шрифта для iced
+font_name = "JetBrainsMonoNL NFP"
+
+[network]
+# Пути к D-Bus объектам iwd (можно узнать через busctl tree net.connman.iwd)
+adapter_path = "/net/connman/iwd/0"
+station_path = "/net/connman/iwd/0/wlan0"
+
+[appearance]
+# Высота основной панели (в пикселях)
+bar_height = 24
+
+# Прозрачность всех элементов интерфейса (от 0.0 до 1.0)
+opacity = 0.85
+
+# ------------------------------------------------------------------------------
+# СОВЕТЫ ПО НАСТРОЙКЕ (ДЛЯ ZERO-FORK И ПЛАВНОСТИ):
+# ------------------------------------------------------------------------------
+#
+# 1. Чтобы управлять светодиодом микрофона без пароля:
+# sudo sh -c 'echo "ACTION==\"add\", SUBSYSTEM==\"leds\", KERNEL==\"*::micmute\", RUN+=\"/bin/chgrp video %S%p/brightness\", RUN+=\"/bin/chmod g+w %S%p/brightness\"" > /etc/udev/rules.d/99-micmute-led.rules'
+#
+# 2. Чтобы управлять вентилятором без пароля:
+# sudo sh -c 'echo "ACTION==\"add\", SUBSYSTEM==\"platform\", DRIVERS==\"thinkpad_acpi\", RUN+=\"/bin/chgrp video /proc/acpi/ibm/fan\", RUN+=\"/bin/chmod g+w /proc/acpi/ibm/fan\"" > /etc/udev/rules.d/99-thinkpad-fan.rules'
+#
+# 3. Чтобы управлять профилями питания без пароля:
+# sudo sh -c 'echo "ACTION==\"add\", SUBSYSTEM==\"platform\", DRIVERS==\"thinkpad_acpi\", RUN+=\"/bin/chgrp video /sys/firmware/acpi/platform_profile\", RUN+=\"/bin/chmod g+w /sys/firmware/acpi/platform_profile\"" > /etc/udev/rules.d/99-thinkpad-power.rules'
+#
+# После добавления правил выполните: sudo udevadm control --reload-rules && sudo udevadm trigger
+# И убедитесь, что ваш пользователь состоит в группе 'video'.

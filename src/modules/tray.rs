@@ -1,6 +1,6 @@
 use iced::widget::image::Handle;
 use std::collections::HashMap;
-use system_tray::client::{Client, Event, UpdateEvent, ActivateRequest};
+use system_tray::client::{ActivateRequest, Client, Event, UpdateEvent};
 use system_tray::item::StatusNotifierItem;
 
 #[derive(Debug, Clone)]
@@ -13,7 +13,7 @@ pub struct TrayItem {
 
 #[derive(Debug, Clone)]
 pub enum TrayMessage {
-    ItemAdded(String, StatusNotifierItem),
+    ItemAdded(String, Box<StatusNotifierItem>),
     ItemUpdated(String, UpdateEvent),
     ItemRemoved(String),
     EventBatch(Vec<Event>),
@@ -43,18 +43,24 @@ impl Tray {
                         icon_handle = find_icon(name, item.icon_theme_path.as_deref());
                     }
                 }
-                self.items.insert(id.clone(), TrayItem {
-                    _id: id,
-                    title: item.title,
-                    icon_name: item.icon_name,
-                    icon_handle,
-                });
+                self.items.insert(
+                    id.clone(),
+                    TrayItem {
+                        _id: id,
+                        title: item.title.clone(),
+                        icon_name: item.icon_name.clone(),
+                        icon_handle,
+                    },
+                );
             }
             TrayMessage::ItemUpdated(id, event) => {
                 if let Some(item) = self.items.get_mut(&id) {
                     match event {
                         UpdateEvent::Title(title) => item.title = title,
-                        UpdateEvent::Icon { icon_name, icon_pixmap } => {
+                        UpdateEvent::Icon {
+                            icon_name,
+                            icon_pixmap,
+                        } => {
                             if let Some(name) = icon_name {
                                 item.icon_name = Some(name.clone());
                                 if item.icon_handle.is_none() {
@@ -75,8 +81,10 @@ impl Tray {
             TrayMessage::EventBatch(events) => {
                 for event in events {
                     match event {
-                        Event::Add(id, item) => self.update(TrayMessage::ItemAdded(id, *item)),
-                        Event::Update(id, update) => self.update(TrayMessage::ItemUpdated(id, update)),
+                        Event::Add(id, item) => self.update(TrayMessage::ItemAdded(id, item)),
+                        Event::Update(id, update) => {
+                            self.update(TrayMessage::ItemUpdated(id, update))
+                        }
                         Event::Remove(id) => self.update(TrayMessage::ItemRemoved(id)),
                     }
                 }
@@ -97,62 +105,60 @@ impl Tray {
 
         iced::Subscription::run_with_id(
             std::any::TypeId::of::<TrayListener>(),
-            iced::stream::channel(
-                100,
-                |mut output| async move {
-                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-                    let (atx, mut arx) = tokio::sync::mpsc::unbounded_channel::<String>();
-                    
-                    let _ = tx.send(TrayMessage::Initialize(atx));
-                    
-                    std::thread::spawn(move || {
-                        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-                        rt.block_on(async {
-                            let client = match Client::new().await {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    eprintln!("Failed to init tray client: {:?}", e);
-                                    loop {
-                                        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-                                    }
-                                }
-                            };
+            iced::stream::channel(100, |mut output| async move {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let (atx, mut arx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-                            let mut crx = client.subscribe();
+                let _ = tx.send(TrayMessage::Initialize(atx));
 
-                            let initial_items: Vec<_> = {
-                                let items_arc = client.items();
-                                let initial_map = items_arc.lock().unwrap();
-                                initial_map.iter().map(|(id, (item, _))| (id.clone(), item.clone())).collect()
-                            };
+                let client = match Client::new().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Failed to init tray client: {:?}", e);
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                        }
+                    }
+                };
 
-                            for (id, item) in initial_items {
-                                let _ = tx.send(TrayMessage::ItemAdded(id, item));
-                            }
+                let mut crx = client.subscribe();
 
-                            loop {
-                                tokio::select! {
-                                    Ok(event) = crx.recv() => {
-                                        let _ = tx.send(TrayMessage::EventBatch(vec![event]));
-                                    }
-                                    Some(id) = arx.recv() => {
-                                        // Activate item
-                                        let _ = client.activate(ActivateRequest::Default {
-                                            address: id,
-                                            x: 0,
-                                            y: 0,
-                                        }).await;
-                                    }
-                                }
-                            }
-                        });
-                    });
+                let initial_items: Vec<_> = {
+                    let items_arc = client.items();
+                    let lock_result = items_arc.lock();
+                    if let Ok(initial_map) = lock_result {
+                        initial_map
+                            .iter()
+                            .map(|(id, (item, _))| (id.clone(), item.clone()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
 
-                    while let Some(msg) = rx.recv().await {
-                        let _ = output.try_send(msg);
+                for (id, item) in initial_items {
+                    let _ = tx.send(TrayMessage::ItemAdded(id, Box::new(item)));
+                }
+
+                loop {
+                    tokio::select! {
+                        Ok(event) = crx.recv() => {
+                            let _ = tx.send(TrayMessage::EventBatch(vec![event]));
+                        }
+                        Some(id) = arx.recv() => {
+                            // Activate item
+                            let _ = client.activate(ActivateRequest::Default {
+                                address: id,
+                                x: 0,
+                                y: 0,
+                            }).await;
+                        }
+                        Some(msg) = rx.recv() => {
+                            let _ = output.try_send(msg);
+                        }
                     }
                 }
-            )
+            }),
         )
     }
 }
@@ -204,12 +210,21 @@ fn find_icon(name: &str, theme_path: Option<&str>) -> Option<Handle> {
             return Some(Handle::from_path(p));
         }
     }
-    
+
     let home = std::env::var("HOME").unwrap_or_default();
     let mut paths = vec![
-        format!("{}/.local/share/icons/hicolor/scalable/apps/{}.svg", home, name),
-        format!("{}/.local/share/icons/hicolor/48x48/apps/{}.png", home, name),
-        format!("{}/.local/share/icons/hicolor/32x32/apps/{}.png", home, name),
+        format!(
+            "{}/.local/share/icons/hicolor/scalable/apps/{}.svg",
+            home, name
+        ),
+        format!(
+            "{}/.local/share/icons/hicolor/48x48/apps/{}.png",
+            home, name
+        ),
+        format!(
+            "{}/.local/share/icons/hicolor/32x32/apps/{}.png",
+            home, name
+        ),
         format!("{}/.icons/hicolor/scalable/apps/{}.svg", home, name),
         format!("{}/.icons/hicolor/48x48/apps/{}.png", home, name),
         format!("/usr/share/icons/hicolor/scalable/apps/{}.svg", name),
@@ -218,16 +233,29 @@ fn find_icon(name: &str, theme_path: Option<&str>) -> Option<Handle> {
         format!("/usr/share/pixmaps/{}.png", name),
         format!("/usr/share/pixmaps/{}.svg", name),
         // Flatpak paths
-        format!("{}/.local/share/flatpak/exports/share/icons/hicolor/scalable/apps/{}.svg", home, name),
-        format!("{}/.local/share/flatpak/exports/share/icons/hicolor/48x48/apps/{}.png", home, name),
-        format!("/var/lib/flatpak/exports/share/icons/hicolor/scalable/apps/{}.svg", name),
-        format!("/var/lib/flatpak/exports/share/icons/hicolor/48x48/apps/{}.png", name),
+        format!(
+            "{}/.local/share/flatpak/exports/share/icons/hicolor/scalable/apps/{}.svg",
+            home, name
+        ),
+        format!(
+            "{}/.local/share/flatpak/exports/share/icons/hicolor/48x48/apps/{}.png",
+            home, name
+        ),
+        format!(
+            "/var/lib/flatpak/exports/share/icons/hicolor/scalable/apps/{}.svg",
+            name
+        ),
+        format!(
+            "/var/lib/flatpak/exports/share/icons/hicolor/48x48/apps/{}.png",
+            name
+        ),
     ];
-    
+
     // Add common variations
-    paths.push(format!("/usr/share/icons/hicolor/48x48/apps/org.localsend.localsend_app.png"));
-    paths.push(format!("/usr/share/icons/hicolor/scalable/apps/org.localsend.localsend_app.svg"));
-    
+    paths.push("/usr/share/icons/hicolor/48x48/apps/org.localsend.localsend_app.png".to_string());
+    paths
+        .push("/usr/share/icons/hicolor/scalable/apps/org.localsend.localsend_app.svg".to_string());
+
     for p in paths {
         if std::path::Path::new(&p).exists() {
             return Some(Handle::from_path(p));

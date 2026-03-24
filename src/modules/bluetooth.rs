@@ -1,20 +1,38 @@
-use std::process::Command;
+use std::fs;
+use tracing::{error, info};
 
 pub fn get_bluetooth_info() -> bool {
-    let mut enabled = false;
-    if let Ok(output) = Command::new("rfkill").arg("list").arg("bluetooth").output() {
-        let out_str = String::from_utf8_lossy(&output.stdout);
-        if !out_str.contains("Soft blocked: yes") && !out_str.contains("Hard blocked: yes") && !out_str.is_empty() {
-            enabled = true;
+    if let Ok(entries) = fs::read_dir("/sys/class/rfkill") {
+        for entry in entries.flatten() {
+            if let Ok(rf_type) = fs::read_to_string(entry.path().join("type")) {
+                if rf_type.trim() == "bluetooth" {
+                    if let Ok(state) = fs::read_to_string(entry.path().join("state")) {
+                        return state.trim() == "1";
+                    }
+                }
+            }
         }
     }
-    enabled
+    false
 }
 
 pub fn toggle_bluetooth(enable: bool) {
-    if enable {
-        let _ = Command::new("rfkill").arg("unblock").arg("bluetooth").spawn();
-    } else {
-        let _ = Command::new("rfkill").arg("block").arg("bluetooth").spawn();
+    let state = if enable { "1" } else { "0" };
+    info!("Attempting to toggle bluetooth to state: {}", state);
+    if let Ok(entries) = fs::read_dir("/sys/class/rfkill") {
+        for entry in entries.flatten() {
+            if let Ok(rf_type) = fs::read_to_string(entry.path().join("type")) {
+                if rf_type.trim() == "bluetooth" {
+                    if let Err(e) = fs::write(entry.path().join("state"), state) {
+                        error!(
+                            "Failed to toggle bluetooth: {}. Ensure udev rules are applied.",
+                            e
+                        );
+                    } else {
+                        info!("Bluetooth state successfully changed to: {}", state);
+                    }
+                }
+            }
+        }
     }
 }

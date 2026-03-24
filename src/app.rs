@@ -1,5 +1,13 @@
-use iced::{widget::{button, container, text, Row, Column, slider, mouse_area, text_input, scrollable, stack, Space, image}, Element, Task, Theme, Color, Length, Alignment, Padding, window::Id};
 use chrono::Local;
+use iced::{
+    widget::{
+        button, container, image, mouse_area, scrollable, slider, stack, text, text_input, Column,
+        Row, Space,
+    },
+    window::Id,
+    Alignment, Color, Element, Length, Padding, Task, Theme,
+};
+use tracing::info;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Popup {
@@ -20,6 +28,8 @@ pub enum PowerAction {
 }
 
 pub struct ThinkPadBar {
+    config: crate::config::Config,
+    dbus_conn: Option<zbus::Connection>,
     workspaces: Vec<crate::modules::workspaces::WorkspaceInfo>,
     active_window: String,
     clock: String,
@@ -27,7 +37,7 @@ pub struct ThinkPadBar {
     audio: crate::modules::audio::AudioInfo,
     mic: crate::modules::mic::MicInfo,
     fan: crate::modules::fan::FanInfo,
-    battery: (u8, String),
+    battery: crate::modules::battery::BatteryInfo,
     power_profile: String,
     wifi: crate::modules::wifi::WifiInfo,
     show_wifi_menu: bool,
@@ -36,11 +46,15 @@ pub struct ThinkPadBar {
     available_networks: Vec<crate::modules::wifi::WifiNetwork>,
     wifi_password_input: String,
     wifi_selected_ssid: Option<String>,
+    wifi_connecting_ssid: Option<String>,
+    wifi_status_message: String,
     bluetooth: bool,
     popup: Popup,
     volume_level: u32,
     mic_volume_level: u32,
     brightness_level: u32,
+    battery_str: String,
+    audio_str: String,
     main_window_id: Option<Id>,
     popup_window_id: Option<Id>,
     sys_monitor: crate::modules::system::SysMonitor,
@@ -52,7 +66,15 @@ pub struct ThinkPadBar {
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick(chrono::DateTime<chrono::Local>),
+    TickBrightness(chrono::DateTime<chrono::Local>),
+    TickThermal(chrono::DateTime<chrono::Local>),
+    TickSlow(chrono::DateTime<chrono::Local>),
     UpdateWorkspaces,
+    WorkspacesUpdated(
+        Vec<crate::modules::workspaces::WorkspaceInfo>,
+        String,
+        String,
+    ),
     SwitchWorkspace(i32),
     TogglePopup(Popup),
     SetVolume(u32),
@@ -69,7 +91,6 @@ pub enum Message {
     WifiConnectResult(bool),
     ToggleWifi(bool),
     ToggleBluetooth(bool),
-    UpdateKeyboardLayout,
     NextKeyboardLayout,
     TogglePowerMenu,
     PowerAction(PowerAction),
@@ -79,47 +100,142 @@ pub enum Message {
     CalendarNextMonth,
     TrayMessage(crate::modules::tray::TrayMessage),
     TrayItemClicked(String),
+    AudioUpdated(crate::modules::audio::AudioInfo),
+    MicUpdated(crate::modules::mic::MicInfo),
+    BrightnessUpdated(String),
+    FanUpdated(crate::modules::fan::FanInfo),
+    BatteryUpdated(crate::modules::battery::BatteryInfo),
+    PowerProfileUpdated(String),
+    WifiUpdated(crate::modules::wifi::WifiInfo),
+    BluetoothUpdated(bool),
+    DBusConnected(zbus::Connection),
+    PopupWindowUnfocused(Id),
 }
 
 impl ThinkPadBar {
-    pub fn new() -> impl FnOnce() -> (Self, Task<Message>) {
+    fn trunc_with_ellipsis(input: &str, max_chars: usize) -> String {
+        let count = input.chars().count();
+        if count <= max_chars {
+            return input.to_string();
+        }
+        if max_chars <= 1 {
+            return "…".to_string();
+        }
+        let mut out: String = input.chars().take(max_chars - 1).collect();
+        out.push('…');
+        out
+    }
+
+    fn popup_size_for(&self, popup: Popup) -> (u32, u32) {
+        match popup {
+            Popup::None => (1, 1),
+            Popup::Calendar => (400, 420),
+            Popup::SystemMonitor => (400, 520),
+            Popup::ControlCenter => (420, 760),
+        }
+    }
+
+    fn popup_hide_tasks(&self) -> Vec<Task<Message>> {
+        use iced::platform_specific::shell::commands::layer_surface::{
+            set_keyboard_interactivity, set_layer, set_size, KeyboardInteractivity, Layer,
+        };
+
+        let mut tasks = Vec::new();
+        if let Some(pid) = self.popup_window_id {
+            tasks.push(set_layer(pid, Layer::Background));
+            tasks.push(set_keyboard_interactivity(pid, KeyboardInteractivity::None));
+            tasks.push(set_size(pid, Some(1), Some(1)));
+        }
+        tasks
+    }
+
+    fn popup_show_tasks(&self, popup: Popup) -> Vec<Task<Message>> {
+        use iced::platform_specific::shell::commands::layer_surface::{
+            set_keyboard_interactivity, set_layer, set_size, KeyboardInteractivity, Layer,
+        };
+
+        let mut tasks = Vec::new();
+        let (width, height) = self.popup_size_for(popup);
+        if let Some(pid) = self.popup_window_id {
+            tasks.push(set_layer(pid, Layer::Top));
+            tasks.push(set_keyboard_interactivity(
+                pid,
+                KeyboardInteractivity::OnDemand,
+            ));
+            tasks.push(set_size(pid, Some(width), Some(height)));
+        }
+        tasks
+    }
+
+    fn should_close_popup_on_unfocus(
+        popup_window_id: Option<Id>,
+        popup: &Popup,
+        unfocused_window: Id,
+    ) -> bool {
+        *popup != Popup::None && popup_window_id.is_some_and(|id| id == unfocused_window)
+    }
+
+    pub fn new(config: crate::config::Config) -> impl FnOnce() -> (Self, Task<Message>) {
+        let cfg = config.clone();
         move || {
             let main_id = Id::unique();
             let popup_id = Id::unique();
 
             use iced::platform_specific::shell::commands::layer_surface::{
-                Anchor, KeyboardInteractivity, Layer, get_layer_surface,
+                get_layer_surface, Anchor, KeyboardInteractivity, Layer,
             };
-            use iced::runtime::platform_specific::wayland::layer_surface::{SctkLayerSurfaceSettings, IcedMargin};
+            use iced::runtime::platform_specific::wayland::layer_surface::{
+                IcedMargin, SctkLayerSurfaceSettings,
+            };
+
+            let bar_h = cfg.appearance.bar_height;
 
             let main_task = get_layer_surface(SctkLayerSurfaceSettings {
                 id: main_id,
                 namespace: "thinkpadbar-main".to_string(),
-                size: Some((None, Some(32))),
+                size: Some((None, Some(bar_h))),
                 layer: Layer::Top,
                 keyboard_interactivity: KeyboardInteractivity::None,
-                exclusive_zone: 32,
+                exclusive_zone: bar_h as i32,
                 anchor: Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
-                margin: IcedMargin { top: 0, right: 4, bottom: 0, left: 4 },
+                margin: IcedMargin {
+                    top: 0,
+                    right: 4,
+                    bottom: 0,
+                    left: 4,
+                },
                 ..Default::default()
             });
 
             let popup_task = get_layer_surface(SctkLayerSurfaceSettings {
                 id: popup_id,
                 namespace: "thinkpadbar-popup".to_string(),
-                size: Some((None, Some(600))), 
+                // Keep popup surface effectively hidden until user opens a popup.
+                size: Some((Some(1), Some(1))),
                 layer: Layer::Background,
                 keyboard_interactivity: KeyboardInteractivity::None,
-                anchor: Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
-                margin: IcedMargin { top: 24, right: 0, bottom: 0, left: 0 },
+                anchor: Anchor::TOP | Anchor::RIGHT,
+                margin: IcedMargin {
+                    top: bar_h as i32,
+                    right: 8,
+                    bottom: 0,
+                    left: 0,
+                },
                 ..Default::default()
             });
 
             let mut monitor = crate::modules::system::SysMonitor::new();
-            let initial_sys_data = monitor.update();
+            let initial_sys_data = monitor.update(false);
+
+            // Try to connect to D-Bus synchronously for initialization if possible,
+            // or just let it be None and connect later.
+            // Since we are in a tokio-enabled FnOnce, we can't easily await here without block_on.
+            // But iced's run_with expects a Task.
 
             (
                 Self {
+                    config: cfg,
+                    dbus_conn: None, // Will be initialized on first tick or via Task
                     clock: Local::now().format("%a %d %b %H:%M").to_string(),
                     workspaces: crate::modules::workspaces::get_workspaces(),
                     active_window: crate::modules::workspaces::get_active_window_title(),
@@ -129,7 +245,10 @@ impl ThinkPadBar {
                     fan: crate::modules::fan::get_fan_info(),
                     battery: crate::modules::battery::get_battery_info(),
                     power_profile: crate::modules::power::get_profile(),
-                    wifi: crate::modules::wifi::get_wifi_info(),
+                    wifi: crate::modules::wifi::WifiInfo {
+                        enabled: false,
+                        ssid: "Loading...".to_string(),
+                    },
                     bluetooth: crate::modules::bluetooth::get_bluetooth_info(),
                     show_wifi_menu: false,
                     show_power_menu: false,
@@ -137,10 +256,14 @@ impl ThinkPadBar {
                     available_networks: Vec::new(),
                     wifi_password_input: String::new(),
                     wifi_selected_ssid: None,
+                    wifi_connecting_ssid: None,
+                    wifi_status_message: String::new(),
                     popup: Popup::None,
                     volume_level: 0,
                     mic_volume_level: 0,
                     brightness_level: 50,
+                    battery_str: String::new(),
+                    audio_str: String::new(),
                     main_window_id: Some(main_id),
                     popup_window_id: Some(popup_id),
                     sys_monitor: monitor,
@@ -169,135 +292,337 @@ impl ThinkPadBar {
         match message {
             Message::Tick(now) => {
                 self.clock = now.format("%a %d %b %H:%M").to_string();
-                self.brightness = crate::modules::brightness::get_brightness();
-                self.audio = crate::modules::audio::get_info();
-                self.mic = crate::modules::mic::get_info();
-                self.volume_level = self.audio.volume;
-                self.mic_volume_level = self.mic.volume;
-                self.fan = crate::modules::fan::get_fan_info();
-                self.battery = crate::modules::battery::get_battery_info();
-                self.power_profile = crate::modules::power::get_profile();
-                self.wifi = crate::modules::wifi::get_wifi_info();
-                self.bluetooth = crate::modules::bluetooth::get_bluetooth_info();
-                self.keyboard_layout = crate::modules::keyboard::get_layout();
-                self.sys_data = self.sys_monitor.update();
-                
-                // No longer need complex string parsing
+                self.sys_data = self.sys_monitor.update(true);
+                return Task::batch(vec![
+                    Task::perform(
+                        async { crate::modules::audio::get_info() },
+                        Message::AudioUpdated,
+                    ),
+                    Task::perform(
+                        async { crate::modules::mic::get_info() },
+                        Message::MicUpdated,
+                    ),
+                ]);
+            }
+            Message::TickBrightness(_now) => {
+                return Task::perform(
+                    async { crate::modules::brightness::get_brightness() },
+                    Message::BrightnessUpdated,
+                );
+            }
+            Message::TickThermal(_now) => {
+                if let Some(temp) = crate::modules::system::read_temperature_celsius() {
+                    self.sys_data.temp = temp;
+                    self.sys_data.temp_str = format!("{}°C", temp.round() as u64);
+                }
+                return Task::perform(
+                    async { crate::modules::fan::get_fan_info() },
+                    Message::FanUpdated,
+                );
+            }
+            Message::TickSlow(_now) => {
+                self.sys_data = self.sys_monitor.update(false);
+
+                let mut tasks = vec![
+                    Task::perform(
+                        async { crate::modules::brightness::get_brightness() },
+                        Message::BrightnessUpdated,
+                    ),
+                    Task::perform(
+                        async { crate::modules::battery::get_battery_info() },
+                        Message::BatteryUpdated,
+                    ),
+                    Task::perform(
+                        async { crate::modules::power::get_profile() },
+                        Message::PowerProfileUpdated,
+                    ),
+                    Task::perform(
+                        async { crate::modules::bluetooth::get_bluetooth_info() },
+                        Message::BluetoothUpdated,
+                    ),
+                ];
+
+                if let Some(conn) = &self.dbus_conn {
+                    let conn = conn.clone();
+                    let a_path = self.config.network.adapter_path.clone();
+                    let s_path = self.config.network.station_path.clone();
+                    tasks.push(Task::perform(
+                        async move {
+                            crate::modules::wifi::get_wifi_info(&conn, &a_path, &s_path).await
+                        },
+                        Message::WifiUpdated,
+                    ));
+                } else {
+                    tasks.push(Task::perform(
+                        async { zbus::Connection::system().await },
+                        |res| {
+                            match res {
+                                Ok(conn) => Message::DBusConnected(conn),
+                                Err(_) => Message::TickSlow(chrono::Local::now()), // Retry
+                            }
+                        },
+                    ));
+                }
+
+                return Task::batch(tasks);
+            }
+            Message::DBusConnected(conn) => {
+                info!("Successfully connected to system D-Bus");
+                self.dbus_conn = Some(conn);
+                return Task::perform(async { chrono::Local::now() }, Message::TickSlow);
+            }
+            Message::PopupWindowUnfocused(window_id) => {
+                if Self::should_close_popup_on_unfocus(self.popup_window_id, &self.popup, window_id)
+                {
+                    self.popup = Popup::None;
+                    self.show_wifi_menu = false;
+                    self.show_power_menu = false;
+                    self.wifi_selected_ssid = None;
+                    self.calendar_offset = 0;
+                    return Task::batch(self.popup_hide_tasks());
+                }
             }
             Message::UpdateWorkspaces => {
-                self.workspaces = crate::modules::workspaces::get_workspaces();
-                self.active_window = crate::modules::workspaces::get_active_window_title();
+                return Task::batch(vec![
+                    Task::perform(
+                        async {
+                            let ws = crate::modules::workspaces::get_workspaces();
+                            let title = crate::modules::workspaces::get_active_window_title();
+                            let layout = crate::modules::keyboard::get_layout();
+                            (ws, title, layout)
+                        },
+                        |(ws, title, layout)| Message::WorkspacesUpdated(ws, title, layout),
+                    ),
+                    Task::perform(
+                        async { crate::modules::audio::get_info() },
+                        Message::AudioUpdated,
+                    ),
+                    Task::perform(
+                        async { crate::modules::mic::get_info() },
+                        Message::MicUpdated,
+                    ),
+                ]);
+            }
+            Message::WorkspacesUpdated(workspaces, title, layout) => {
+                let prev_title = self.active_window.clone();
+                self.workspaces = workspaces;
+                self.active_window = title;
+                self.keyboard_layout = layout;
+                if self.popup != Popup::None && self.active_window != prev_title {
+                    self.popup = Popup::None;
+                    self.show_wifi_menu = false;
+                    self.show_power_menu = false;
+                    self.wifi_selected_ssid = None;
+                    self.calendar_offset = 0;
+                    return Task::batch(self.popup_hide_tasks());
+                }
             }
             Message::SwitchWorkspace(w_id) => {
-                crate::modules::workspaces::switch_workspace(w_id);
                 for ws in &mut self.workspaces {
                     ws.active = ws.id == w_id;
                 }
+                return Task::perform(
+                    async move { crate::modules::workspaces::switch_workspace(w_id) },
+                    |_| Message::UpdateWorkspaces,
+                );
             }
             Message::TogglePopup(target) => {
-                use iced::platform_specific::shell::commands::layer_surface::{set_layer, set_keyboard_interactivity, Layer, KeyboardInteractivity};
+                let mut tasks = Vec::new();
+
+                // Refresh audio when opening ControlCenter
+                if target == Popup::ControlCenter && self.popup != target {
+                    tasks.push(Task::perform(
+                        async { crate::modules::audio::get_info() },
+                        Message::AudioUpdated,
+                    ));
+                    tasks.push(Task::perform(
+                        async { crate::modules::mic::get_info() },
+                        Message::MicUpdated,
+                    ));
+                }
+
                 if self.popup == target {
                     self.popup = Popup::None;
                     if target == Popup::Calendar {
                         self.calendar_offset = 0;
                     }
-                    if let Some(pid) = self.popup_window_id {
-                        return Task::batch(vec![
-                            set_layer(pid, Layer::Background),
-                            set_keyboard_interactivity(pid, KeyboardInteractivity::None),
-                        ]);
-                    }
+                    tasks.extend(self.popup_hide_tasks());
                 } else {
                     let is_calendar = target == Popup::Calendar;
-                    self.popup = target;
+                    self.popup = target.clone();
                     if is_calendar {
                         self.calendar_offset = 0;
                     }
-                    if let Some(pid) = self.popup_window_id {
-                        return Task::batch(vec![
-                            set_layer(pid, Layer::Top),
-                            set_keyboard_interactivity(pid, KeyboardInteractivity::OnDemand),
-                        ]);
-                    }
+                    tasks.extend(self.popup_show_tasks(target));
                 }
+                return Task::batch(tasks);
             }
             Message::SetVolume(val) => {
                 self.volume_level = val;
-                crate::modules::audio::set_volume(val);
                 self.audio.volume = val;
+                return Task::perform(
+                    async move { crate::modules::audio::set_volume(val) },
+                    |_| Message::Tick(chrono::Local::now()),
+                );
             }
             Message::ToggleAudioMute => {
-                crate::modules::audio::toggle_mute();
-                self.audio = crate::modules::audio::get_info();
+                return Task::perform(async { crate::modules::audio::toggle_mute() }, |_| {
+                    Message::Tick(chrono::Local::now())
+                });
             }
             Message::SetMicVolume(val) => {
                 self.mic_volume_level = val;
-                crate::modules::mic::set_volume(val);
                 self.mic.volume = val;
+                return Task::perform(async move { crate::modules::mic::set_volume(val) }, |_| {
+                    Message::Tick(chrono::Local::now())
+                });
             }
             Message::ToggleMicMute => {
-                crate::modules::mic::toggle_mute();
-                self.mic = crate::modules::mic::get_info();
+                return Task::perform(async { crate::modules::mic::toggle_mute() }, |_| {
+                    Message::Tick(chrono::Local::now())
+                });
             }
             Message::SetBrightness(val) => {
                 self.brightness_level = val;
-                crate::modules::brightness::set_brightness(val);
-                self.brightness = format!("󰃠  {}%", val);
+                self.brightness = format!("{}%", val);
+                return Task::perform(
+                    async move { crate::modules::brightness::set_brightness(val) },
+                    |_| Message::TickSlow(chrono::Local::now()),
+                );
             }
             Message::SetFanLevel(level) => {
-                crate::modules::fan::set_fan_level(&level);
-                self.fan.level = level;
+                self.fan.level = level.clone();
+                return Task::perform(
+                    async move { crate::modules::fan::set_fan_level(&level) },
+                    |_| Message::TickSlow(chrono::Local::now()),
+                );
             }
             Message::SetPowerProfile(prof) => {
-                crate::modules::power::set_profile(&prof);
-                self.power_profile = prof;
+                self.power_profile = prof.clone();
+                return Task::perform(
+                    async move { crate::modules::power::set_profile(&prof).await },
+                    |_| Message::TickSlow(chrono::Local::now()),
+                );
             }
             Message::ToggleWifiMenu => {
                 self.show_wifi_menu = !self.show_wifi_menu;
                 if self.show_wifi_menu {
-                    return Task::perform(crate::modules::wifi::scan_networks(), Message::NetworksScanned);
+                    if let Some(conn) = &self.dbus_conn {
+                        self.wifi_status_message = "Сканирование сетей...".to_string();
+                        self.available_networks.clear();
+                        let conn = conn.clone();
+                        let s_path = self.config.network.station_path.clone();
+                        return Task::perform(
+                            async move { crate::modules::wifi::scan_networks(&conn, &s_path).await },
+                            Message::NetworksScanned,
+                        );
+                    }
+                    self.wifi_status_message =
+                        "D-Bus недоступен: не удалось открыть system bus".to_string();
                 }
             }
             Message::NetworksScanned(networks) => {
                 self.available_networks = networks;
+                if self.available_networks.is_empty() {
+                    self.wifi_status_message =
+                        "Сети не найдены или сканирование недоступно".to_string();
+                } else {
+                    self.wifi_status_message =
+                        format!("Найдено сетей: {}", self.available_networks.len());
+                }
             }
             Message::SelectWifiNetwork(ssid, sec) => {
                 if sec == "open" {
-                    return Task::perform(crate::modules::wifi::connect_network(ssid, None), Message::WifiConnectResult);
+                    if let Some(conn) = &self.dbus_conn {
+                        self.wifi_connecting_ssid = Some(ssid.clone());
+                        self.wifi_status_message = format!("Подключение к {}...", ssid);
+                        let conn = conn.clone();
+                        let s_path = self.config.network.station_path.clone();
+                        return Task::perform(
+                            async move {
+                                crate::modules::wifi::connect_network(&conn, &s_path, ssid, None)
+                                    .await
+                            },
+                            Message::WifiConnectResult,
+                        );
+                    }
+                    self.wifi_status_message =
+                        "D-Bus недоступен: подключение невозможно".to_string();
                 } else {
                     self.wifi_selected_ssid = Some(ssid);
                     self.wifi_password_input = String::new();
+                    self.wifi_status_message = "Введите пароль и нажмите Connect".to_string();
                 }
             }
             Message::WifiPasswordChanged(val) => {
                 self.wifi_password_input = val;
             }
             Message::SubmitWifiPassword => {
-                if let Some(ssid) = self.wifi_selected_ssid.clone() {
+                if let (Some(ssid), Some(conn)) = (self.wifi_selected_ssid.clone(), &self.dbus_conn)
+                {
+                    self.wifi_connecting_ssid = Some(ssid.clone());
+                    self.wifi_status_message = format!("Подключение к {}...", ssid);
+                    let conn = conn.clone();
                     let pass = self.wifi_password_input.clone();
                     self.wifi_selected_ssid = None;
                     self.show_wifi_menu = false;
-                    return Task::perform(crate::modules::wifi::connect_network(ssid, Some(pass)), Message::WifiConnectResult);
+                    let s_path = self.config.network.station_path.clone();
+                    return Task::perform(
+                        async move {
+                            crate::modules::wifi::connect_network(&conn, &s_path, ssid, Some(pass))
+                                .await
+                        },
+                        Message::WifiConnectResult,
+                    );
                 }
+                self.wifi_status_message = "D-Bus недоступен: подключение невозможно".to_string();
             }
             Message::CancelWifiPassword => {
                 self.wifi_selected_ssid = None;
+                self.wifi_status_message = "Подключение отменено".to_string();
             }
-            Message::WifiConnectResult(_success) => {}
+            Message::WifiConnectResult(success) => {
+                let ssid = self
+                    .wifi_connecting_ssid
+                    .take()
+                    .unwrap_or_else(|| "выбранной сети".to_string());
+                if success {
+                    self.wifi_status_message = format!("Подключено: {}", ssid);
+                } else {
+                    self.wifi_status_message = format!("Не удалось подключиться к {}", ssid);
+                }
+            }
             Message::ToggleWifi(enable) => {
-                crate::modules::wifi::toggle_wifi(enable);
-                self.wifi.enabled = enable;
+                if let Some(conn) = &self.dbus_conn {
+                    let conn = conn.clone();
+                    let a_path = self.config.network.adapter_path.clone();
+                    let s_path = self.config.network.station_path.clone();
+                    self.wifi_status_message = if enable {
+                        "Включение Wi-Fi...".to_string()
+                    } else {
+                        "Отключение Wi-Fi...".to_string()
+                    };
+                    self.wifi.enabled = enable;
+                    return Task::perform(
+                        async move {
+                            crate::modules::wifi::toggle_wifi(&conn, &a_path, &s_path, enable).await
+                        },
+                        |_| Message::TickSlow(chrono::Local::now()),
+                    );
+                }
+                self.wifi_status_message = "D-Bus недоступен: переключение невозможно".to_string();
             }
             Message::ToggleBluetooth(enable) => {
-                crate::modules::bluetooth::toggle_bluetooth(enable);
                 self.bluetooth = enable;
-            }
-            Message::UpdateKeyboardLayout => {
-                self.keyboard_layout = crate::modules::keyboard::get_layout();
+                return Task::perform(
+                    async move { crate::modules::bluetooth::toggle_bluetooth(enable) },
+                    |_| Message::TickSlow(chrono::Local::now()),
+                );
             }
             Message::NextKeyboardLayout => {
-                crate::modules::keyboard::next_layout();
-                self.keyboard_layout = crate::modules::keyboard::get_layout();
+                return Task::perform(async { crate::modules::keyboard::next_layout() }, |_| {
+                    Message::UpdateWorkspaces
+                });
             }
             Message::TogglePowerMenu => {
                 self.show_power_menu = !self.show_power_menu;
@@ -318,23 +643,83 @@ impl ThinkPadBar {
                     PowerAction::Logout => "hyprctl dispatch exit",
                 };
                 let mut args = cmd.split_whitespace();
-                let bin = args.next().unwrap();
-                let _ = std::process::Command::new(bin).args(args).spawn();
-                self.popup = Popup::None; // Close after action if didn't quit app
+                let Some(bin) = args.next().map(|s| s.to_string()) else {
+                    return Task::none();
+                };
+                let args_vec: Vec<String> = args.map(|s| s.to_string()).collect();
+
+                self.popup = Popup::None;
+                let mut tasks = self.popup_hide_tasks();
+                tasks.push(Task::perform(
+                    async move {
+                        let _ = std::process::Command::new(bin).args(args_vec).spawn();
+                    },
+                    |_| Message::UpdateWorkspaces,
+                ));
+                return Task::batch(tasks);
             }
             Message::TrayMessage(msg) => {
                 self.tray.update(msg);
             }
             Message::TrayItemClicked(id) => {
                 if let Some(item) = self.tray.items.get(&id) {
-                    let name = item.title.clone()
+                    let name = item
+                        .title
+                        .clone()
                         .or_else(|| item.icon_name.clone())
-                        .or_else(|| id.split('.').last().map(|s| s.to_string()))
+                        .or_else(|| id.split('.').next_back().map(|s| s.to_string()))
                         .unwrap_or_default();
-                    
-                    self.tray.update(crate::modules::tray::TrayMessage::ActivateItem(id));
-                    return Task::perform(crate::modules::workspaces::find_and_switch_to_app(name), |_| Message::UpdateWorkspaces);
+
+                    self.tray
+                        .update(crate::modules::tray::TrayMessage::ActivateItem(id));
+                    return Task::perform(
+                        crate::modules::workspaces::find_and_switch_to_app(name),
+                        |_| Message::UpdateWorkspaces,
+                    );
                 }
+            }
+            Message::AudioUpdated(info) => {
+                self.audio = info;
+                self.volume_level = self.audio.volume;
+                let audio_icon = if self.audio.muted { "󰝟" } else { "" };
+                self.audio_str = format!("{} {}%", audio_icon, self.audio.volume);
+            }
+            Message::MicUpdated(info) => {
+                self.mic = info.clone();
+                self.mic_volume_level = self.mic.volume;
+                crate::modules::mic::update_led(info.muted);
+            }
+            Message::BrightnessUpdated(val) => {
+                self.brightness = val.clone();
+                if let Ok(parsed) = val.trim_end_matches('%').parse::<u32>() {
+                    self.brightness_level = parsed.clamp(1, 100);
+                }
+            }
+            Message::FanUpdated(info) => {
+                self.fan = info;
+            }
+            Message::BatteryUpdated(info) => {
+                self.battery = info;
+                self.battery_str = format!("{}%", self.battery.capacity);
+            }
+            Message::PowerProfileUpdated(prof) => {
+                self.power_profile = prof;
+            }
+            Message::WifiUpdated(info) => {
+                self.wifi = info;
+                if self.wifi.enabled {
+                    let ssid = self.wifi.ssid.trim();
+                    if ssid.is_empty() || ssid == "Disconnected" || ssid == "Loading..." {
+                        self.wifi_status_message = "Wi-Fi включен, сеть не определена".to_string();
+                    } else {
+                        self.wifi_status_message = format!("Wi-Fi: {}", ssid);
+                    }
+                } else {
+                    self.wifi_status_message = "Wi-Fi выключен".to_string();
+                }
+            }
+            Message::BluetoothUpdated(val) => {
+                self.bluetooth = val;
             }
         }
         Task::none()
@@ -345,20 +730,9 @@ impl ThinkPadBar {
             self.view_main_bar()
         } else if Some(id) == self.popup_window_id {
             if self.popup == Popup::None {
-                iced::widget::Space::new(Length::Fill, Length::Fixed(450.0)).into()
+                iced::widget::Space::new(0, 0).into()
             } else {
-                let popup_layer = container(self.view_popup())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .padding(Padding::from([0, 16]))
-                    .align_x(match self.popup {
-                        Popup::SystemMonitor => iced::alignment::Horizontal::Center,
-                        _ => iced::alignment::Horizontal::Right,
-                    });
-                
-                mouse_area(popup_layer)
-                    .on_press(Message::TogglePopup(Popup::None))
-                    .into()
+                self.view_popup()
             }
         } else {
             Row::new().into()
@@ -371,23 +745,35 @@ impl ThinkPadBar {
         for ws in &self.workspaces {
             let ws_id = ws.id;
             let is_active = ws.active;
-            
+
             let btn = button(text(ws.name.clone()).size(12))
                 .padding(Padding::from([1, 6]))
                 .on_press(Message::SwitchWorkspace(ws_id))
                 .style(move |_, _| {
                     if is_active {
                         iced::widget::button::Style {
-                            background: Some(iced::Background::Color(Color { a: 0.85, ..Color::from_rgb8(0x7a, 0xa2, 0xf7) })), // Tokyo Night Blue
+                            background: Some(iced::Background::Color(Color {
+                                a: self.config.appearance.opacity,
+                                ..Color::from_rgb8(0x7a, 0xa2, 0xf7)
+                            })), // Tokyo Night Blue
                             text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                            border: iced::Border { radius: 8.0.into(), ..Default::default() },
+                            border: iced::Border {
+                                radius: 8.0.into(),
+                                ..Default::default()
+                            },
                             ..Default::default()
                         }
                     } else {
                         iced::widget::button::Style {
-                            background: Some(iced::Background::Color(Color { a: 0.85, ..Color::from_rgb8(0x29, 0x2e, 0x42) })),
+                            background: Some(iced::Background::Color(Color {
+                                a: self.config.appearance.opacity,
+                                ..Color::from_rgb8(0x29, 0x2e, 0x42)
+                            })),
                             text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                            border: iced::Border { radius: 8.0.into(), ..Default::default() },
+                            border: iced::Border {
+                                radius: 8.0.into(),
+                                ..Default::default()
+                            },
                             ..Default::default()
                         }
                     }
@@ -402,8 +788,9 @@ impl ThinkPadBar {
                     mouse_area(
                         image(handle.clone())
                             .width(Length::Fixed(16.0))
-                            .height(Length::Fixed(16.0))
-                    ).on_press(Message::TrayItemClicked(id_clone))
+                            .height(Length::Fixed(16.0)),
+                    )
+                    .on_press(Message::TrayItemClicked(id_clone)),
                 );
             } else if let Some(name) = &item.icon_name {
                 tray_row = tray_row.push(
@@ -411,8 +798,9 @@ impl ThinkPadBar {
                         container(text(name.chars().next().unwrap_or('?').to_string()).size(14))
                             .width(Length::Fixed(16.0))
                             .height(Length::Fixed(16.0))
-                            .align_x(iced::alignment::Horizontal::Center)
-                    ).on_press(Message::TrayItemClicked(id_clone))
+                            .align_x(iced::alignment::Horizontal::Center),
+                    )
+                    .on_press(Message::TrayItemClicked(id_clone)),
                 );
             } else {
                 tray_row = tray_row.push(
@@ -420,41 +808,55 @@ impl ThinkPadBar {
                         container(text("?").size(14))
                             .width(Length::Fixed(16.0))
                             .height(Length::Fixed(16.0))
-                            .align_x(iced::alignment::Horizontal::Center)
-                    ).on_press(Message::TrayItemClicked(id_clone))
+                            .align_x(iced::alignment::Horizontal::Center),
+                    )
+                    .on_press(Message::TrayItemClicked(id_clone)),
                 );
             }
         }
 
-        let left = Row::new().spacing(12).align_y(Alignment::Center)
+        let left = Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
             .push(container(ws_row).width(Length::Fixed(280.0)));
 
         // Center: Active Window Title
+        let center_title = Self::trunc_with_ellipsis(self.active_window.as_str(), 34);
         let center = container(
             container(
-                text(&self.active_window)
+                text(center_title)
                     .size(11)
-                    .style(|_| iced::widget::text::Style { color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)) })
+                    .style(|_| iced::widget::text::Style {
+                        color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                    }),
             )
             .padding(Padding::from([2, 12]))
             .style(move |_| container::Style {
-                background: Some(iced::Background::Color(Color { a: 0.85, ..Color::from_rgb8(0x29, 0x2e, 0x42) })),
-                border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                background: Some(iced::Background::Color(Color {
+                    a: self.config.appearance.opacity,
+                    ..Color::from_rgb8(0x29, 0x2e, 0x42)
+                })),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
-            })
-        ).width(Length::Shrink);
+            }),
+        )
+        .width(Length::Shrink);
 
         // Right side: Pills
-        let pill_bg = Color { a: 0.85, ..Color::from_rgb8(0x29, 0x2e, 0x42) };
+        let pill_bg = Color {
+            a: self.config.appearance.opacity,
+            ..Color::from_rgb8(0x29, 0x2e, 0x42)
+        };
         let pill_fg = Color::from_rgb8(0xc0, 0xca, 0xf5);
         let pill_border_radius = 12.0;
 
-        let cpu_str = format!("{}%", self.sys_data.cpu_usage.round() as u64);
-        let mem_str = if self.sys_data.mem_total > 0 { 
-            format!("{}%", (self.sys_data.mem_used as f64 / self.sys_data.mem_total as f64 * 100.0).round() as u64) 
-        } else { "0%".to_string() };
+        let cpu_str = &self.sys_data.cpu_str;
+        let mem_str = &self.sys_data.mem_str;
+        let temp_str = &self.sys_data.temp_str;
         let temp_val = self.sys_data.temp.round() as i32;
-        let temp_str = format!("{}°C", temp_val);
         let temp_color = if temp_val >= 80 {
             Color::from_rgb8(0xf7, 0x76, 0x8e) // Red
         } else if temp_val >= 60 {
@@ -465,116 +867,214 @@ impl ThinkPadBar {
 
         // 1. System Pill
         let sys_pill = container(
-            Row::new().spacing(4).align_y(Alignment::Center)
+            Row::new()
+                .spacing(4)
+                .align_y(Alignment::Center)
                 .push(text("󰍹").size(14))
                 .push(text(cpu_str).size(14))
                 .push(iced::widget::Space::with_width(4))
                 .push(text("󰘚").size(14))
                 .push(text(mem_str).size(14))
                 .push(iced::widget::Space::with_width(4))
-                .push(text("").size(14).style(move |_| iced::widget::text::Style { color: Some(temp_color) }))
-                .push(text(temp_str).size(14).style(move |_| iced::widget::text::Style { color: Some(temp_color) }))
+                .push(
+                    text("")
+                        .size(14)
+                        .style(move |_| iced::widget::text::Style {
+                            color: Some(temp_color),
+                        }),
+                )
+                .push(
+                    text(temp_str)
+                        .size(14)
+                        .style(move |_| iced::widget::text::Style {
+                            color: Some(temp_color),
+                        }),
+                ),
         )
         .padding(Padding::from([4, 12]))
         .style(move |_| container::Style {
             background: Some(iced::Background::Color(pill_bg)),
             text_color: Some(pill_fg),
-            border: iced::Border { radius: pill_border_radius.into(), ..Default::default() },
+            border: iced::Border {
+                radius: pill_border_radius.into(),
+                ..Default::default()
+            },
             ..Default::default()
         });
 
-        let mic_icon = if self.mic.muted || self.mic.volume == 0 { "󰍭" } else { "" };
-        let audio_icon = if self.audio.muted { "󰝟" } else { "" };
+        let mic_icon = if self.mic.muted || self.mic.volume == 0 {
+            "󰍭"
+        } else {
+            ""
+        };
         let wifi_icon = if self.wifi.enabled { "󰖩" } else { "󰖪" };
         let bt_icon = if self.bluetooth { "󰂯" } else { "󰂲" };
-        let (bat_cap, bat_status) = &self.battery;
-        let bat_icon = if bat_status.contains("Charging") { "󰂄" } else { "󰁹" };
+
+        let bat_cap = self.battery.capacity;
+        let bat_status = &self.battery.status;
+
+        let (bat_icon, bat_color) = if bat_status.contains("Charging") {
+            ("󰂄", Color::from_rgb8(0x9e, 0xce, 0x6a)) // Green
+        } else if bat_status.contains("Full") || bat_status.contains("Not charging") {
+            ("", pill_fg) // Plug icon, default color
+        } else {
+            // Discharging
+            let icon = if bat_cap >= 90 {
+                "󰁹"
+            } else if bat_cap >= 80 {
+                "󰂂"
+            } else if bat_cap >= 70 {
+                "󰂁"
+            } else if bat_cap >= 60 {
+                "󰂀"
+            } else if bat_cap >= 50 {
+                "󰁿"
+            } else if bat_cap >= 40 {
+                "󰁾"
+            } else if bat_cap >= 30 {
+                "󰁽"
+            } else if bat_cap >= 20 {
+                "󰁼"
+            } else if bat_cap >= 10 {
+                "󰁻"
+            } else {
+                "󰁺"
+            };
+
+            let color = if bat_cap <= 10 {
+                Color::from_rgb8(0xf7, 0x76, 0x8e) // Red
+            } else if bat_cap <= 20 {
+                Color::from_rgb8(0xe0, 0xaf, 0x68) // Yellow
+            } else {
+                pill_fg
+            };
+            (icon, color)
+        };
 
         let combined_pill = container(
-            Row::new().spacing(6).align_y(Alignment::Center)
+            Row::new()
+                .spacing(6)
+                .align_y(Alignment::Center)
                 .push(text(wifi_icon).size(14))
                 .push(text(bt_icon).size(14))
-                .push(text(bat_icon).size(14))
-                .push(text(format!("{}%", bat_cap)).size(14))
+                .push(
+                    text(bat_icon)
+                        .size(14)
+                        .style(move |_| iced::widget::text::Style {
+                            color: Some(bat_color),
+                        }),
+                )
+                .push(text(self.battery_str.as_str()).size(14).style(move |_| {
+                    iced::widget::text::Style {
+                        color: Some(bat_color),
+                    }
+                })),
         )
         .padding(Padding::from([4, 12]))
         .style(move |_| container::Style {
             background: Some(iced::Background::Color(pill_bg)),
             text_color: Some(pill_fg),
-            border: iced::Border { radius: pill_border_radius.into(), ..Default::default() },
+            border: iced::Border {
+                radius: pill_border_radius.into(),
+                ..Default::default()
+            },
             ..Default::default()
         });
 
         // 3. Hardware Pill (Brightness, Audio/Mic, and Fan)
         let hw_pill = container(
-            Row::new().spacing(10).align_y(Alignment::Center)
-                .push(text(&self.brightness).size(14))
+            Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
                 .push(
-                    Row::new().spacing(4).align_y(Alignment::Center)
-                        .push(text(mic_icon).size(14))
-                        .push(text(format!("{} {}%", audio_icon, self.audio.volume)).size(14))
+                    Row::new()
+                        .spacing(4)
+                        .align_y(Alignment::Center)
+                        .push(text("󰃠").size(14))
+                        .push(text(self.brightness.as_str()).size(14)),
                 )
-                .push(text(format!(" {}", self.fan.speed)).size(14))
+                .push(
+                    Row::new()
+                        .spacing(4)
+                        .align_y(Alignment::Center)
+                        .push(text(mic_icon).size(14))
+                        .push(text(self.audio_str.as_str()).size(14)),
+                )
+                .push(text(format!(" {}", self.fan.speed)).size(14)),
         )
         .padding(Padding::from([4, 12]))
         .style(move |_| container::Style {
             background: Some(iced::Background::Color(pill_bg)),
             text_color: Some(pill_fg),
-            border: iced::Border { radius: pill_border_radius.into(), ..Default::default() },
+            border: iced::Border {
+                radius: pill_border_radius.into(),
+                ..Default::default()
+            },
             ..Default::default()
         });
 
         // 4. Keyboard Layout Pill
-        let kbd_pill = container(
-            text(&self.keyboard_layout).size(14)
-        )
-        .padding(Padding::from([4, 12]))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(pill_bg)),
-            text_color: Some(pill_fg),
-            border: iced::Border { radius: pill_border_radius.into(), ..Default::default() },
-            ..Default::default()
-        });
+        let kbd_pill = container(text(self.keyboard_layout.as_str()).size(14))
+            .padding(Padding::from([4, 12]))
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(pill_bg)),
+                text_color: Some(pill_fg),
+                border: iced::Border {
+                    radius: pill_border_radius.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
 
         // 5. Clock Pill
-        let clock_pill = container(
-            text(&self.clock).size(14)
-        )
-        .padding(Padding::from([4, 12]))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(pill_bg)),
-            text_color: Some(pill_fg),
-            border: iced::Border { radius: pill_border_radius.into(), ..Default::default() },
-            ..Default::default()
-        });
+        let clock_pill = container(text(self.clock.as_str()).size(14))
+            .padding(Padding::from([4, 12]))
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(pill_bg)),
+                text_color: Some(pill_fg),
+                border: iced::Border {
+                    radius: pill_border_radius.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
 
         let right = container(
-            Row::new().spacing(4).align_y(Alignment::Center)
+            Row::new()
+                .spacing(4)
+                .align_y(Alignment::Center)
                 .push(tray_row)
                 .push(mouse_area(sys_pill).on_press(Message::TogglePopup(Popup::SystemMonitor)))
                 .push(mouse_area(hw_pill).on_press(Message::TogglePopup(Popup::ControlCenter)))
-                .push(mouse_area(combined_pill).on_press(Message::TogglePopup(Popup::ControlCenter)))
-                .push(mouse_area(kbd_pill).on_press(Message::NextKeyboardLayout))
-                .push(mouse_area(clock_pill).on_press(Message::TogglePopup(Popup::Calendar)))
-        ).width(Length::Shrink);
-
-        container(
-            stack![
-                container(
-                    Row::new()
-                        .push(left)
-                        .push(Space::with_width(Length::Fill))
-                        .push(right)
+                .push(
+                    mouse_area(combined_pill).on_press(Message::TogglePopup(Popup::ControlCenter)),
                 )
-                .width(Length::Fill),
-                container(center)
-                    .width(Length::Fill)
-                    .align_x(iced::alignment::Horizontal::Center)
-                    .align_y(iced::alignment::Vertical::Center)
-            ]
+                .push(mouse_area(kbd_pill).on_press(Message::NextKeyboardLayout))
+                .push(mouse_area(clock_pill).on_press(Message::TogglePopup(Popup::Calendar))),
         )
+        .width(Length::Shrink);
+
+        let center_overlay = container(center)
+            .width(Length::Fixed(340.0))
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center);
+
+        container(stack![
+            container(
+                Row::new()
+                    .align_y(Alignment::Center)
+                    .push(left)
+                    .push(Space::with_width(Length::Fill))
+                    .push(right)
+            )
+            .width(Length::Fill),
+            container(center_overlay)
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Center)
+        ])
         .width(Length::Fill)
-        .height(Length::Fixed(24.0))
+        .height(Length::Fixed(self.config.appearance.bar_height as f32))
         .style(|_| container::Style {
             background: Some(iced::Background::Color(Color::TRANSPARENT)),
             ..Default::default()
@@ -585,12 +1085,12 @@ impl ThinkPadBar {
     fn view_popup(&self) -> Element<'_, Message, Theme, iced::Renderer> {
         if self.popup == Popup::Calendar {
             let now = chrono::Local::now();
-            
+
             // Calculate displayed month/year based on offset
             use chrono::{Datelike, TimeZone};
             let mut display_month = now.month() as i32 + self.calendar_offset;
             let mut display_year = now.year();
-            
+
             while display_month > 12 {
                 display_month -= 12;
                 display_year += 1;
@@ -599,44 +1099,84 @@ impl ThinkPadBar {
                 display_month += 12;
                 display_year -= 1;
             }
-            
-            let display_date = chrono::Local.with_ymd_and_hms(display_year, display_month as u32, 1, 0, 0, 0).unwrap();
+
+            let Some(display_date) = chrono::Local
+                .with_ymd_and_hms(display_year, display_month as u32, 1, 0, 0, 0)
+                .single()
+            else {
+                return container(Space::with_width(Length::Shrink)).into();
+            };
             let month_name = display_date.format("%B %Y").to_string();
-            
-            let current_day = if display_year == now.year() && display_month as u32 == now.month() { Some(now.day()) } else { None };
-            
+
+            let current_day = if display_year == now.year() && display_month as u32 == now.month() {
+                Some(now.day())
+            } else {
+                None
+            };
+
             // Calculate first day of month and days in month
             let weekday_offset = (display_date.weekday().number_from_monday() - 1) as usize;
-            
+
             let days_in_month = match display_date.month() {
                 1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
                 4 | 6 | 9 | 11 => 30,
-                2 => if display_date.year() % 4 == 0 && (display_date.year() % 100 != 0 || display_date.year() % 400 == 0) { 29 } else { 28 },
+                2 => {
+                    if display_date.year() % 4 == 0
+                        && (display_date.year() % 100 != 0 || display_date.year() % 400 == 0)
+                    {
+                        29
+                    } else {
+                        28
+                    }
+                }
                 _ => 30,
             };
 
-            let title_row = Row::new().spacing(10).align_y(Alignment::Center)
-                .push(button(text("󰅀").size(20)).on_press(Message::CalendarPrevMonth).style(|_, _| button::Style { text_color: Color::from_rgb8(0x7a, 0xa2, 0xf7), ..Default::default() }))
-                .push(text(month_name).size(18).width(Length::Fill).align_x(iced::alignment::Horizontal::Center))
-                .push(button(text("󰅂").size(20)).on_press(Message::CalendarNextMonth).style(|_, _| button::Style { text_color: Color::from_rgb8(0x7a, 0xa2, 0xf7), ..Default::default() }));
+            let title_row = Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push(
+                    button(text("󰅀").size(20))
+                        .on_press(Message::CalendarPrevMonth)
+                        .style(|_, _| button::Style {
+                            text_color: Color::from_rgb8(0x7a, 0xa2, 0xf7),
+                            ..Default::default()
+                        }),
+                )
+                .push(
+                    text(month_name)
+                        .size(18)
+                        .width(Length::Fill)
+                        .align_x(iced::alignment::Horizontal::Center),
+                )
+                .push(
+                    button(text("󰅂").size(20))
+                        .on_press(Message::CalendarNextMonth)
+                        .style(|_, _| button::Style {
+                            text_color: Color::from_rgb8(0x7a, 0xa2, 0xf7),
+                            ..Default::default()
+                        }),
+                );
 
             let mut header_row = Row::new().spacing(0);
             for day in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"] {
                 header_row = header_row.push(
-                    container(text(day).size(12).style(|_| iced::widget::text::Style { color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)) }))
-                        .width(Length::Fill)
-                        .align_x(iced::alignment::Horizontal::Center)
+                    container(text(day).size(12).style(|_| iced::widget::text::Style {
+                        color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
+                    }))
+                    .width(Length::Fill)
+                    .align_x(iced::alignment::Horizontal::Center),
                 );
             }
 
             let mut days_col = Column::new().spacing(8);
             let mut current_row = Row::new().spacing(0);
-            
+
             // Empty spaces for offset
             for _ in 0..weekday_offset {
                 current_row = current_row.push(Space::with_width(Length::Fill));
             }
-            
+
             for d in 1..=days_in_month {
                 let is_today = Some(d) == current_day;
                 let day_btn = container(text(d.to_string()).size(14))
@@ -646,19 +1186,24 @@ impl ThinkPadBar {
                     .style(move |_| {
                         if is_today {
                             container::Style {
-                                background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
+                                background: Some(iced::Background::Color(Color::from_rgb8(
+                                    0x7a, 0xa2, 0xf7,
+                                ))),
                                 text_color: Some(Color::from_rgb8(0x1a, 0x1b, 0x26)),
-                                border: iced::Border { radius: 8.0.into(), ..Default::default() },
+                                border: iced::Border {
+                                    radius: 8.0.into(),
+                                    ..Default::default()
+                                },
                                 ..Default::default()
                             }
                         } else {
                             container::Style::default()
                         }
                     });
-                
+
                 current_row = current_row.push(day_btn);
-                
-                if (weekday_offset + (d as usize)) % 7 == 0 || d == days_in_month {
+
+                if (weekday_offset + (d as usize)).is_multiple_of(7) || d == days_in_month {
                     // Fill the last row if needed
                     if d == days_in_month {
                         let remaining = 7 - ((weekday_offset + (d as usize)) % 7);
@@ -673,330 +1218,627 @@ impl ThinkPadBar {
                 }
             }
 
-            let content = Column::new().spacing(16)
+            let content = Column::new()
+                .spacing(16)
                 .push(title_row)
                 .push(header_row)
                 .push(days_col);
 
             return container(
                 container(content)
-                    .width(Length::Fixed(360.0))
+                    .width(Length::Fill)
                     .padding(24)
                     .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color { a: 0.85, ..Color::from_rgb8(0x11, 0x12, 0x1d) })),
+                        background: Some(iced::Background::Color(Color {
+                            a: self.config.appearance.opacity,
+                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
+                        })),
                         text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                        border: iced::Border {
+                            radius: 12.0.into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
-                    })
+                    }),
             )
             .width(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Right)
-            .padding(Padding::from([0, 16]))
+            .height(Length::Fill)
             .into();
         }
 
         if self.popup == Popup::SystemMonitor {
-            let item = |icon: &str, label: &str, val: String| -> Element<'_, Message, Theme, iced::Renderer> {
-                Row::new().spacing(12).align_y(Alignment::Center)
+            let item = |icon: &str,
+                        label: &str,
+                        val: String|
+             -> Element<'_, Message, Theme, iced::Renderer> {
+                Row::new()
+                    .spacing(12)
+                    .align_y(Alignment::Center)
                     .push(text(icon.to_string()).size(16))
                     .push(text(label.to_string()).size(13).width(Length::Fill))
                     .push(text(val).size(13))
                     .into()
             };
 
-            let mem_pct = if self.sys_data.mem_total > 0 { (self.sys_data.mem_used as f64 / self.sys_data.mem_total as f64 * 100.0).round() as u64 } else { 0 };
-            let swap_pct = if self.sys_data.swap_total > 0 { (self.sys_data.swap_used as f64 / self.sys_data.swap_total as f64 * 100.0).round() as u64 } else { 0 };
-            let disk_root_pct = if self.sys_data.disk_root_total > 0 { (self.sys_data.disk_root_used as f64 / self.sys_data.disk_root_total as f64 * 100.0).round() as u64 } else { 0 };
-            let disk_boot_pct = if self.sys_data.disk_boot_total > 0 { (self.sys_data.disk_boot_used as f64 / self.sys_data.disk_boot_total as f64 * 100.0).round() as u64 } else { 0 };
-
-            let format_net = |bytes: u64| -> String {
-                if bytes > 1024 * 1024 {
-                    format!("{:.1} MB/s", bytes as f64 / (1024.0 * 1024.0))
-                } else {
-                    format!("{} KB/s", bytes / 1024)
-                }
-            };
-
-            let col = Column::new().spacing(12)
-                .push(text("System Info").size(18).style(move |_| iced::widget::text::Style { color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)) }))
-                .push(item("", "CPU Usage", format!("{}%", self.sys_data.cpu_usage.round() as u64)))
-                .push(item("󰍛", "Memory Usage", format!("{}%", mem_pct)))
-                .push(item("󰍛", "Swap Usage", format!("{}%", swap_pct)))
-                .push(item("", "Temperature", format!("{}°C", self.sys_data.temp.round() as u64)))
-                .push(item("💿", "Disk Usage /", format!("{}%", disk_root_pct)))
-                .push(item("💿", "Disk Usage /boot", format!("{}%", disk_boot_pct)))
+            let col = Column::new()
+                .spacing(12)
+                .push(
+                    Row::new()
+                        .align_y(Alignment::Center)
+                        .push(text("System Info").size(18).style(move |_| {
+                            iced::widget::text::Style {
+                                color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                            }
+                        }))
+                        .push(Space::with_width(Length::Fill))
+                        .push(
+                            text(concat!("ver ", env!("CARGO_PKG_VERSION")))
+                                .size(10)
+                                .style(move |_| iced::widget::text::Style {
+                                    color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
+                                }),
+                        ),
+                )
+                .push(item("", "CPU Usage", self.sys_data.cpu_str.clone()))
+                .push(item("󰍛", "Memory Usage", self.sys_data.mem_str.clone()))
+                .push(item("󰍛", "Swap Usage", self.sys_data.swap_str.clone()))
+                .push(item("", "Temperature", self.sys_data.temp_str.clone()))
+                .push(item(
+                    "💿",
+                    "Disk Usage /",
+                    self.sys_data.disk_root_str.clone(),
+                ))
+                .push(item(
+                    "💿",
+                    "Disk Usage /boot",
+                    self.sys_data.disk_boot_str.clone(),
+                ))
                 .push(item("🌐", "IP Address", self.sys_data.ip_address.clone()))
-                .push(item("⬇", "Download Speed", format_net(self.sys_data.net_down)))
-                .push(item("⬆", "Upload Speed", format_net(self.sys_data.net_up)));
-                
+                .push(item(
+                    "⬇",
+                    "Download Speed",
+                    self.sys_data.net_down_str.clone(),
+                ))
+                .push(item("⬆", "Upload Speed", self.sys_data.net_up_str.clone()));
+
             return container(
                 container(col)
-                    .width(Length::Fixed(360.0))
+                    .width(Length::Fill)
                     .padding(Padding::from([20, 24]))
                     .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color { a: 0.85, ..Color::from_rgb8(0x11, 0x12, 0x1d) })), // Slightly darker but transparent
+                        background: Some(iced::Background::Color(Color {
+                            a: self.config.appearance.opacity,
+                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
+                        })), // Slightly darker but transparent
                         text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                        border: iced::Border {
+                            radius: 12.0.into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
-                    })
+                    }),
             )
             .width(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Right)
-            .padding(Padding::from([0, 16]))
+            .height(Length::Fill)
             .into();
         }
 
         // Control Center Popup
         let vol_muted = self.audio.muted;
-        let vol_row = Row::new().spacing(12).align_y(Alignment::Center)
+        let vol_row = Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
             .push(
                 button(
                     container(text(if vol_muted { "󰝟" } else { "" }).size(18))
                         .width(28)
                         .height(28)
                         .align_x(iced::alignment::Horizontal::Center)
-                        .align_y(iced::alignment::Vertical::Center)
+                        .align_y(iced::alignment::Vertical::Center),
                 )
                 .on_press(Message::ToggleAudioMute)
-                .style(move |_, _| if vol_muted {
-                    iced::widget::button::Style { text_color: Color::from_rgb8(0x56, 0x5f, 0x89), ..Default::default() }
-                } else {
-                    iced::widget::button::Style { text_color: Color::WHITE, ..Default::default() }
-                })
+                .style(move |_, _| {
+                    if vol_muted {
+                        iced::widget::button::Style {
+                            text_color: Color::from_rgb8(0x56, 0x5f, 0x89),
+                            ..Default::default()
+                        }
+                    } else {
+                        iced::widget::button::Style {
+                            text_color: Color::WHITE,
+                            ..Default::default()
+                        }
+                    }
+                }),
             )
             .push(
                 slider(0..=100, self.volume_level, Message::SetVolume)
                     .width(Length::Fill)
-                    .style(move |_, _| if vol_muted {
-                        iced::widget::slider::Style {
-                            rail: iced::widget::slider::Rail { 
-                                backgrounds: (iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68)), iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))), 
-                                width: 4.0,
-                                border: iced::Border { radius: 2.0.into(), width: 0.0, color: Color::TRANSPARENT } 
-                            },
-                            handle: iced::widget::slider::Handle { 
-                                shape: iced::widget::slider::HandleShape::Circle { radius: 6.0 }, 
-                                background: iced::Background::Color(Color::from_rgb8(0x56, 0x5f, 0x89)), 
-                                border_width: 0.0, 
-                                border_color: Color::TRANSPARENT 
-                            },
-                            breakpoint: iced::widget::slider::Breakpoint {
-                                color: Color::TRANSPARENT,
-                            },
+                    .style(move |_, _| {
+                        if vol_muted {
+                            iced::widget::slider::Style {
+                                rail: iced::widget::slider::Rail {
+                                    backgrounds: (
+                                        iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68)),
+                                        iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
+                                    ),
+                                    width: 4.0,
+                                    border: iced::Border {
+                                        radius: 2.0.into(),
+                                        width: 0.0,
+                                        color: Color::TRANSPARENT,
+                                    },
+                                },
+                                handle: iced::widget::slider::Handle {
+                                    shape: iced::widget::slider::HandleShape::Circle {
+                                        radius: 6.0,
+                                    },
+                                    background: iced::Background::Color(Color::from_rgb8(
+                                        0x56, 0x5f, 0x89,
+                                    )),
+                                    border_width: 0.0,
+                                    border_color: Color::TRANSPARENT,
+                                },
+                                breakpoint: iced::widget::slider::Breakpoint {
+                                    color: Color::TRANSPARENT,
+                                },
+                            }
+                        } else {
+                            iced::widget::slider::Style {
+                                rail: iced::widget::slider::Rail {
+                                    backgrounds: (
+                                        iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                                        iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
+                                    ),
+                                    width: 4.0,
+                                    border: iced::Border {
+                                        radius: 2.0.into(),
+                                        width: 0.0,
+                                        color: Color::TRANSPARENT,
+                                    },
+                                },
+                                handle: iced::widget::slider::Handle {
+                                    shape: iced::widget::slider::HandleShape::Circle {
+                                        radius: 8.0,
+                                    },
+                                    background: iced::Background::Color(Color::from_rgb8(
+                                        0x7a, 0xa2, 0xf7,
+                                    )),
+                                    border_width: 0.0,
+                                    border_color: Color::TRANSPARENT,
+                                },
+                                breakpoint: iced::widget::slider::Breakpoint {
+                                    color: Color::TRANSPARENT,
+                                },
+                            }
                         }
-                    } else {
-                        iced::widget::slider::Style {
-                            rail: iced::widget::slider::Rail { 
-                                backgrounds: (iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)), iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))), 
-                                width: 4.0,
-                                border: iced::Border { radius: 2.0.into(), width: 0.0, color: Color::TRANSPARENT } 
-                            },
-                            handle: iced::widget::slider::Handle { 
-                                shape: iced::widget::slider::HandleShape::Circle { radius: 8.0 }, 
-                                background: iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)), 
-                                border_width: 0.0, 
-                                border_color: Color::TRANSPARENT 
-                            },
-                            breakpoint: iced::widget::slider::Breakpoint {
-                                color: Color::TRANSPARENT,
-                            },
-                        }
-                    })
+                    }),
             );
 
         let mic_muted = self.mic.muted;
-        let mic_row = Row::new().spacing(12).align_y(Alignment::Center)
+        let mic_row = Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
             .push(
                 button(
-                    container(text(if mic_muted || self.mic.volume == 0 { "󰍭" } else { "" }).size(18))
-                        .width(28)
-                        .height(28)
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .align_y(iced::alignment::Vertical::Center)
+                    container(
+                        text(if mic_muted || self.mic.volume == 0 {
+                            "󰍭"
+                        } else {
+                            ""
+                        })
+                        .size(18),
+                    )
+                    .width(28)
+                    .height(28)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Center),
                 )
                 .on_press(Message::ToggleMicMute)
-                .style(move |_, _| if mic_muted {
-                    iced::widget::button::Style { text_color: Color::from_rgb8(0x56, 0x5f, 0x89), ..Default::default() }
-                } else {
-                    iced::widget::button::Style { text_color: Color::WHITE, ..Default::default() }
-                })
+                .style(move |_, _| {
+                    if mic_muted {
+                        iced::widget::button::Style {
+                            text_color: Color::from_rgb8(0x56, 0x5f, 0x89),
+                            ..Default::default()
+                        }
+                    } else {
+                        iced::widget::button::Style {
+                            text_color: Color::WHITE,
+                            ..Default::default()
+                        }
+                    }
+                }),
             )
             .push(
                 slider(0..=100, self.mic_volume_level, Message::SetMicVolume)
                     .width(Length::Fill)
-                    .style(move |_, _| if mic_muted {
-                        iced::widget::slider::Style {
-                            rail: iced::widget::slider::Rail { 
-                                backgrounds: (iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68)), iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))), 
-                                width: 4.0,
-                                border: iced::Border { radius: 2.0.into(), width: 0.0, color: Color::TRANSPARENT } 
-                            },
-                            handle: iced::widget::slider::Handle { 
-                                shape: iced::widget::slider::HandleShape::Circle { radius: 6.0 }, 
-                                background: iced::Background::Color(Color::from_rgb8(0x56, 0x5f, 0x89)), 
-                                border_width: 0.0, 
-                                border_color: Color::TRANSPARENT 
-                            },
-                            breakpoint: iced::widget::slider::Breakpoint {
-                                color: Color::TRANSPARENT,
-                            },
+                    .style(move |_, _| {
+                        if mic_muted {
+                            iced::widget::slider::Style {
+                                rail: iced::widget::slider::Rail {
+                                    backgrounds: (
+                                        iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68)),
+                                        iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
+                                    ),
+                                    width: 4.0,
+                                    border: iced::Border {
+                                        radius: 2.0.into(),
+                                        width: 0.0,
+                                        color: Color::TRANSPARENT,
+                                    },
+                                },
+                                handle: iced::widget::slider::Handle {
+                                    shape: iced::widget::slider::HandleShape::Circle {
+                                        radius: 6.0,
+                                    },
+                                    background: iced::Background::Color(Color::from_rgb8(
+                                        0x56, 0x5f, 0x89,
+                                    )),
+                                    border_width: 0.0,
+                                    border_color: Color::TRANSPARENT,
+                                },
+                                breakpoint: iced::widget::slider::Breakpoint {
+                                    color: Color::TRANSPARENT,
+                                },
+                            }
+                        } else {
+                            iced::widget::slider::Style {
+                                rail: iced::widget::slider::Rail {
+                                    backgrounds: (
+                                        iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                                        iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
+                                    ),
+                                    width: 4.0,
+                                    border: iced::Border {
+                                        radius: 2.0.into(),
+                                        width: 0.0,
+                                        color: Color::TRANSPARENT,
+                                    },
+                                },
+                                handle: iced::widget::slider::Handle {
+                                    shape: iced::widget::slider::HandleShape::Circle {
+                                        radius: 8.0,
+                                    },
+                                    background: iced::Background::Color(Color::from_rgb8(
+                                        0x7a, 0xa2, 0xf7,
+                                    )),
+                                    border_width: 0.0,
+                                    border_color: Color::TRANSPARENT,
+                                },
+                                breakpoint: iced::widget::slider::Breakpoint {
+                                    color: Color::TRANSPARENT,
+                                },
+                            }
                         }
-                    } else {
-                        iced::widget::slider::Style {
-                            rail: iced::widget::slider::Rail { 
-                                backgrounds: (iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)), iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))), 
-                                width: 4.0,
-                                border: iced::Border { radius: 2.0.into(), width: 0.0, color: Color::TRANSPARENT } 
-                            },
-                            handle: iced::widget::slider::Handle { 
-                                shape: iced::widget::slider::HandleShape::Circle { radius: 8.0 }, 
-                                background: iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)), 
-                                border_width: 0.0, 
-                                border_color: Color::TRANSPARENT 
-                            },
-                            breakpoint: iced::widget::slider::Breakpoint {
-                                color: Color::TRANSPARENT,
-                            },
-                        }
-                    })
+                    }),
             );
-        let brt_row = Row::new().spacing(12).align_y(Alignment::Center)
-            .push(text("󰃠").size(20).width(Length::Fixed(24.0)))
-            .push(slider(1..=100, self.brightness_level, Message::SetBrightness).width(Length::Fill));
+        let brt_row = Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .push(
+                button(
+                    container(text("󰃠").size(18))
+                        .width(28)
+                        .height(28)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_y(iced::alignment::Vertical::Center),
+                )
+                .on_press(Message::TickSlow(chrono::Local::now()))
+                .style(move |_, _| iced::widget::button::Style {
+                    text_color: Color::WHITE,
+                    ..Default::default()
+                }),
+            )
+            .push(
+                slider(1..=100, self.brightness_level, Message::SetBrightness)
+                    .width(Length::Fill)
+                    .style(move |_, _| iced::widget::slider::Style {
+                        rail: iced::widget::slider::Rail {
+                            backgrounds: (
+                                iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                                iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
+                            ),
+                            width: 4.0,
+                            border: iced::Border {
+                                radius: 2.0.into(),
+                                width: 0.0,
+                                color: Color::TRANSPARENT,
+                            },
+                        },
+                        handle: iced::widget::slider::Handle {
+                            shape: iced::widget::slider::HandleShape::Circle { radius: 8.0 },
+                            background: iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                            border_width: 0.0,
+                            border_color: Color::TRANSPARENT,
+                        },
+                        breakpoint: iced::widget::slider::Breakpoint {
+                            color: Color::TRANSPARENT,
+                        },
+                    }),
+            )
+            .push(
+                text(self.brightness.as_str())
+                    .size(13)
+                    .width(Length::Fixed(44.0))
+                    .align_x(iced::alignment::Horizontal::Right),
+            );
 
         let mut fan_row = Row::new().width(Length::Shrink).spacing(4);
         for l in ["1", "2", "3", "4", "5", "6", "7", "auto", "max"].iter() {
-            let lvl = if *l == "max" { "full-speed".to_string() } else { l.to_string() };
+            let lvl = if *l == "max" {
+                "full-speed".to_string()
+            } else {
+                l.to_string()
+            };
             let current_level = self.fan.level.trim();
-            let is_active = current_level == lvl || (lvl == "full-speed" && current_level == "disengaged");
-            
-            let btn_width = if *l == "auto" || *l == "max" { Length::Fixed(42.0) } else { Length::Fixed(26.0) };
+            let is_active =
+                current_level == lvl || (lvl == "full-speed" && current_level == "disengaged");
 
-            let btn = button(text(*l).size(11).align_x(iced::alignment::Horizontal::Center))
-                .on_press(Message::SetFanLevel(lvl.clone()))
-                .width(btn_width)
-                .height(Length::Fixed(26.0))
-                .padding(Padding::from([2, 0]))
-                .style(move |_, _| if is_active {
+            let btn_width = if *l == "auto" || *l == "max" {
+                Length::Fixed(42.0)
+            } else {
+                Length::Fixed(26.0)
+            };
+
+            let btn = button(
+                text(*l)
+                    .size(11)
+                    .align_x(iced::alignment::Horizontal::Center),
+            )
+            .on_press(Message::SetFanLevel(lvl.clone()))
+            .width(btn_width)
+            .height(Length::Fixed(26.0))
+            .padding(Padding::from([2, 0]))
+            .style(move |_, _| {
+                if is_active {
                     iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
+                        background: Some(iced::Background::Color(Color::from_rgb8(
+                            0x7a, 0xa2, 0xf7,
+                        ))),
                         text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                        border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                        border: iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
                     }
                 } else {
                     iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
+                        background: Some(iced::Background::Color(Color::from_rgb8(
+                            0x41, 0x48, 0x68,
+                        ))),
                         text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                        border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                        border: iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
                     }
-                });
+                }
+            });
             fan_row = fan_row.push(btn);
         }
 
         let mut prof_row = Row::new().width(Length::Fill).spacing(8);
-        for (vid, label) in [("low-power", "LOW"), ("balanced", "BAL"), ("performance", "HIGH"), ("auto-tlp", "󰒓 AUTO")].iter() {
+        for (vid, label) in [
+            ("low-power", "LOW"),
+            ("balanced", "BAL"),
+            ("performance", "HIGH"),
+            ("auto-tlp", "󰒓 AUTO"),
+        ]
+        .iter()
+        {
             let is_active = self.power_profile == *vid;
             let vid_str = vid.to_string();
-            let btn = button(text(label.to_string()).size(11).align_x(iced::alignment::Horizontal::Center))
-                .width(Length::FillPortion(1))
-                .height(Length::Fixed(32.0))
-                .on_press(Message::SetPowerProfile(vid_str))
-                .style(move |_, _| if is_active {
+            let btn = button(
+                text(label.to_string())
+                    .size(11)
+                    .align_x(iced::alignment::Horizontal::Center),
+            )
+            .width(Length::FillPortion(1))
+            .height(Length::Fixed(32.0))
+            .on_press(Message::SetPowerProfile(vid_str))
+            .style(move |_, _| {
+                if is_active {
                     iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
+                        background: Some(iced::Background::Color(Color::from_rgb8(
+                            0x7a, 0xa2, 0xf7,
+                        ))),
                         text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                        border: iced::Border { radius: 8.0.into(), ..Default::default() },
+                        border: iced::Border {
+                            radius: 8.0.into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
                     }
                 } else {
                     iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                        background: Some(iced::Background::Color(Color::from_rgb8(
+                            0x29, 0x2e, 0x42,
+                        ))),
                         text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                        border: iced::Border { radius: 8.0.into(), ..Default::default() },
+                        border: iced::Border {
+                            radius: 8.0.into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
                     }
-                });
+                }
+            });
             prof_row = prof_row.push(btn);
         }
 
         let wifi_is_active = self.wifi.enabled;
-        let wifi_label = if wifi_is_active { 
-            if self.wifi.ssid.len() > 10 { format!("{}...", self.wifi.ssid.chars().take(8).collect::<String>()) } else { self.wifi.ssid.clone() }
-        } else { "Off".to_string() };
+        let ssid = self.wifi.ssid.trim();
+        let has_real_ssid =
+            !ssid.is_empty() && ssid != "Disconnected" && ssid != "Loading..." && ssid != "Unknown";
+        let wifi_label = if wifi_is_active {
+            if has_real_ssid {
+                if ssid.len() > 10 {
+                    format!("{}...", ssid.chars().take(8).collect::<String>())
+                } else {
+                    ssid.to_string()
+                }
+            } else {
+                "On".to_string()
+            }
+        } else {
+            "Off".to_string()
+        };
         let wifi_btn = button(
-            Row::new().spacing(4).align_y(Alignment::Center)
+            Row::new()
+                .spacing(4)
+                .align_y(Alignment::Center)
                 .push(text(if wifi_is_active { "󰖩" } else { "󰖪" }).size(18))
-                .push(text(wifi_label).size(12))
+                .push(text(wifi_label).size(12)),
         )
         .width(Length::FillPortion(1))
         .padding(Padding::from([12, 12]))
         .on_press(Message::ToggleWifiMenu)
-        .style(move |_, _| if wifi_is_active {
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
-                text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                border: iced::Border { radius: 16.0.into(), ..Default::default() },
-                ..Default::default()
-            }
-        } else {
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                border: iced::Border { radius: 16.0.into(), ..Default::default() },
-                ..Default::default()
+        .style(move |_, _| {
+            if wifi_is_active {
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
+                    text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
+                    border: iced::Border {
+                        radius: 16.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            } else {
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                    border: iced::Border {
+                        radius: 16.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
             }
         });
 
         let bt_is_active = self.bluetooth;
         let bt_label = if bt_is_active { "On" } else { "Off" };
         let bt_btn = button(
-            Row::new().spacing(4).align_y(Alignment::Center)
+            Row::new()
+                .spacing(4)
+                .align_y(Alignment::Center)
                 .push(text(if bt_is_active { "󰂯" } else { "󰂲" }).size(18))
-                .push(text(bt_label).size(12))
+                .push(text(bt_label).size(12)),
         )
         .width(Length::FillPortion(1))
         .padding(Padding::from([12, 12]))
         .on_press(Message::ToggleBluetooth(!bt_is_active))
-        .style(move |_, _| if bt_is_active {
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
-                text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                border: iced::Border { radius: 16.0.into(), ..Default::default() },
-                ..Default::default()
-            }
-        } else {
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                border: iced::Border { radius: 16.0.into(), ..Default::default() },
-                ..Default::default()
+        .style(move |_, _| {
+            if bt_is_active {
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
+                    text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
+                    border: iced::Border {
+                        radius: 16.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            } else {
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                    border: iced::Border {
+                        radius: 16.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
             }
         });
 
-        let (bat_cap, bat_status) = &self.battery;
-        let bat_icon = if bat_status.contains("Charging") { "󰂄" } else { "󰁹" };
-
-        let circular_btn_style = |_: &Theme, _: iced::widget::button::Status| iced::widget::button::Style {
-            background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-            text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-            border: iced::Border { radius: 24.0.into(), ..Default::default() },
-            ..Default::default()
+        let bat_cap = self.battery.capacity;
+        let bat_status = &self.battery.status;
+        let (bat_icon, bat_color) = if bat_status.contains("Charging") {
+            ("󰂄", Color::from_rgb8(0x9e, 0xce, 0x6a))
+        } else if bat_status.contains("Full") || bat_status.contains("Not charging") {
+            ("", Color::from_rgb8(0xc0, 0xca, 0xf5))
+        } else {
+            let icon = if bat_cap >= 90 {
+                "󰁹"
+            } else if bat_cap >= 20 {
+                "󰁼"
+            } else {
+                "󰁺"
+            };
+            let color = if bat_cap <= 10 {
+                Color::from_rgb8(0xf7, 0x76, 0x8e)
+            } else if bat_cap <= 20 {
+                Color::from_rgb8(0xe0, 0xaf, 0x68)
+            } else {
+                Color::from_rgb8(0xc0, 0xca, 0xf5)
+            };
+            (icon, color)
         };
 
-        let top_row = Row::new().align_y(Alignment::Center)
-            .push(Row::new().spacing(8).align_y(Alignment::Center).push(text(bat_icon).size(16)).push(text(format!("{}%", bat_cap)).size(14)))
+        let circular_btn_style =
+            |_: &Theme, _: iced::widget::button::Status| iced::widget::button::Style {
+                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                border: iced::Border {
+                    radius: 24.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+        let top_row = Row::new()
+            .align_y(Alignment::Center)
+            .push(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(
+                        text(bat_icon)
+                            .size(16)
+                            .style(move |_| iced::widget::text::Style {
+                                color: Some(bat_color),
+                            }),
+                    )
+                    .push(text(format!("{}%", bat_cap)).size(14).style(move |_| {
+                        iced::widget::text::Style {
+                            color: Some(bat_color),
+                        }
+                    }))
+                    .push(iced::widget::Space::with_width(8))
+                    .push(
+                        text(self.battery.time_remaining.as_deref().unwrap_or(""))
+                            .size(12)
+                            .style(move |_| iced::widget::text::Style {
+                                color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
+                            }),
+                    ),
+            )
             .push(iced::widget::Space::with_width(Length::Fill))
-            .push(button(text("󰌾").size(16)).padding(8).on_press(Message::PowerAction(PowerAction::Lock)).style(circular_btn_style))
-            .push(button(text("").size(16)).padding(8).on_press(Message::TogglePowerMenu).style(circular_btn_style));
+            .push(
+                button(text("󰌾").size(16))
+                    .padding(8)
+                    .on_press(Message::PowerAction(PowerAction::Lock))
+                    .style(circular_btn_style),
+            )
+            .push(
+                button(text("").size(16))
+                    .padding(8)
+                    .on_press(Message::TogglePowerMenu)
+                    .style(circular_btn_style),
+            );
 
         if self.show_power_menu {
             let power_action_btn = |label: &str, icon: &str, action: PowerAction| {
                 button(
-                    Row::new().spacing(8).align_y(Alignment::Center)
+                    Row::new()
+                        .spacing(8)
+                        .align_y(Alignment::Center)
                         .push(text(icon.to_string()).size(18))
-                        .push(text(label.to_string()).size(14))
+                        .push(text(label.to_string()).size(14)),
                 )
                 .width(Length::Fill)
                 .padding(12)
@@ -1004,7 +1846,10 @@ impl ThinkPadBar {
                 .style(move |_, _| iced::widget::button::Style {
                     background: Some(iced::Background::Color(Color::TRANSPARENT)),
                     text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                    border: iced::Border { radius: 8.0.into(), ..Default::default() },
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 })
             };
@@ -1016,8 +1861,19 @@ impl ThinkPadBar {
                     ..Default::default()
                 });
 
-            let power_col = Column::new().spacing(4)
-                .push(Row::new().spacing(12).align_y(Alignment::Center).push(text("Power Menu").size(18).width(Length::Fill)).push(button(text("󰁝 Back").size(14)).on_press(Message::TogglePowerMenu).padding(8)))
+            let power_col = Column::new()
+                .spacing(4)
+                .push(
+                    Row::new()
+                        .spacing(12)
+                        .align_y(Alignment::Center)
+                        .push(text("Power Menu").size(18).width(Length::Fill))
+                        .push(
+                            button(text("󰁝 Back").size(14))
+                                .on_press(Message::TogglePowerMenu)
+                                .padding(8),
+                        ),
+                )
                 .push(iced::widget::Space::with_height(12))
                 .push(power_action_btn("Suspend", "󰒲", PowerAction::Sleep))
                 .push(power_action_btn("Hibernate", "󰖕", PowerAction::Hibernate))
@@ -1033,7 +1889,11 @@ impl ThinkPadBar {
                 .width(Length::Fixed(440.0))
                 .style(|_| container::Style {
                     background: Some(iced::Background::Color(Color::from_rgb8(0x1a, 0x1b, 0x26))),
-                    border: iced::Border { radius: 16.0.into(), color: Color::from_rgb8(0x29, 0x2e, 0x42), width: 1.5 },
+                    border: iced::Border {
+                        radius: 16.0.into(),
+                        color: Color::from_rgb8(0x29, 0x2e, 0x42),
+                        width: 1.5,
+                    },
                     ..Default::default()
                 })
                 .into();
@@ -1041,8 +1901,8 @@ impl ThinkPadBar {
 
         let sliders_col = Column::new()
             .spacing(8)
-            .push(vol_row)
             .push(brt_row)
+            .push(vol_row)
             .push(mic_row);
 
         let mut container_col = Column::new()
@@ -1053,61 +1913,147 @@ impl ThinkPadBar {
 
         if self.show_wifi_menu {
             let mut inner_col = Column::new().spacing(8);
-            let toggle_power_btn = button(text(if wifi_is_active { "Отключить Wi-Fi" } else { "Включить Wi-Fi" }).size(14))
-                .on_press(Message::ToggleWifi(!wifi_is_active))
-                .width(Length::Fill).padding(8)
-                .style(|_, _| iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
-                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                    border: iced::Border { radius: 8.0.into(), ..Default::default() },
+            if !self.wifi_status_message.is_empty() {
+                inner_col =
+                    inner_col.push(text(self.wifi_status_message.as_str()).size(12).style(|_| {
+                        iced::widget::text::Style {
+                            color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                        }
+                    }));
+            }
+            let toggle_power_btn = button(
+                text(if wifi_is_active {
+                    "Отключить Wi-Fi"
+                } else {
+                    "Включить Wi-Fi"
+                })
+                .size(14),
+            )
+            .on_press(Message::ToggleWifi(!wifi_is_active))
+            .width(Length::Fill)
+            .padding(8)
+            .style(|_, _| iced::widget::button::Style {
+                background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
+                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                border: iced::Border {
+                    radius: 8.0.into(),
                     ..Default::default()
-                });
+                },
+                ..Default::default()
+            });
             inner_col = inner_col.push(toggle_power_btn);
 
             if let Some(ref ssid) = self.wifi_selected_ssid {
                 let input = text_input("Enter password...", &self.wifi_password_input)
                     .on_input(Message::WifiPasswordChanged)
                     .on_submit(Message::SubmitWifiPassword)
-                    .secure(true).padding(10);
-                let actions = Row::new().spacing(8)
-                    .push(button(text("Connect")).on_press(Message::SubmitWifiPassword).padding(8))
-                    .push(button(text("Cancel")).on_press(Message::CancelWifiPassword).padding(8));
-                inner_col = inner_col.push(text(format!("Connect to {}", ssid))).push(input).push(actions);
+                    .secure(true)
+                    .padding(10);
+                let actions = Row::new()
+                    .spacing(8)
+                    .push(
+                        button(text("Connect"))
+                            .on_press(Message::SubmitWifiPassword)
+                            .padding(8),
+                    )
+                    .push(
+                        button(text("Cancel"))
+                            .on_press(Message::CancelWifiPassword)
+                            .padding(8),
+                    );
+                inner_col = inner_col
+                    .push(text(format!("Connect to {}", ssid)))
+                    .push(input)
+                    .push(actions);
             } else {
                 let mut net_list = Column::new().spacing(4);
                 for net in &self.available_networks {
-                    net_list = net_list.push(button(text(net.ssid.clone())).width(Length::Fill).on_press(Message::SelectWifiNetwork(net.ssid.clone(), net.security.clone())).style(|_, _| iced::widget::button::Style { background: Some(iced::Background::Color(Color::TRANSPARENT)), text_color: Color::from_rgb8(0xc0, 0xca, 0xf5), ..Default::default() }));
+                    net_list = net_list.push(
+                        button(text(net.ssid.clone()))
+                            .width(Length::Fill)
+                            .on_press(Message::SelectWifiNetwork(
+                                net.ssid.clone(),
+                                net.security.clone(),
+                            ))
+                            .style(|_, _| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(Color::TRANSPARENT)),
+                                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                                ..Default::default()
+                            }),
+                    );
                 }
                 inner_col = inner_col.push(scrollable(net_list).height(Length::Fixed(150.0)));
             }
-            container_col = container_col.push(container(inner_col).padding(16).style(|_| container::Style { background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))), border: iced::Border { radius: 12.0.into(), ..Default::default() }, ..Default::default() }));
+            container_col =
+                container_col.push(
+                    container(inner_col)
+                        .padding(16)
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(Color::from_rgb8(
+                                0x29, 0x2e, 0x42,
+                            ))),
+                            border: iced::Border {
+                                radius: 12.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                );
         }
 
         container_col = container_col
             .push(
-                Column::new().spacing(8)
-                    .push(Row::new().spacing(8).align_y(Alignment::Center).push(text("󰒓").size(16)).push(text("Power Profiles (TLP)").size(14)))
-                    .push(container(prof_row).width(Length::Fill).align_x(iced::alignment::Horizontal::Center))
+                Column::new()
+                    .spacing(8)
+                    .push(
+                        Row::new()
+                            .spacing(8)
+                            .align_y(Alignment::Center)
+                            .push(text("󰒓").size(16))
+                            .push(text("Power Profiles (TLP)").size(14)),
+                    )
+                    .push(
+                        container(prof_row)
+                            .width(Length::Fill)
+                            .align_x(iced::alignment::Horizontal::Center),
+                    ),
             )
             .push(
-                Column::new().spacing(8)
-                    .push(Row::new().spacing(8).align_y(Alignment::Center).push(text("󰈐").size(16)).push(text(format!("Fan Control: {} RPM", self.fan.speed)).size(14)))
-                    .push(container(fan_row).width(Length::Fill).align_x(iced::alignment::Horizontal::Center))
+                Column::new()
+                    .spacing(8)
+                    .push(
+                        Row::new()
+                            .spacing(8)
+                            .align_y(Alignment::Center)
+                            .push(text("󰈐").size(16))
+                            .push(text(format!("Fan Control: {} RPM", self.fan.speed)).size(14)),
+                    )
+                    .push(
+                        container(fan_row)
+                            .width(Length::Fill)
+                            .align_x(iced::alignment::Horizontal::Center),
+                    ),
             );
 
         container(
             container(container_col)
                 .padding(24)
-                .width(Length::Fixed(360.0))
+                .width(Length::Fill)
                 .style(|_| container::Style {
-                    background: Some(iced::Background::Color(Color { a: 0.85, ..Color::from_rgb8(0x11, 0x12, 0x1d) })),
-                    border: iced::Border { radius: 16.0.into(), color: Color::from_rgb8(0x29, 0x2e, 0x42), width: 1.5 },
+                    background: Some(iced::Background::Color(Color {
+                        a: self.config.appearance.opacity,
+                        ..Color::from_rgb8(0x11, 0x12, 0x1d)
+                    })),
+                    border: iced::Border {
+                        radius: 16.0.into(),
+                        color: Color::from_rgb8(0x29, 0x2e, 0x42),
+                        width: 1.5,
+                    },
                     ..Default::default()
-                })
+                }),
         )
         .width(Length::Fill)
-        .align_x(iced::alignment::Horizontal::Right)
-        .padding(Padding::from([0, 16]))
+        .height(Length::Fill)
         .into()
     }
 
@@ -1118,10 +2064,53 @@ impl ThinkPadBar {
     pub fn subscription(&self) -> iced::Subscription<Message> {
         iced::Subscription::batch(vec![
             crate::modules::clock::tick(),
-            crate::modules::workspaces::tick(),
-            iced::time::every(std::time::Duration::from_millis(500))
-                .map(|_| Message::UpdateKeyboardLayout),
+            iced::time::every(std::time::Duration::from_secs(1))
+                .map(|_| Message::TickBrightness(chrono::Local::now())),
+            iced::time::every(std::time::Duration::from_secs(2))
+                .map(|_| Message::TickThermal(chrono::Local::now())),
+            iced::time::every(std::time::Duration::from_secs(10))
+                .map(|_| Message::TickSlow(chrono::Local::now())),
+            crate::modules::workspaces::subscription(),
             crate::modules::tray::Tray::subscription().map(Message::TrayMessage),
+            crate::modules::audio::subscription(),
+            iced::event::listen_with(|event, _status, window| match event {
+                iced::Event::Window(iced::window::Event::Unfocused) => {
+                    Some(Message::PopupWindowUnfocused(window))
+                }
+                _ => None,
+            }),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Popup, ThinkPadBar};
+    use iced::window::Id;
+
+    #[test]
+    fn popup_closes_when_popup_window_unfocused() {
+        let popup_id = Id::unique();
+        assert!(ThinkPadBar::should_close_popup_on_unfocus(
+            Some(popup_id),
+            &Popup::ControlCenter,
+            popup_id,
+        ));
+    }
+
+    #[test]
+    fn popup_does_not_close_on_other_window_unfocus() {
+        let popup_id = Id::unique();
+        let other_id = Id::unique();
+        assert!(!ThinkPadBar::should_close_popup_on_unfocus(
+            Some(popup_id),
+            &Popup::ControlCenter,
+            other_id,
+        ));
+        assert!(!ThinkPadBar::should_close_popup_on_unfocus(
+            Some(popup_id),
+            &Popup::None,
+            popup_id,
+        ));
     }
 }
