@@ -104,6 +104,8 @@ pub enum Message {
     CalendarNextMonth,
     TrayMessage(crate::modules::tray::TrayMessage),
     TrayItemClicked(String),
+    TrayItemRightClicked(String),
+    TrayItemClickResolved(String, bool),
     AudioUpdated(crate::modules::audio::AudioInfo),
     MicUpdated(crate::modules::mic::MicInfo),
     BrightnessUpdated(String),
@@ -206,6 +208,56 @@ impl ThinkPadBar {
                 let _ = child.wait();
             }));
         }
+    }
+
+    fn tray_search_candidates(item: &crate::modules::tray::TrayItem, id: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut push_candidate = |raw: &str| {
+            let s = raw.trim().to_ascii_lowercase();
+            if s.len() >= 2 && !out.iter().any(|e| e == &s) {
+                out.push(s);
+            }
+        };
+
+        if let Some(title) = &item.title {
+            push_candidate(title);
+        }
+        if let Some(icon_name) = &item.icon_name {
+            push_candidate(icon_name);
+            let icon_base = icon_name
+                .rsplit('/')
+                .next()
+                .unwrap_or(icon_name)
+                .trim_end_matches(".svg")
+                .trim_end_matches(".png")
+                .trim_end_matches(".xpm")
+                .trim_end_matches("-symbolic")
+                .trim_end_matches("-panel");
+            if !icon_base.is_empty() {
+                push_candidate(icon_base);
+            }
+        }
+
+        push_candidate(id);
+        for token in id
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|t| t.len() >= 3)
+        {
+            if !matches!(
+                token,
+                "statusnotifieritem"
+                    | "status"
+                    | "notifier"
+                    | "item"
+                    | "org"
+                    | "kde"
+                    | "github"
+                    | "com"
+            ) {
+                push_candidate(token);
+            }
+        }
+        out
     }
 
     pub fn new(config: crate::config::Config) -> impl FnOnce() -> (Self, Task<Message>) {
@@ -710,20 +762,32 @@ impl ThinkPadBar {
             }
             Message::TrayItemClicked(id) => {
                 if let Some(item) = self.tray.items.get(&id) {
-                    let name = item
-                        .title
-                        .clone()
-                        .or_else(|| item.icon_name.clone())
-                        .or_else(|| id.split('.').next_back().map(|s| s.to_string()))
-                        .unwrap_or_default();
-
-                    self.tray
-                        .update(crate::modules::tray::TrayMessage::ActivateItem(id));
+                    let candidates = Self::tray_search_candidates(item, &id);
+                    let id_for_result = id.clone();
                     return Task::perform(
-                        crate::modules::workspaces::find_and_switch_to_app(name),
-                        |_| Message::UpdateWorkspaces,
+                        async move {
+                            for c in candidates {
+                                if crate::modules::workspaces::find_and_switch_to_app(c).await {
+                                    return true;
+                                }
+                            }
+                            false
+                        },
+                        move |found| Message::TrayItemClickResolved(id_for_result.clone(), found),
                     );
                 }
+            }
+            Message::TrayItemRightClicked(id) => {
+                self.tray
+                    .update(crate::modules::tray::TrayMessage::ActivateItemSecondary(id));
+                return Task::none();
+            }
+            Message::TrayItemClickResolved(id, found) => {
+                if !found {
+                    self.tray
+                        .update(crate::modules::tray::TrayMessage::ActivateItem(id));
+                }
+                return Task::perform(async {}, |_| Message::UpdateWorkspaces);
             }
             Message::AudioUpdated(info) => {
                 self.audio = info;
@@ -854,6 +918,7 @@ impl ThinkPadBar {
         let mut tray_row = Row::new().spacing(6).align_y(Alignment::Center);
         for (id, item) in self.tray.items.iter() {
             let id_clone = id.clone();
+            let id_right = id.clone();
             if let Some(handle) = &item.icon_handle {
                 tray_row = tray_row.push(
                     mouse_area(
@@ -861,9 +926,11 @@ impl ThinkPadBar {
                             .width(Length::Fixed(16.0))
                             .height(Length::Fixed(16.0)),
                     )
-                    .on_press(Message::TrayItemClicked(id_clone)),
+                    .on_press(Message::TrayItemClicked(id_clone))
+                    .on_right_press(Message::TrayItemRightClicked(id_right)),
                 );
             } else if let Some(name) = &item.icon_name {
+                let id_right = id.clone();
                 tray_row = tray_row.push(
                     mouse_area(
                         container(text(name.chars().next().unwrap_or('?').to_string()).size(14))
@@ -871,9 +938,11 @@ impl ThinkPadBar {
                             .height(Length::Fixed(16.0))
                             .align_x(iced::alignment::Horizontal::Center),
                     )
-                    .on_press(Message::TrayItemClicked(id_clone)),
+                    .on_press(Message::TrayItemClicked(id_clone))
+                    .on_right_press(Message::TrayItemRightClicked(id_right)),
                 );
             } else {
+                let id_right = id.clone();
                 tray_row = tray_row.push(
                     mouse_area(
                         container(text("?").size(14))
@@ -881,7 +950,8 @@ impl ThinkPadBar {
                             .height(Length::Fixed(16.0))
                             .align_x(iced::alignment::Horizontal::Center),
                     )
-                    .on_press(Message::TrayItemClicked(id_clone)),
+                    .on_press(Message::TrayItemClicked(id_clone))
+                    .on_right_press(Message::TrayItemRightClicked(id_right)),
                 );
             }
         }
@@ -2260,5 +2330,20 @@ mod tests {
         assert!(ThinkPadBar::is_special_workspace("SPECIAL:tools"));
         assert!(!ThinkPadBar::is_special_workspace("1"));
         assert!(!ThinkPadBar::is_special_workspace("dev"));
+    }
+
+    #[test]
+    fn tray_candidate_generation_is_generic_and_normalized() {
+        let item = crate::modules::tray::TrayItem {
+            _id: "irrelevant".to_string(),
+            title: Some("My App".to_string()),
+            icon_name: Some("org.example.myapp-panel-symbolic".to_string()),
+            icon_handle: None,
+        };
+        let c = ThinkPadBar::tray_search_candidates(&item, "org.kde.StatusNotifierItem-1234");
+        assert!(c.iter().any(|v| v == "my app"));
+        assert!(c.iter().any(|v| v == "org.example.myapp-panel-symbolic"));
+        assert!(c.iter().any(|v| v == "org.example.myapp"));
+        assert!(c.iter().any(|v| v == "1234"));
     }
 }

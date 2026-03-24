@@ -170,25 +170,77 @@ fn workspace_is_active(id: i32, name: &str, active_id: i32, active_name: &str) -
     id == active_id || name == active_name
 }
 
+fn normalize_match_text(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+}
+
+fn client_matches_query(query: &str, initial_class: &str, title: &str) -> bool {
+    let q_norm = normalize_match_text(query);
+    let q = q_norm.trim();
+    if q.len() < 2 {
+        return false;
+    }
+
+    let class_n = normalize_match_text(initial_class);
+    let title_n = normalize_match_text(title);
+    if class_n.contains(q) || title_n.contains(q) {
+        return true;
+    }
+
+    q.split_whitespace()
+        .filter(|t| t.len() >= 3)
+        .any(|tok| class_n.contains(tok) || title_n.contains(tok))
+}
+
 pub fn switch_workspace(id: i32, name: &str) {
     let _ = hyprland_command(&workspace_dispatch_command(id, name));
 }
 
-pub async fn find_and_switch_to_app(name: String) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppLocateResult {
+    NotFound,
+    FoundSameWorkspace,
+    SwitchedWorkspace,
+}
+
+pub async fn find_and_switch_to_app_detailed(name: String) -> AppLocateResult {
+    let active_ws_id = if let Some(s) = hyprland_command("j/activeworkspace") {
+        serde_json::from_str::<HyprActiveWorkspace>(&s)
+            .map(|a| a.id)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
     if let Some(s) = hyprland_command("j/clients") {
         if let Ok(clients) = serde_json::from_str::<Vec<HyprClient>>(&s) {
-            let name_lower = name.to_lowercase();
             for client in clients {
-                if client.initial_class.to_lowercase().contains(&name_lower)
-                    || client.title.to_lowercase().contains(&name_lower)
-                {
-                    switch_workspace(client.workspace.id, "");
-                    return true;
+                if client_matches_query(&name, &client.initial_class, &client.title) {
+                    if client.workspace.id != active_ws_id {
+                        switch_workspace(client.workspace.id, "");
+                        return AppLocateResult::SwitchedWorkspace;
+                    }
+                    return AppLocateResult::FoundSameWorkspace;
                 }
             }
         }
     }
-    false
+    AppLocateResult::NotFound
+}
+
+pub async fn find_and_switch_to_app(name: String) -> bool {
+    !matches!(
+        find_and_switch_to_app_detailed(name).await,
+        AppLocateResult::NotFound
+    )
 }
 
 pub fn subscription() -> Subscription<crate::app::Message> {
@@ -249,8 +301,8 @@ pub fn subscription() -> Subscription<crate::app::Message> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_special_workspace_visible_from_monitors_json, workspace_dispatch_command,
-        workspace_is_active, WorkspaceInfo,
+        client_matches_query, parse_special_workspace_visible_from_monitors_json,
+        workspace_dispatch_command, workspace_is_active, WorkspaceInfo,
     };
 
     #[test]
@@ -337,5 +389,24 @@ mod tests {
         ]
         "#;
         assert!(!parse_special_workspace_visible_from_monitors_json(raw));
+    }
+
+    #[test]
+    fn client_matching_handles_punctuation_and_tokenized_queries() {
+        assert!(client_matches_query(
+            "Telegram Desktop",
+            "org.telegram.desktop",
+            "Chat window"
+        ));
+        assert!(client_matches_query(
+            "org.kde.StatusNotifierItem-telegram",
+            "org.telegram.desktop",
+            "chat"
+        ));
+        assert!(!client_matches_query(
+            "zzzz-not-found",
+            "org.telegram.desktop",
+            "chat"
+        ));
     }
 }

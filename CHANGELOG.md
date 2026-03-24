@@ -2,6 +2,146 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.45] - 2026-03-24
+
+### Fixed
+- Tray right-click now prioritizes explicit D-Bus `org.kde.StatusNotifierItem.ContextMenu` on the target tray item.
+- If `ContextMenu` is not available/fails, a single fallback to `SecondaryActivate` is used.
+- This removes app-dependent right-click randomness where some items ignored `SecondaryActivate` for menu opening.
+
+### Quality
+- Added regression tests for tray activation-channel parsing and status-notifier address/path parsing.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.44] - 2026-03-24
+
+### Fixed
+- Tray right-click path simplified to a single deterministic action:
+  - only `SecondaryActivate` is used (with real cursor coordinates),
+  - removed mixed `ContextMenu + retry` sequence that caused inconsistent/chaotic behavior.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.43] - 2026-03-24
+
+### Fixed
+- Tray right-click flow simplified for deterministic UX:
+  - removed right-click workspace search/switch sequencing from app layer,
+  - right click now directly triggers tray secondary/context action at current cursor position.
+- This removes random right-click latency and cross-workspace sequencing jitter.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.42] - 2026-03-24
+
+### Fixed
+- Reduced right-click latency by removing unconditional delay: delay is now applied only when tray fallback actually switched to another workspace.
+- Improved right-click reliability by retrying `SecondaryActivate` once when direct `ContextMenu` call is unavailable.
+- Tray fallback now exposes detailed switch outcome (same workspace vs switched) so click sequencing can adapt without UX penalty.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.41] - 2026-03-24
+
+### Fixed
+- Tray interaction no longer warps cursor as part of generic fallback:
+  - removed forced `focuswindow` step from tray fallback path.
+- Tray activation/context menu now use actual current cursor coordinates (`hyprctl -j cursorpos`) instead of `(0, 0)`:
+  - `Activate(Default/Secondary)` uses real pointer position,
+  - right-click `ContextMenu` call uses real pointer position.
+- This keeps pointer where user left it and opens context menus near the pointer instead of screen center.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.40] - 2026-03-24
+
+### Fixed
+- Tray app matching for click fallback is now more robust and app-agnostic:
+  - matching normalizes punctuation/case in query, window class, and title;
+  - tokenized matching improves detection when tray identifiers and window classes differ in format.
+- Right-click tray flow now waits briefly after focus/switch fallback before requesting context menu, improving cross-workspace context-menu opening reliability.
+
+### Quality
+- Added regression test for normalized/tokenized tray-to-window matching.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.39] - 2026-03-24
+
+### Fixed
+- Tray click sequencing adjusted for cross-workspace reliability:
+  - Left click now first attempts generic focus/switch fallback, and only sends `Activate(Default)` if no window match is found.
+  - Right click now first attempts generic focus/switch fallback, then sends context-menu activation.
+- This avoids left-click minimize/restore toggling when a direct window focus path is available and improves behavior from other workspaces.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.38] - 2026-03-24
+
+### Fixed
+- Tray right-click now explicitly attempts `org.kde.StatusNotifierItem.ContextMenu` via user D-Bus (`busctl`) using parsed status-notifier address/path.
+- If `ContextMenu` is not available, right-click falls back to `SecondaryActivate`.
+- Left-click fallback remains generic and now reliably focuses matched windows after workspace switch.
+
+### Quality
+- Added regression test for status-notifier address/path parsing.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.37] - 2026-03-24
+
+### Fixed
+- Tray left-click fallback is now stronger and app-agnostic:
+  - after StatusNotifier `Activate(Default)`, fallback searches windows by normalized candidates and now both:
+    - switches to the app workspace when needed,
+    - focuses the matched window by Hyprland window address.
+- This ensures visible reaction on left click even when tray activation handlers are inconsistent.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.36] - 2026-03-24
+
+### Fixed
+- Tray mouse behavior aligned with StatusNotifier expectations:
+  - left click triggers `Activate(Default)`,
+  - right click triggers `Activate(Secondary)` to open app context menus when supported.
+- Left-click flow keeps generic workspace fallback switching to bring app windows into view if normal activation does not raise them.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.35] - 2026-03-24
+
+### Changed
+- Tray click interaction is now uniformly generic:
+  - always attempts StatusNotifier `Activate`,
+  - then runs a generic fallback search over normalized candidates from tray title/icon/id,
+  - and switches to the workspace containing the matched app window when needed.
+
+### Fixed
+- Tray icon lookup now uses generalized icon-name normalization and themed subdirectory probing (`apps/panel/status` across common sizes), without app-specific hardcoding.
+
+### Quality
+- Added regression tests for generic tray candidate generation and icon-name normalization.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.34] - 2026-03-24
+
+### Fixed
+- Tray icon resolution now normalizes icon names before lookup:
+  - handles `file://` and quoted paths,
+  - extracts file basename from paths,
+  - tries icon name without `.svg/.png/.xpm` extension.
+- This improves resolution for icon names like `godot-mono.svg` and reduces noisy missing-icon fallbacks.
+
+### Quality
+- Added regression tests for icon-name candidate normalization.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.33] - 2026-03-24
 
 ### Fixed
