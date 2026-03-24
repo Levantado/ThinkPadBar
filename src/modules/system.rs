@@ -1,5 +1,6 @@
 use libc::{getifaddrs, ifaddrs, sockaddr_in, AF_INET};
 use std::ffi::{CStr, CString};
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Read;
 use std::mem::MaybeUninit;
@@ -76,15 +77,20 @@ impl SysMonitor {
             self.stat_buf.clear();
             if file.read_to_string(&mut self.stat_buf).is_ok() {
                 if let Some(line) = self.stat_buf.lines().next() {
-                    let parts: Vec<u64> = line
-                        .split_whitespace()
-                        .skip(1)
-                        .filter_map(|s| s.parse().ok())
-                        .collect();
+                    let mut total = 0_u64;
+                    let mut idle = 0_u64;
+                    let mut parsed = 0_usize;
+                    for (idx, value) in line.split_whitespace().skip(1).enumerate() {
+                        if let Ok(v) = value.parse::<u64>() {
+                            if idx == 3 {
+                                idle = v;
+                            }
+                            total = total.saturating_add(v);
+                            parsed += 1;
+                        }
+                    }
 
-                    if parts.len() >= 4 {
-                        let idle = parts[3];
-                        let total: u64 = parts.iter().sum();
+                    if parsed >= 4 {
                         let total_diff = total.saturating_sub(self.last_cpu_total);
                         let idle_diff = idle.saturating_sub(self.last_cpu_idle);
                         if total_diff > 0 {
@@ -96,7 +102,7 @@ impl SysMonitor {
                 }
             }
         }
-        data.cpu_str = format!("{}%", data.cpu_usage.round() as u64);
+        write_percent_string(&mut data.cpu_str, data.cpu_usage.round() as u64);
 
         // 2. Memory Usage
         if let Ok(mut file) = File::open("/proc/meminfo") {
@@ -131,27 +137,24 @@ impl SysMonitor {
                 data.swap_used = s_total.saturating_sub(s_free) * 1024;
             }
         }
-        data.mem_str = format!(
-            "{}%",
-            if data.mem_total > 0 {
-                (data.mem_used as f64 / data.mem_total as f64 * 100.0).round() as u64
-            } else {
-                0
-            }
-        );
-        data.swap_str = format!(
-            "{}%",
-            if data.swap_total > 0 {
-                (data.swap_used as f64 / data.swap_total as f64 * 100.0).round() as u64
-            } else {
-                0
-            }
-        );
+        let mem_percent = if data.mem_total > 0 {
+            (data.mem_used as f64 / data.mem_total as f64 * 100.0).round() as u64
+        } else {
+            0
+        };
+        write_percent_string(&mut data.mem_str, mem_percent);
+
+        let swap_percent = if data.swap_total > 0 {
+            (data.swap_used as f64 / data.swap_total as f64 * 100.0).round() as u64
+        } else {
+            0
+        };
+        write_percent_string(&mut data.swap_str, swap_percent);
 
         // 3. Temperature
         if !fast {
             data.temp = read_temperature_celsius().unwrap_or(0.0);
-            data.temp_str = format!("{}°C", data.temp.round() as u64);
+            write_temp_string(&mut data.temp_str, data.temp);
         }
 
         // 4. Network
@@ -185,41 +188,30 @@ impl SysMonitor {
         self.last_net_down = current_net_down;
         self.last_net_up = current_net_up;
 
-        let format_net = |bytes: u64| -> String {
-            if bytes > 1024 * 1024 {
-                format!("{:.1} MB/s", bytes as f64 / (1024.0 * 1024.0))
-            } else {
-                format!("{} KB/s", bytes / 1024)
-            }
-        };
-        data.net_down_str = format_net(data.net_down);
-        data.net_up_str = format_net(data.net_up);
+        write_net_rate_string(&mut data.net_down_str, data.net_down);
+        write_net_rate_string(&mut data.net_up_str, data.net_up);
 
         // 5. Disks
         if !fast {
             if let Some((total, used)) = get_disk_usage("/") {
                 data.disk_root_total = total;
                 data.disk_root_used = used;
-                data.disk_root_str = format!(
-                    "{}%",
-                    if total > 0 {
-                        (used as f64 / total as f64 * 100.0).round() as u64
-                    } else {
-                        0
-                    }
-                );
+                let root_percent = if total > 0 {
+                    (used as f64 / total as f64 * 100.0).round() as u64
+                } else {
+                    0
+                };
+                write_percent_string(&mut data.disk_root_str, root_percent);
             }
             if let Some((total, used)) = get_disk_usage("/boot") {
                 data.disk_boot_total = total;
                 data.disk_boot_used = used;
-                data.disk_boot_str = format!(
-                    "{}%",
-                    if total > 0 {
-                        (used as f64 / total as f64 * 100.0).round() as u64
-                    } else {
-                        0
-                    }
-                );
+                let boot_percent = if total > 0 {
+                    (used as f64 / total as f64 * 100.0).round() as u64
+                } else {
+                    0
+                };
+                write_percent_string(&mut data.disk_boot_str, boot_percent);
             }
         }
 
@@ -233,6 +225,25 @@ fn parse_mem_kb(line: &str) -> u64 {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
+}
+
+fn write_percent_string(out: &mut String, value: u64) {
+    out.clear();
+    let _ = write!(out, "{}%", value);
+}
+
+fn write_temp_string(out: &mut String, temp: f32) {
+    out.clear();
+    let _ = write!(out, "{}°C", temp.round() as u64);
+}
+
+fn write_net_rate_string(out: &mut String, bytes: u64) {
+    out.clear();
+    if bytes > 1024 * 1024 {
+        let _ = write!(out, "{:.1} MB/s", bytes as f64 / (1024.0 * 1024.0));
+    } else {
+        let _ = write!(out, "{} KB/s", bytes / 1024);
+    }
 }
 
 fn get_iface_ip_native(target_iface: &str) -> Option<String> {

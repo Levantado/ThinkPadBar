@@ -280,7 +280,6 @@ pub fn subscription() -> Subscription<crate::app::Message> {
                                     {
                                         let _ =
                                             output.try_send(crate::app::Message::UpdateWorkspaces);
-                                        tokio::time::sleep(Duration::from_millis(50)).await;
                                     }
                                 }
                                 Err(_) => break,

@@ -7,6 +7,7 @@ use iced::{
     window::Id,
     Alignment, Color, Element, Length, Padding, Task, Theme,
 };
+use std::fmt::Write as _;
 use tracing::info;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +63,8 @@ pub struct ThinkPadBar {
     sys_data: crate::modules::system::SysData,
     calendar_offset: i32,
     tray: crate::modules::tray::Tray,
+    workspace_refresh_inflight: bool,
+    workspace_refresh_queued: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +197,44 @@ impl ThinkPadBar {
     fn is_special_workspace(name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
         lower == "special" || lower.starts_with("special:")
+    }
+
+    fn set_brightness_percent_string(&mut self, value: u32) {
+        self.brightness.clear();
+        let _ = write!(&mut self.brightness, "{}%", value);
+    }
+
+    fn set_battery_percent_string(&mut self, value: u8) {
+        self.battery_str.clear();
+        let _ = write!(&mut self.battery_str, "{}%", value);
+    }
+
+    fn set_audio_summary_string(&mut self) {
+        self.audio_str.clear();
+        if self.audio.muted {
+            self.audio_str.push_str("󰝟 ");
+        } else {
+            self.audio_str.push_str(" ");
+        }
+        let _ = write!(&mut self.audio_str, "{}%", self.audio.volume);
+    }
+
+    fn request_workspace_refresh(&mut self) -> bool {
+        if self.workspace_refresh_inflight {
+            self.workspace_refresh_queued = true;
+            return false;
+        }
+        self.workspace_refresh_inflight = true;
+        true
+    }
+
+    fn complete_workspace_refresh(&mut self) -> bool {
+        self.workspace_refresh_inflight = false;
+        if self.workspace_refresh_queued {
+            self.workspace_refresh_queued = false;
+            return true;
+        }
+        false
     }
 
     fn spawn_command_and_reap(bin: &str, args: &[&str]) {
@@ -358,6 +399,8 @@ impl ThinkPadBar {
                     sys_data: initial_sys_data,
                     calendar_offset: 0,
                     tray: crate::modules::tray::Tray::new(),
+                    workspace_refresh_inflight: false,
+                    workspace_refresh_queued: false,
                 },
                 Task::batch(vec![main_task, popup_task]),
             )
@@ -478,6 +521,9 @@ impl ThinkPadBar {
                 Self::spawn_command_and_reap(bin, args);
             }
             Message::UpdateWorkspaces => {
+                if !self.request_workspace_refresh() {
+                    return Task::none();
+                }
                 return Task::perform(
                     async {
                         let ws = crate::modules::workspaces::get_workspaces();
@@ -493,18 +539,36 @@ impl ThinkPadBar {
                 );
             }
             Message::WorkspacesUpdated(workspaces, title, layout, special_visible) => {
-                let prev_title = self.active_window.clone();
-                self.workspaces = workspaces;
-                self.special_workspace_visible = special_visible;
-                self.active_window = title;
-                self.keyboard_layout = layout;
-                if self.popup != Popup::None && self.active_window != prev_title {
+                let active_window_changed = self.active_window != title;
+
+                if self.workspaces != workspaces {
+                    self.workspaces = workspaces;
+                }
+                if self.special_workspace_visible != special_visible {
+                    self.special_workspace_visible = special_visible;
+                }
+                if active_window_changed {
+                    self.active_window = title;
+                }
+                if self.keyboard_layout != layout {
+                    self.keyboard_layout = layout;
+                }
+
+                if self.popup != Popup::None && active_window_changed {
                     self.popup = Popup::None;
                     self.show_wifi_menu = false;
                     self.show_power_menu = false;
                     self.wifi_selected_ssid = None;
                     self.calendar_offset = 0;
-                    return Task::batch(self.popup_hide_tasks());
+                    let mut tasks = self.popup_hide_tasks();
+                    if self.complete_workspace_refresh() {
+                        tasks.push(Task::perform(async {}, |_| Message::UpdateWorkspaces));
+                    }
+                    return Task::batch(tasks);
+                }
+
+                if self.complete_workspace_refresh() {
+                    return Task::perform(async {}, |_| Message::UpdateWorkspaces);
                 }
             }
             Message::SwitchWorkspace(w_id, ws_name) => {
@@ -571,7 +635,7 @@ impl ThinkPadBar {
             }
             Message::SetBrightness(val) => {
                 self.brightness_level = val;
-                self.brightness = format!("{}%", val);
+                self.set_brightness_percent_string(val);
                 return Task::perform(
                     async move { crate::modules::brightness::set_brightness(val) },
                     |_| Message::TickSlow(chrono::Local::now()),
@@ -790,10 +854,12 @@ impl ThinkPadBar {
                 return Task::perform(async {}, |_| Message::UpdateWorkspaces);
             }
             Message::AudioUpdated(info) => {
+                let audio_changed = self.audio != info;
                 self.audio = info;
                 self.volume_level = self.audio.volume;
-                let audio_icon = if self.audio.muted { "󰝟" } else { "" };
-                self.audio_str = format!("{} {}%", audio_icon, self.audio.volume);
+                if audio_changed {
+                    self.set_audio_summary_string();
+                }
             }
             Message::MicUpdated(info) => {
                 self.mic = info.clone();
@@ -801,17 +867,22 @@ impl ThinkPadBar {
                 crate::modules::mic::update_led(info.muted);
             }
             Message::BrightnessUpdated(val) => {
-                self.brightness = val.clone();
                 if let Ok(parsed) = val.trim_end_matches('%').parse::<u32>() {
                     self.brightness_level = parsed.clamp(1, 100);
+                }
+                if self.brightness != val {
+                    self.brightness = val;
                 }
             }
             Message::FanUpdated(info) => {
                 self.fan = info;
             }
             Message::BatteryUpdated(info) => {
+                let battery_changed = self.battery != info;
                 self.battery = info;
-                self.battery_str = format!("{}%", self.battery.capacity);
+                if battery_changed {
+                    self.set_battery_percent_string(self.battery.capacity);
+                }
             }
             Message::PowerProfileUpdated(prof) => {
                 self.power_profile = prof;
@@ -2345,5 +2416,74 @@ mod tests {
         assert!(c.iter().any(|v| v == "org.example.myapp-panel-symbolic"));
         assert!(c.iter().any(|v| v == "org.example.myapp"));
         assert!(c.iter().any(|v| v == "1234"));
+    }
+
+    #[test]
+    fn workspace_refresh_coalesces_while_inflight() {
+        let mut bar = ThinkPadBar {
+            config: crate::config::Config::default(),
+            dbus_conn: None,
+            workspaces: Vec::new(),
+            special_workspace_visible: false,
+            active_window: String::new(),
+            clock: String::new(),
+            brightness: String::new(),
+            audio: crate::modules::audio::AudioInfo {
+                volume: 0,
+                muted: false,
+            },
+            mic: crate::modules::mic::MicInfo {
+                volume: 0,
+                muted: false,
+            },
+            fan: crate::modules::fan::FanInfo {
+                speed: "0".to_string(),
+                level: "auto".to_string(),
+            },
+            battery: crate::modules::battery::BatteryInfo {
+                capacity: 0,
+                status: "Unknown".to_string(),
+                time_remaining: None,
+            },
+            power_profile: String::new(),
+            wifi: crate::modules::wifi::WifiInfo {
+                enabled: false,
+                ssid: String::new(),
+            },
+            show_wifi_menu: false,
+            show_power_menu: false,
+            keyboard_layout: String::new(),
+            available_networks: Vec::new(),
+            wifi_password_input: String::new(),
+            wifi_selected_ssid: None,
+            wifi_connecting_ssid: None,
+            wifi_status_message: String::new(),
+            bluetooth: false,
+            popup: Popup::None,
+            volume_level: 0,
+            mic_volume_level: 0,
+            brightness_level: 0,
+            battery_str: String::new(),
+            audio_str: String::new(),
+            main_window_id: None,
+            popup_window_id: None,
+            sys_monitor: crate::modules::system::SysMonitor::new(),
+            sys_data: crate::modules::system::SysData::default(),
+            calendar_offset: 0,
+            tray: crate::modules::tray::Tray::new(),
+            workspace_refresh_inflight: false,
+            workspace_refresh_queued: false,
+        };
+
+        assert!(bar.request_workspace_refresh());
+        assert!(!bar.request_workspace_refresh());
+        assert!(bar.workspace_refresh_inflight);
+        assert!(bar.workspace_refresh_queued);
+
+        assert!(bar.complete_workspace_refresh());
+        assert!(!bar.workspace_refresh_inflight);
+        assert!(!bar.workspace_refresh_queued);
+
+        assert!(!bar.complete_workspace_refresh());
     }
 }

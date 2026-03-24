@@ -304,19 +304,11 @@ fn find_icon(name: &str, theme_path: Option<&str>) -> Option<Handle> {
 }
 
 fn current_cursor_pos() -> (i32, i32) {
-    let out = std::process::Command::new("hyprctl")
-        .args(["-j", "cursorpos"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-
-    if let Ok(output) = out {
-        if output.status.success() {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                let x = v.get("x").and_then(|n| n.as_f64()).unwrap_or(0.0).round() as i32;
-                let y = v.get("y").and_then(|n| n.as_f64()).unwrap_or(0.0).round() as i32;
-                return (x, y);
-            }
+    if let Some(raw) = crate::modules::workspaces::hyprland_command("j/cursorpos") {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let x = v.get("x").and_then(|n| n.as_f64()).unwrap_or(0.0).round() as i32;
+            let y = v.get("y").and_then(|n| n.as_f64()).unwrap_or(0.0).round() as i32;
+            return (x, y);
         }
     }
     (0, 0)

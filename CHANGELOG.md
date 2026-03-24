@@ -2,6 +2,49 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.48] - 2026-03-25
+
+### Fixed
+- Keyboard layout click switching restored with reliability-first path:
+  - primary path uses `hyprctl switchxkblayout <device> next`,
+  - Hyprland IPC `dispatch switchxkblayout ...` kept as fallback.
+- This fixes the regression where IPC-only switching could report success but not actually change layout on some runtime setups.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.47] - 2026-03-25
+
+### Fixed
+- Keyboard layout click-switch regression fixed:
+  - `switchxkblayout` dispatch is now treated as successful only when Hyprland returns explicit `ok`,
+  - non-`ok` responses no longer short-circuit fallback targets, so switching continues through next candidates.
+- This restores actual layout switching on click instead of only refreshing and re-showing current layout.
+
+### Quality
+- Added regression tests for dispatch success parsing (`ok`/error responses).
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.46] - 2026-03-24
+
+### Changed
+- Workspace refresh path now uses coalescing in app state:
+  - only one `UpdateWorkspaces` task can be in-flight,
+  - burst events are queued into one follow-up refresh instead of spawning overlapping tasks.
+- Hyprland workspace event listener no longer sleeps per event after emit; refresh pacing is now handled by app-side coalescing.
+
+### Optimized
+- Reduced process spawning in interaction paths:
+  - tray cursor position now reads via Hyprland IPC socket (`j/cursorpos`) instead of spawning `hyprctl`,
+  - keyboard layout switching now uses Hyprland IPC dispatch directly instead of spawning `hyprctl`.
+- Reduced string allocations in hot updates:
+  - system module now rewrites metric strings in-place (`cpu/mem/swap/temp/net/disk`) instead of repeated `format!` allocations,
+  - app module now updates `audio_str`, `battery_str`, and brightness percent string in-place and only on value changes where applicable.
+
+### Quality
+- Added regression test for workspace-refresh coalescing state transitions.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.45] - 2026-03-24
 
 ### Fixed
