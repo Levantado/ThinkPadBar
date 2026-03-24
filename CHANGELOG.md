@@ -2,6 +2,77 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.33] - 2026-03-24
+
+### Fixed
+- Center title special highlight now uses Hyprland monitor state (`j/monitors -> specialWorkspace`) instead of workspace-name heuristics.
+- This avoids false positives/negatives when special workspace naming/listing differs from focus window title behavior.
+
+### Quality
+- Added regression tests for parsing visible/absent special workspace state from monitor JSON.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.32] - 2026-03-24
+
+### Fixed
+- Special-focus center highlight now works when Hyprland reports `activeworkspace` as special but omits that entry from `j/workspaces`.
+- Added synthetic active special workspace entry in that edge case so UI state remains consistent.
+
+### Quality
+- Added regression test covering synthetic special workspace insertion path.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.31] - 2026-03-24
+
+### Fixed
+- Center focused-window title highlight no longer stays permanently enabled when special workspaces are merely present in workspace list.
+- Active special detection is now tied to Hyprland `activeworkspace` identity using both id and name matching, so highlight appears only while special is actually active.
+
+### Quality
+- Added regression test for workspace active-state resolution by id/name fallback.
+- Updated app-level regression test to enforce active-only special highlight logic.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.30] - 2026-03-24
+
+### Fixed
+- Center focused-window title highlight for special workspaces now triggers when a `special` workspace is present in Hyprland workspace list, not only when it is marked `active`.
+- This fixes cases where special windows are visible but Hyprland does not report the special workspace as active.
+
+### Quality
+- Updated regression test to cover visible special workspace detection.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.29] - 2026-03-24
+
+### Changed
+- Center focused-window title pill now switches to a light-red background when an active Hyprland `special` workspace is present.
+
+### Quality
+- Added regression test for active special workspace detection.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.28] - 2026-03-24
+
+### Fixed
+- Clicking Hyprland `special` workspace pills now works correctly:
+  - regular workspaces use `dispatch workspace <id>`;
+  - `special` / `special:*` use `dispatch togglespecialworkspace [name]`.
+- Removed optimistic local active-state flip on workspace click; UI now reflects actual state from Hyprland refresh.
+
+### Quality
+- Added regression tests for workspace dispatch command mapping (normal vs special workspace names).
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.27] - 2026-03-24
+
+### Changed
+- Workspace pill for Hyprland `special` workspace (`special` / `special:*`) now uses orange styling in both active and inactive states.
+
+### Quality
+- Added regression test for special workspace name detection.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.26] - 2026-03-24
 
 ### Fixed

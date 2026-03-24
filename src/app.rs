@@ -31,6 +31,7 @@ pub struct ThinkPadBar {
     config: crate::config::Config,
     dbus_conn: Option<zbus::Connection>,
     workspaces: Vec<crate::modules::workspaces::WorkspaceInfo>,
+    special_workspace_visible: bool,
     active_window: String,
     clock: String,
     brightness: String,
@@ -75,8 +76,9 @@ pub enum Message {
         Vec<crate::modules::workspaces::WorkspaceInfo>,
         String,
         String,
+        bool,
     ),
-    SwitchWorkspace(i32),
+    SwitchWorkspace(i32, String),
     TogglePopup(Popup),
     SetVolume(u32),
     SetMicVolume(u32),
@@ -187,6 +189,11 @@ impl ThinkPadBar {
         ("rofi", &["-replace", "-show", "drun"])
     }
 
+    fn is_special_workspace(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        lower == "special" || lower.starts_with("special:")
+    }
+
     fn spawn_command_and_reap(bin: &str, args: &[&str]) {
         if let Ok(mut child) = std::process::Command::new(bin)
             .args(args)
@@ -265,6 +272,8 @@ impl ThinkPadBar {
                     dbus_conn: None, // Will be initialized on first tick or via Task
                     clock: Local::now().format("%a %d %b %H:%M").to_string(),
                     workspaces: crate::modules::workspaces::get_workspaces(),
+                    special_workspace_visible:
+                        crate::modules::workspaces::is_special_workspace_visible(),
                     active_window: crate::modules::workspaces::get_active_window_title(),
                     brightness: crate::modules::brightness::get_brightness(),
                     audio: crate::modules::audio::get_info(),
@@ -420,16 +429,21 @@ impl ThinkPadBar {
                 return Task::perform(
                     async {
                         let ws = crate::modules::workspaces::get_workspaces();
+                        let special_visible =
+                            crate::modules::workspaces::is_special_workspace_visible();
                         let title = crate::modules::workspaces::get_active_window_title();
                         let layout = crate::modules::keyboard::get_layout();
-                        (ws, title, layout)
+                        (ws, title, layout, special_visible)
                     },
-                    |(ws, title, layout)| Message::WorkspacesUpdated(ws, title, layout),
+                    |(ws, title, layout, special_visible)| {
+                        Message::WorkspacesUpdated(ws, title, layout, special_visible)
+                    },
                 );
             }
-            Message::WorkspacesUpdated(workspaces, title, layout) => {
+            Message::WorkspacesUpdated(workspaces, title, layout, special_visible) => {
                 let prev_title = self.active_window.clone();
                 self.workspaces = workspaces;
+                self.special_workspace_visible = special_visible;
                 self.active_window = title;
                 self.keyboard_layout = layout;
                 if self.popup != Popup::None && self.active_window != prev_title {
@@ -441,12 +455,9 @@ impl ThinkPadBar {
                     return Task::batch(self.popup_hide_tasks());
                 }
             }
-            Message::SwitchWorkspace(w_id) => {
-                for ws in &mut self.workspaces {
-                    ws.active = ws.id == w_id;
-                }
+            Message::SwitchWorkspace(w_id, ws_name) => {
                 return Task::perform(
-                    async move { crate::modules::workspaces::switch_workspace(w_id) },
+                    async move { crate::modules::workspaces::switch_workspace(w_id, &ws_name) },
                     |_| Message::UpdateWorkspaces,
                 );
             }
@@ -780,19 +791,32 @@ impl ThinkPadBar {
         let mut ws_row = Row::new().spacing(6).align_y(Alignment::Center);
         for ws in &self.workspaces {
             let ws_id = ws.id;
+            let ws_name = ws.name.clone();
             let is_active = ws.active;
+            let is_special = Self::is_special_workspace(&ws.name);
 
             let btn = button(text(ws.name.clone()).size(12))
                 .padding(Padding::from([1, 6]))
-                .on_press(Message::SwitchWorkspace(ws_id))
+                .on_press(Message::SwitchWorkspace(ws_id, ws_name))
                 .style(move |_, _| {
                     if is_active {
+                        let (bg, fg) = if is_special {
+                            (
+                                Color::from_rgb8(0xff, 0xa0, 0x3d),
+                                Color::from_rgb8(0x1a, 0x1b, 0x26),
+                            )
+                        } else {
+                            (
+                                Color::from_rgb8(0x7a, 0xa2, 0xf7),
+                                Color::from_rgb8(0x1a, 0x1b, 0x26),
+                            )
+                        };
                         iced::widget::button::Style {
                             background: Some(iced::Background::Color(Color {
                                 a: self.config.appearance.opacity,
-                                ..Color::from_rgb8(0x7a, 0xa2, 0xf7)
+                                ..bg
                             })), // Tokyo Night Blue
-                            text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
+                            text_color: fg,
                             border: iced::Border {
                                 radius: 8.0.into(),
                                 ..Default::default()
@@ -800,12 +824,23 @@ impl ThinkPadBar {
                             ..Default::default()
                         }
                     } else {
+                        let (bg, fg) = if is_special {
+                            (
+                                Color::from_rgb8(0x5f, 0x3a, 0x1f),
+                                Color::from_rgb8(0xff, 0xd1, 0x9a),
+                            )
+                        } else {
+                            (
+                                Color::from_rgb8(0x29, 0x2e, 0x42),
+                                Color::from_rgb8(0xc0, 0xca, 0xf5),
+                            )
+                        };
                         iced::widget::button::Style {
                             background: Some(iced::Background::Color(Color {
                                 a: self.config.appearance.opacity,
-                                ..Color::from_rgb8(0x29, 0x2e, 0x42)
+                                ..bg
                             })),
-                            text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                            text_color: fg,
                             border: iced::Border {
                                 radius: 8.0.into(),
                                 ..Default::default()
@@ -875,6 +910,11 @@ impl ThinkPadBar {
 
         // Center: Active Window Title
         let center_title = Self::trunc_with_ellipsis(self.active_window.as_str(), 34);
+        let center_bg = if self.special_workspace_visible {
+            Color::from_rgb8(0x64, 0x2f, 0x37)
+        } else {
+            Color::from_rgb8(0x29, 0x2e, 0x42)
+        };
         let center = container(
             container(
                 text(center_title)
@@ -887,7 +927,7 @@ impl ThinkPadBar {
             .style(move |_| container::Style {
                 background: Some(iced::Background::Color(Color {
                     a: self.config.appearance.opacity,
-                    ..Color::from_rgb8(0x29, 0x2e, 0x42)
+                    ..center_bg
                 })),
                 border: iced::Border {
                     radius: 12.0.into(),
@@ -2211,5 +2251,14 @@ mod tests {
         let (bin, args) = ThinkPadBar::launcher_command();
         assert_eq!(bin, "rofi");
         assert_eq!(args, &["-replace", "-show", "drun"]);
+    }
+
+    #[test]
+    fn special_workspace_name_detection_handles_prefix() {
+        assert!(ThinkPadBar::is_special_workspace("special"));
+        assert!(ThinkPadBar::is_special_workspace("special:term"));
+        assert!(ThinkPadBar::is_special_workspace("SPECIAL:tools"));
+        assert!(!ThinkPadBar::is_special_workspace("1"));
+        assert!(!ThinkPadBar::is_special_workspace("dev"));
     }
 }
