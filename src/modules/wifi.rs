@@ -338,6 +338,39 @@ fn iface_from_station_path(station_path: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn build_iwctl_connect_args(iface: &str, ssid: &str, passphrase: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(pass) = passphrase {
+        if !pass.is_empty() {
+            args.push("--passphrase".to_string());
+            args.push(pass.to_string());
+        }
+    }
+    args.push("station".to_string());
+    args.push(iface.to_string());
+    args.push("connect".to_string());
+    args.push(ssid.to_string());
+    args
+}
+
+fn fallback_connect_with_iwctl(station_path: &str, ssid: &str, passphrase: Option<&str>) -> bool {
+    let Some(iface) = iface_from_station_path(station_path) else {
+        return false;
+    };
+    if iface.is_empty() {
+        return false;
+    }
+
+    let args = build_iwctl_connect_args(&iface, ssid, passphrase);
+    Command::new("iwctl")
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 fn fallback_scan_networks(station_path: &str) -> Vec<WifiNetwork> {
     let Some(iface) = iface_from_station_path(station_path) else {
         return Vec::new();
@@ -480,7 +513,7 @@ pub async fn connect_network(
     conn: &Connection,
     station_path: &str,
     ssid: String,
-    _passphrase: Option<String>,
+    passphrase: Option<String>,
 ) -> bool {
     let mut candidates = Vec::new();
     if is_valid_object_path(station_path) {
@@ -501,12 +534,23 @@ pub async fn connect_network(
                             if let Ok(network) = network_builder.build().await {
                                 if let Ok(name) = network.name().await {
                                     if name == ssid {
-                                        return network.connect().await.is_ok();
+                                        if network.connect().await.is_ok() {
+                                            return true;
+                                        }
+                                        return fallback_connect_with_iwctl(
+                                            station_path.as_str(),
+                                            &ssid,
+                                            passphrase.as_deref(),
+                                        );
                                     }
                                 }
                             }
                         }
                     }
+                }
+                if fallback_connect_with_iwctl(station_path.as_str(), &ssid, passphrase.as_deref())
+                {
+                    return true;
                 }
             }
         }
@@ -517,7 +561,8 @@ pub async fn connect_network(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_valid_object_path, parse_networks_from_iwctl, parse_ssid_from_iw_dev, WifiNetwork,
+        build_iwctl_connect_args, is_valid_object_path, parse_networks_from_iwctl,
+        parse_ssid_from_iw_dev, WifiNetwork,
     };
 
     #[test]
@@ -599,5 +644,27 @@ mod tests {
         let mut parts: Vec<&str> = station.split('/').collect();
         parts.pop();
         assert_eq!(parts.join("/"), "/net/connman/iwd/0");
+    }
+
+    #[test]
+    fn iwctl_connect_args_include_passphrase_when_provided() {
+        let args = build_iwctl_connect_args("wlan0", "MyWiFi", Some("secret"));
+        assert_eq!(
+            args,
+            vec![
+                "--passphrase",
+                "secret",
+                "station",
+                "wlan0",
+                "connect",
+                "MyWiFi"
+            ]
+        );
+    }
+
+    #[test]
+    fn iwctl_connect_args_without_passphrase_for_open_network() {
+        let args = build_iwctl_connect_args("wlan0", "OpenWiFi", None);
+        assert_eq!(args, vec!["station", "wlan0", "connect", "OpenWiFi"]);
     }
 }

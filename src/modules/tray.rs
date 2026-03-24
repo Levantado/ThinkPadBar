@@ -139,65 +139,79 @@ impl Tray {
             iced::stream::channel(100, |mut output| async move {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 let (atx, mut arx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                let mut retry_delay = std::time::Duration::from_secs(1);
 
                 let _ = tx.send(TrayMessage::Initialize(atx));
 
-                let client = match Client::new().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("Failed to init tray client: {:?}", e);
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-                        }
-                    }
-                };
-
-                let mut crx = client.subscribe();
-
-                let initial_items: Vec<_> = {
-                    let items_arc = client.items();
-                    let lock_result = items_arc.lock();
-                    if let Ok(initial_map) = lock_result {
-                        initial_map
-                            .iter()
-                            .map(|(id, (item, _))| (id.clone(), item.clone()))
-                            .collect()
-                    } else {
-                        Vec::new()
-                    }
-                };
-
-                for (id, item) in initial_items {
-                    let _ = tx.send(TrayMessage::ItemAdded(id, Box::new(item)));
-                }
-
                 loop {
-                    tokio::select! {
-                        Ok(event) = crx.recv() => {
-                            let _ = tx.send(TrayMessage::EventBatch(vec![event]));
+                    let client = match Client::new().await {
+                        Ok(c) => {
+                            retry_delay = std::time::Duration::from_secs(1);
+                            c
                         }
-                        Some(raw_id) = arx.recv() => {
-                            let (x, y) = current_cursor_pos();
-                            let (is_secondary, id) = parse_activation_channel_id(raw_id);
-                            if is_secondary {
-                                let context_result = activate_context_menu(&id, x, y).await;
-                                if context_result.is_err() {
-                                    let _ = client.activate(ActivateRequest::Secondary {
+                        Err(e) => {
+                            eprintln!("Failed to init tray client: {:?}", e);
+                            tokio::time::sleep(retry_delay).await;
+                            retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(30));
+                            continue;
+                        }
+                    };
+
+                    let mut crx = client.subscribe();
+
+                    let initial_items: Vec<_> = {
+                        let items_arc = client.items();
+                        let lock_result = items_arc.lock();
+                        if let Ok(initial_map) = lock_result {
+                            initial_map
+                                .iter()
+                                .map(|(id, (item, _))| (id.clone(), item.clone()))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        }
+                    };
+
+                    for (id, item) in initial_items {
+                        let _ = tx.send(TrayMessage::ItemAdded(id, Box::new(item)));
+                    }
+
+                    let mut reconnect = false;
+                    while !reconnect {
+                        tokio::select! {
+                            event = crx.recv() => {
+                                match event {
+                                    Ok(event) => {
+                                        let _ = tx.send(TrayMessage::EventBatch(vec![event]));
+                                    }
+                                    Err(_) => {
+                                        reconnect = true;
+                                    }
+                                }
+                            }
+                            Some(raw_id) = arx.recv() => {
+                                let (x, y) = current_cursor_pos();
+                                let (is_secondary, id) = parse_activation_channel_id(raw_id);
+                                if is_secondary {
+                                    let context_result = activate_context_menu(&id, x, y).await;
+                                    if context_result.is_err() {
+                                        let _ = client.activate(ActivateRequest::Secondary {
+                                            address: id,
+                                            x,
+                                            y,
+                                        }).await;
+                                    }
+                                } else {
+                                    let _ = client.activate(ActivateRequest::Default {
                                         address: id,
                                         x,
                                         y,
                                     }).await;
                                 }
-                            } else {
-                                let _ = client.activate(ActivateRequest::Default {
-                                    address: id,
-                                    x,
-                                    y,
-                                }).await;
                             }
-                        }
-                        Some(msg) = rx.recv() => {
-                            let _ = output.try_send(msg);
+                            Some(msg) = rx.recv() => {
+                                let _ = output.try_send(msg);
+                            }
                         }
                     }
                 }

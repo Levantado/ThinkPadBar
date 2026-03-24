@@ -119,6 +119,7 @@ pub enum Message {
     BluetoothUpdated(bool),
     OpenOverskride,
     DBusConnected(zbus::Connection),
+    DBusConnectAttempted(Option<zbus::Connection>),
     PopupWindowUnfocused(Id),
     OpenLauncher,
 }
@@ -488,17 +489,17 @@ impl ThinkPadBar {
                     ));
                 } else {
                     tasks.push(Task::perform(
-                        async { zbus::Connection::system().await },
-                        |res| {
-                            match res {
-                                Ok(conn) => Message::DBusConnected(conn),
-                                Err(_) => Message::TickSlow(chrono::Local::now()), // Retry
-                            }
-                        },
+                        async { zbus::Connection::system().await.ok() },
+                        Message::DBusConnectAttempted,
                     ));
                 }
 
                 return Task::batch(tasks);
+            }
+            Message::DBusConnectAttempted(conn) => {
+                if let Some(conn) = conn {
+                    return Task::perform(async move { conn }, Message::DBusConnected);
+                }
             }
             Message::DBusConnected(conn) => {
                 info!("Successfully connected to system D-Bus");
@@ -612,24 +613,25 @@ impl ThinkPadBar {
                 self.volume_level = val;
                 self.audio.volume = val;
                 return Task::perform(
-                    async move { crate::modules::audio::set_volume(val) },
+                    async move { crate::modules::audio::set_volume(val).await },
                     |_| Message::Tick(chrono::Local::now()),
                 );
             }
             Message::ToggleAudioMute => {
-                return Task::perform(async { crate::modules::audio::toggle_mute() }, |_| {
+                return Task::perform(async { crate::modules::audio::toggle_mute().await }, |_| {
                     Message::Tick(chrono::Local::now())
                 });
             }
             Message::SetMicVolume(val) => {
                 self.mic_volume_level = val;
                 self.mic.volume = val;
-                return Task::perform(async move { crate::modules::mic::set_volume(val) }, |_| {
-                    Message::Tick(chrono::Local::now())
-                });
+                return Task::perform(
+                    async move { crate::modules::mic::set_volume(val).await },
+                    |_| Message::Tick(chrono::Local::now()),
+                );
             }
             Message::ToggleMicMute => {
-                return Task::perform(async { crate::modules::mic::toggle_mute() }, |_| {
+                return Task::perform(async { crate::modules::mic::toggle_mute().await }, |_| {
                     Message::Tick(chrono::Local::now())
                 });
             }

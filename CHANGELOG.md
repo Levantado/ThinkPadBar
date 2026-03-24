@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.49] - 2026-03-25
+
+### Fixed
+- Wi‑Fi connect flow now actually uses user-entered passphrase:
+  - when D-Bus `Network.Connect` fails or no matching network is found, fallback `iwctl` connect now passes `--passphrase <...>` for secured networks.
+- Removed immediate self-trigger D-Bus reconnect loop:
+  - failed `zbus::Connection::system()` attempts no longer emit instant `TickSlow` recursion.
+- Tray startup resilience improved:
+  - replaced one-shot init + 1h sleep with bounded exponential retry (`1s .. 30s`) for `Client::new()` failures.
+- Audio/mic interactive actions are now non-blocking on async runtime:
+  - volume/mute mutations switched from sync `Command::output()` to async `tokio::process::Command`.
+
+### Quality
+- Added regression tests for Wi‑Fi `iwctl` connect argument construction (with/without passphrase).
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.48] - 2026-03-25
 
 ### Fixed

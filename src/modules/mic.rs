@@ -52,15 +52,21 @@ pub fn get_info() -> MicInfo {
     }
 }
 
-pub fn set_volume(percent: u32) {
+pub async fn set_volume(percent: u32) {
     let vol_str = format!("{:.2}", percent as f32 / 100.0);
-    let _ = Command::new("wpctl")
+    let _ = tokio::process::Command::new("wpctl")
         .args(["set-volume", "@DEFAULT_AUDIO_SOURCE@", &vol_str])
-        .output();
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
 }
 
-pub fn toggle_mute() {
-    let _ = Command::new("wpctl")
+pub async fn toggle_mute() {
+    let _ = tokio::process::Command::new("wpctl")
         .args(["set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"])
-        .output();
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
 }
