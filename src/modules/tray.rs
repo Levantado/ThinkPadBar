@@ -153,6 +153,7 @@ impl Tray {
                 let mut last_cursor_pos = (0, 0);
                 let mut preferred_secondary_actions: HashMap<String, SecondaryAction> =
                     HashMap::new();
+                let mut resolved_item_addresses: HashMap<String, String> = HashMap::new();
 
                 let _ = tx.send(TrayMessage::Initialize(atx));
 
@@ -195,6 +196,10 @@ impl Tray {
                             event = crx.recv() => {
                                 match event {
                                     Ok(event) => {
+                                        if let Event::Remove(id) = &event {
+                                            resolved_item_addresses.remove(id);
+                                            preferred_secondary_actions.remove(id);
+                                        }
                                         let _ = tx.send(TrayMessage::EventBatch(vec![event]));
                                     }
                                     Err(_) => {
@@ -206,6 +211,12 @@ impl Tray {
                                 let (x, y) = current_cursor_pos_with_fallback(last_cursor_pos);
                                 last_cursor_pos = (x, y);
                                 let (is_secondary, id) = parse_activation_channel_id(raw_id);
+                                let resolved_address = resolve_item_address(
+                                    &mut context_connection,
+                                    &mut resolved_item_addresses,
+                                    &id,
+                                )
+                                .await;
                                 if is_secondary {
                                     let (item_is_menu, has_menu_path) =
                                         get_secondary_capabilities(&client, &id);
@@ -220,7 +231,7 @@ impl Tray {
                                     let result = activate_secondary_with_plan(
                                         &client,
                                         &mut context_connection,
-                                        &id,
+                                        &resolved_address,
                                         x,
                                         y,
                                         plan,
@@ -232,8 +243,9 @@ impl Tray {
                                         &result,
                                     );
                                     debug!(
-                                        "tray secondary click id={} route_primary={} route_fallback={} preferred={} menu_only={} has_menu={} cursor=({}, {}) result={} elapsed_ms={}",
+                                        "tray secondary click id={} resolved={} route_primary={} route_fallback={} preferred={} menu_only={} has_menu={} cursor=({}, {}) result={} elapsed_ms={}",
                                         id,
+                                        resolved_address,
                                         plan.primary.as_str(),
                                         plan.fallback.map(SecondaryAction::as_str).unwrap_or("none"),
                                         preferred_action.map(SecondaryAction::as_str).unwrap_or("none"),
@@ -249,7 +261,7 @@ impl Tray {
                                     }
                                 } else {
                                     let _ = client.activate(ActivateRequest::Default {
-                                        address: id,
+                                        address: resolved_address,
                                         x,
                                         y,
                                     }).await;
@@ -390,6 +402,69 @@ fn parse_status_notifier_address(address: &str) -> (&str, String) {
         .map_or((address, String::from("/StatusNotifierItem")), |(d, p)| {
             (d, format!("/{p}"))
         })
+}
+
+fn destination_from_item_address(address: &str) -> &str {
+    address
+        .split_once('/')
+        .map_or(address, |(destination, _)| destination)
+}
+
+fn select_registered_item_address<'a>(
+    destination: &str,
+    registered: &'a [String],
+) -> Option<&'a str> {
+    registered
+        .iter()
+        .find(|address| destination_from_item_address(address) == destination)
+        .map(|s| s.as_str())
+}
+
+async fn fetch_registered_item_addresses(
+    connection: &zbus::Connection,
+) -> Result<Vec<String>, zbus::Error> {
+    let proxy = zbus::Proxy::new(
+        connection,
+        "org.kde.StatusNotifierWatcher",
+        "/StatusNotifierWatcher",
+        "org.kde.StatusNotifierWatcher",
+    )
+    .await?;
+    proxy.get_property("RegisteredStatusNotifierItems").await
+}
+
+async fn resolve_item_address(
+    connection: &mut Option<zbus::Connection>,
+    cache: &mut HashMap<String, String>,
+    destination: &str,
+) -> String {
+    if let Some(cached) = cache.get(destination) {
+        return cached.clone();
+    }
+
+    let fetch = async {
+        let conn = ensure_context_connection(connection).await?;
+        fetch_registered_item_addresses(conn).await
+    };
+    let resolved = match timeout(Duration::from_millis(600), fetch).await {
+        Ok(Ok(registered)) => {
+            if let Some(address) = select_registered_item_address(destination, &registered) {
+                address.to_string()
+            } else {
+                destination.to_string()
+            }
+        }
+        Ok(Err(err)) => {
+            debug!("tray watcher lookup failed for {}: {}", destination, err);
+            destination.to_string()
+        }
+        Err(_) => {
+            debug!("tray watcher lookup timed out for {}", destination);
+            destination.to_string()
+        }
+    };
+    cache.insert(destination.to_string(), resolved.clone());
+    resolved
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -696,8 +771,9 @@ fn themed_icon_paths(theme_root: &str, name: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_secondary_plan, icon_name_candidates, parse_activation_channel_id, parse_cursor_pos,
-        parse_status_notifier_address, themed_icon_paths, update_secondary_preference,
+        choose_secondary_plan, destination_from_item_address, icon_name_candidates,
+        parse_activation_channel_id, parse_cursor_pos, parse_status_notifier_address,
+        select_registered_item_address, themed_icon_paths, update_secondary_preference,
         ActivationResult, SecondaryAction, SecondaryPlan,
     };
     use std::collections::HashMap;
@@ -764,6 +840,25 @@ mod tests {
         let (dest, path) = parse_status_notifier_address("org.kde.StatusNotifierItem-1-1");
         assert_eq!(dest, "org.kde.StatusNotifierItem-1-1");
         assert_eq!(path, "/StatusNotifierItem");
+    }
+
+    #[test]
+    fn destination_from_item_address_extracts_destination() {
+        assert_eq!(destination_from_item_address(":1.533"), ":1.533");
+        assert_eq!(
+            destination_from_item_address(":1.533/org/ayatana/NotificationItem/foo"),
+            ":1.533"
+        );
+    }
+
+    #[test]
+    fn select_registered_item_address_matches_destination_with_custom_path() {
+        let registered = vec![
+            ":1.528/StatusNotifierItem".to_string(),
+            ":1.533/org/ayatana/NotificationItem/foo".to_string(),
+        ];
+        let found = select_registered_item_address(":1.533", &registered);
+        assert_eq!(found, Some(":1.533/org/ayatana/NotificationItem/foo"));
     }
 
     #[test]

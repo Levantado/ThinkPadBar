@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.56] - 2026-03-25
+
+### Fixed
+- Tray secondary-click now resolves full SNI address (`bus + object path`) via `org.kde.StatusNotifierWatcher.RegisteredStatusNotifierItems` before calling `ContextMenu`/`SecondaryActivate`.
+- This fixes runtime cases where tray id is destination-only (e.g. `:1.533`) and direct calls to default `/StatusNotifierItem` fail with `Object does not exist`.
+- Added targeted regression tests for destination extraction and watcher-address selection with custom object paths.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.55] - 2026-03-25
 
 ### Changed
