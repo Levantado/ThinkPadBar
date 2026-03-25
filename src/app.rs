@@ -1876,6 +1876,14 @@ impl ThinkPadBar {
                         controls_diagnostics.summary(),
                     ))
                     .push(item(
+                        "🔊",
+                        "Audio Runtime",
+                        controls_diagnostics
+                            .audio_runtime
+                            .clone()
+                            .unwrap_or_else(|| "n/a".to_string()),
+                    ))
+                    .push(item(
                         "☕",
                         "Idle Inhibitor Runtime",
                         idle_snapshot.debug_summary(),

@@ -9,6 +9,9 @@ pub type BackendFuture<'a, T = ()> = Pin<Box<dyn Future<Output = T> + Send + 'a>
 
 pub trait AudioBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
+    fn diagnostics_summary(&self) -> Option<String> {
+        None
+    }
     fn audio_info(&self) -> crate::services::controls::AudioInfo;
     fn mic_info(&self) -> crate::modules::mic::MicInfo;
     fn set_volume(&self, percent: u32) -> BackendFuture<'_, ()>;

@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.86] - 2026-03-26
+
+### Changed
+- Deepened `P4 Audio Backend v2 (PipeWire Events)` and started the first practical `P5 Observability v2` slice:
+  - the PipeWire audio runtime now reacts not only to route/property param events, but also to tracked audio node add/remove and relevant node info changes, so external device/default-audio transitions are picked up more reliably;
+  - `WpctlAudioBackend` now keeps live listener diagnostics: running/stopped state, tracked audio node/metadata counts, event count, reconnect count, last event, and last error;
+  - debug `System Info` now shows a dedicated `Audio Runtime` line sourced from backend diagnostics instead of exposing only the coarse backend name.
+
+### Quality
+- Added regression tests for:
+  - node-info change-mask filtering,
+  - deterministic audio event labels,
+  - audio runtime diagnostics summary formatting,
+  - controls diagnostics exposing the optional audio runtime summary.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.85] - 2026-03-26
 
 ### Changed

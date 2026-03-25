@@ -52,6 +52,7 @@ pub struct ControlsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlsDiagnostics {
     pub audio_backend: &'static str,
+    pub audio_runtime: Option<String>,
     pub brightness_backend: &'static str,
     pub bluetooth_backend: &'static str,
     pub power_backend: &'static str,
@@ -150,7 +151,7 @@ pub struct ControlsService {
 impl ControlsService {
     pub fn new() -> Self {
         Self::with_backends(
-            Arc::new(crate::services::controls_backends::audio::WpctlAudioBackend),
+            Arc::new(crate::services::controls_backends::audio::WpctlAudioBackend::default()),
             Arc::new(crate::services::controls_backends::brightness::SysfsBrightnessBackend),
             Arc::new(crate::services::controls_backends::bluetooth::BluetoothCtlBackend),
             Arc::new(crate::services::controls_backends::power::PlatformProfilePowerBackend),
@@ -198,6 +199,7 @@ impl ControlsService {
     pub fn diagnostics(&self) -> ControlsDiagnostics {
         ControlsDiagnostics {
             audio_backend: self.audio_backend.backend_name(),
+            audio_runtime: self.audio_backend.diagnostics_summary(),
             brightness_backend: self.brightness_backend.backend_name(),
             bluetooth_backend: self.bluetooth_backend.backend_name(),
             power_backend: self.power_backend.backend_name(),
@@ -813,6 +815,7 @@ mod tests {
         let diagnostics = service.diagnostics();
 
         assert_eq!(diagnostics.audio_backend, "mock-audio");
+        assert_eq!(diagnostics.audio_runtime, None);
         assert_eq!(diagnostics.brightness_backend, "mock-brightness");
         assert_eq!(diagnostics.bluetooth_backend, "mock-bluetooth");
         assert_eq!(diagnostics.power_backend, "mock-power");
