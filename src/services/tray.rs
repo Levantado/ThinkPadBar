@@ -1,4 +1,4 @@
-use crate::modules::tray::{
+use crate::services::tray_model::{
     activate_secondary_with_plan, choose_secondary_plan, current_cursor_pos_with_fallback,
     get_secondary_capabilities, resolve_item_address, update_secondary_preference, SecondaryAction,
     TrayCommand, TrayMessage,

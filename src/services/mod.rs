@@ -7,4 +7,5 @@ pub mod session;
 pub mod system_info;
 pub mod tray;
 pub mod tray_menu;
+pub mod tray_model;
 pub mod tray_ui;

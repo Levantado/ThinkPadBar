@@ -9,4 +9,3 @@ pub mod mic;
 pub mod power;
 pub mod runtime;
 pub mod system;
-pub mod tray;

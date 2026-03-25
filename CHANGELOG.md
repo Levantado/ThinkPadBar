@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.72] - 2026-03-25
+
+### Changed
+- Completed `M2 Compositor Runtime` in practical terms:
+  - `CompositorService` is now the sole owner of compositor snapshot state, and `app.rs` no longer stores a parallel `CompositorSnapshot` copy;
+  - compositor refreshes now apply back into service-owned state through `CompositorService::apply_refresh(...)`, so the app consumes the service snapshot boundary directly;
+  - the compositor runtime remains intentionally `Hyprland-only` for this stage, while configured `niri` still degrades explicitly to active `Hyprland`.
+- Completed the service-layer cleanup slice of `M3 Tray Domain Cleanup`:
+  - moved the remaining tray domain model/runtime helpers from `modules/tray.rs` into `services/tray_model.rs`;
+  - updated `services/tray.rs` and `services/tray_ui.rs` to use the new service-layer tray model path;
+  - removed `modules/tray.rs` from the compiled module graph, so tray runtime/model ownership now lives entirely under `services/*`.
+
+### Quality
+- Preserved and relocated tray regression coverage under the service layer:
+  - menu diff propagation,
+  - icon candidate resolution,
+  - address parsing and watcher lookup behavior,
+  - secondary-click routing/fallback behavior,
+  - tray UI selection/candidate generation.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` (`86` tests passed).
+
 ## [0.6.71] - 2026-03-25
 
 ### Changed

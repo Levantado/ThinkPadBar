@@ -40,9 +40,8 @@ impl WorkspaceRefreshCoalescer {
 #[derive(Debug, Clone)]
 pub struct CompositorService {
     backend: hyprland::HyprlandBackend,
+    snapshot: CompositorSnapshot,
     refresh: WorkspaceRefreshCoalescer,
-    configured_backend: CompositorBackendKind,
-    active_backend: CompositorBackendKind,
 }
 
 impl Default for CompositorService {
@@ -58,31 +57,47 @@ impl CompositorService {
             _ => CompositorBackendKind::Hyprland,
         };
         let active_backend = CompositorBackendKind::Hyprland;
-        Self {
-            backend: hyprland::HyprlandBackend::new(),
-            refresh: WorkspaceRefreshCoalescer::default(),
+        let backend = hyprland::HyprlandBackend::new();
+        let snapshot = CompositorSnapshot {
+            workspaces: backend.get_workspaces(),
+            active_window: backend.get_active_window_title(),
+            special_workspace_visible: backend.is_special_workspace_visible(),
+            keyboard_layout: backend.get_keyboard_layout(),
             configured_backend,
             active_backend,
+        };
+        Self {
+            backend,
+            snapshot,
+            refresh: WorkspaceRefreshCoalescer::default(),
         }
     }
 
-    pub fn snapshot(&self) -> CompositorSnapshot {
+    pub fn snapshot(&self) -> &CompositorSnapshot {
+        &self.snapshot
+    }
+
+    fn collect_snapshot(&self) -> CompositorSnapshot {
         CompositorSnapshot {
             workspaces: self.backend.get_workspaces(),
             active_window: self.backend.get_active_window_title(),
             special_workspace_visible: self.backend.is_special_workspace_visible(),
             keyboard_layout: self.backend.get_keyboard_layout(),
-            configured_backend: self.configured_backend,
-            active_backend: self.active_backend,
+            configured_backend: self.snapshot.configured_backend,
+            active_backend: self.snapshot.active_backend,
         }
     }
 
     pub async fn refresh(&self) -> RefreshResult {
         let started = Instant::now();
         RefreshResult {
-            snapshot: self.snapshot(),
+            snapshot: self.collect_snapshot(),
             elapsed_ms: started.elapsed().as_millis() as u64,
         }
+    }
+
+    pub fn apply_refresh(&mut self, refresh: RefreshResult) {
+        self.snapshot = refresh.snapshot;
     }
 
     pub fn request_refresh(&mut self) -> bool {

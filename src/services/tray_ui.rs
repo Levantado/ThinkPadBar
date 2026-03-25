@@ -1,5 +1,5 @@
 #[derive(Debug, Clone)]
-pub struct TrayRuntimeEvent(pub(crate) crate::modules::tray::TrayMessage);
+pub struct TrayRuntimeEvent(pub(crate) crate::services::tray_model::TrayMessage);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayUiPrimaryAction {
@@ -19,19 +19,21 @@ pub enum TrayUiSelectionAction {
 }
 
 pub struct TrayUiService {
-    tray: crate::modules::tray::Tray,
+    tray: crate::services::tray_model::Tray,
     menu_cursor: Option<(i32, i32)>,
 }
 
 impl TrayUiService {
     pub fn new() -> Self {
         Self {
-            tray: crate::modules::tray::Tray::new(),
+            tray: crate::services::tray_model::Tray::new(),
             menu_cursor: None,
         }
     }
 
-    pub fn items(&self) -> &std::collections::HashMap<String, crate::modules::tray::TrayItem> {
+    pub fn items(
+        &self,
+    ) -> &std::collections::HashMap<String, crate::services::tray_model::TrayItem> {
         &self.tray.items
     }
 
@@ -85,16 +87,14 @@ impl TrayUiService {
             return TrayUiSecondaryAction::OpenMenu(id);
         }
         self.tray
-            .update(crate::modules::tray::TrayMessage::ActivateItemSecondary(
-                id.clone(),
-            ));
+            .update(crate::services::tray_model::TrayMessage::ActivateItemSecondary(id.clone()));
         TrayUiSecondaryAction::ActivateSecondary(id)
     }
 
     pub fn handle_click_resolved(&mut self, id: String, found: bool) -> bool {
         if !found {
             self.tray
-                .update(crate::modules::tray::TrayMessage::ActivateItem(id));
+                .update(crate::services::tray_model::TrayMessage::ActivateItem(id));
         }
         true
     }
@@ -113,14 +113,14 @@ impl TrayUiService {
             return TrayUiSelectionAction::CloseMenu;
         }
         self.tray
-            .update(crate::modules::tray::TrayMessage::ActivateMenuItem(
+            .update(crate::services::tray_model::TrayMessage::ActivateMenuItem(
                 id.clone(),
                 menu_item_id,
             ));
         TrayUiSelectionAction::ActivateMenuItem { id, menu_item_id }
     }
 
-    fn search_candidates(item: &crate::modules::tray::TrayItem, id: &str) -> Vec<String> {
+    fn search_candidates(item: &crate::services::tray_model::TrayItem, id: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut push_candidate = |raw: &str| {
             let s = raw.trim().to_ascii_lowercase();
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn tray_candidate_generation_is_generic_and_normalized() {
-        let item = crate::modules::tray::TrayItem {
+        let item = crate::services::tray_model::TrayItem {
             _id: "irrelevant".to_string(),
             title: Some("My App".to_string()),
             icon_name: Some("org.example.myapp-panel-symbolic".to_string()),

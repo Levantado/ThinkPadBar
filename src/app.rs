@@ -32,7 +32,6 @@ pub enum PowerAction {
 pub struct ThinkPadBar {
     config: crate::config::Config,
     dbus_conn: Option<zbus::Connection>,
-    compositor: crate::services::compositor::CompositorSnapshot,
     clock: String,
     controls: crate::services::controls::ControlsSnapshot,
     network_service: crate::services::network::NetworkService,
@@ -356,7 +355,6 @@ impl ThinkPadBar {
 
             let compositor_service =
                 crate::services::compositor::CompositorService::new(&cfg.compositor);
-            let compositor_snapshot = compositor_service.snapshot();
             let controls_service = crate::services::controls::ControlsService::new();
             let controls_snapshot = controls_service.snapshot().clone();
             let network_service = crate::services::network::NetworkService::new(&cfg.network);
@@ -376,7 +374,6 @@ impl ThinkPadBar {
             let mut app = Self {
                 config: cfg,
                 dbus_conn: None,
-                compositor: compositor_snapshot,
                 clock: Local::now().format("%a %d %b %H:%M").to_string(),
                 controls: controls_snapshot,
                 network_service,
@@ -546,9 +543,9 @@ impl ThinkPadBar {
                     .perf
                     .workspace_refresh_total_ms
                     .saturating_add(refreshed.elapsed_ms as u128);
-                let active_window_changed =
-                    self.compositor.active_window != refreshed.snapshot.active_window;
-                self.compositor = refreshed.snapshot;
+                let active_window_changed = self.compositor_service.snapshot().active_window
+                    != refreshed.snapshot.active_window;
+                self.compositor_service.apply_refresh(refreshed);
 
                 if self.popup != Popup::None && active_window_changed {
                     self.popup = Popup::None;
@@ -853,9 +850,10 @@ impl ThinkPadBar {
     }
 
     fn view_main_bar(&self) -> Element<'_, Message, Theme, iced::Renderer> {
+        let compositor = self.compositor_service.snapshot();
         // Build Workspaces widget
         let mut ws_row = Row::new().spacing(6).align_y(Alignment::Center);
-        for ws in &self.compositor.workspaces {
+        for ws in &compositor.workspaces {
             let ws_id = ws.id;
             let ws_name = ws.name.clone();
             let is_active = ws.active;
@@ -981,8 +979,8 @@ impl ThinkPadBar {
             .push(container(ws_row).width(Length::Fixed(280.0)));
 
         // Center: Active Window Title
-        let center_title = Self::trunc_with_ellipsis(self.compositor.active_window.as_str(), 34);
-        let center_bg = if self.compositor.special_workspace_visible {
+        let center_title = Self::trunc_with_ellipsis(compositor.active_window.as_str(), 34);
+        let center_bg = if compositor.special_workspace_visible {
             Color::from_rgb8(0x64, 0x2f, 0x37)
         } else {
             Color::from_rgb8(0x29, 0x2e, 0x42)
@@ -1193,7 +1191,7 @@ impl ThinkPadBar {
         });
 
         // 4. Keyboard Layout Pill
-        let kbd_pill = container(text(self.compositor.keyboard_layout.as_str()).size(14))
+        let kbd_pill = container(text(compositor.keyboard_layout.as_str()).size(14))
             .padding(Padding::from([4, 12]))
             .style(move |_| container::Style {
                 background: Some(iced::Background::Color(pill_bg)),
@@ -1317,6 +1315,7 @@ impl ThinkPadBar {
     }
 
     fn view_popup(&self) -> Element<'_, Message, Theme, iced::Renderer> {
+        let compositor = self.compositor_service.snapshot();
         if let Popup::TrayMenu(tray_id) = &self.popup {
             let mut content = Column::new()
                 .spacing(6)
@@ -1648,8 +1647,8 @@ impl ThinkPadBar {
                         "Service Backends",
                         format!(
                             "cmp {:?}->{:?} net {:?}->{:?}",
-                            self.compositor.configured_backend,
-                            self.compositor.active_backend,
+                            compositor.configured_backend,
+                            compositor.active_backend,
                             self.network_service.configured_backend(),
                             self.network_service.active_backend()
                         ),
@@ -2618,14 +2617,6 @@ mod tests {
         let mut bar = ThinkPadBar {
             config: crate::config::Config::default(),
             dbus_conn: None,
-            compositor: crate::services::compositor::CompositorSnapshot {
-                workspaces: Vec::new(),
-                active_window: String::new(),
-                special_workspace_visible: false,
-                keyboard_layout: String::new(),
-                configured_backend: crate::services::compositor::CompositorBackendKind::Hyprland,
-                active_backend: crate::services::compositor::CompositorBackendKind::Hyprland,
-            },
             clock: String::new(),
             controls: crate::services::controls::ControlsSnapshot::default(),
             network_service: crate::services::network::NetworkService::new(
