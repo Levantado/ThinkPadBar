@@ -6,6 +6,10 @@ use tracing::{info, warn};
 pub struct BluetoothCtlBackend;
 
 impl super::BluetoothBackend for BluetoothCtlBackend {
+    fn backend_name(&self) -> &'static str {
+        "bluetoothctl+rfkill+sysfs"
+    }
+
     fn enabled(&self) -> bool {
         if let Ok(output) = Command::new("bluetoothctl")
             .arg("show")

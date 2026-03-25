@@ -49,6 +49,23 @@ pub struct ControlsSnapshot {
     pub bluetooth_enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlsDiagnostics {
+    pub audio_backend: &'static str,
+    pub brightness_backend: &'static str,
+    pub bluetooth_backend: &'static str,
+    pub power_backend: &'static str,
+}
+
+impl ControlsDiagnostics {
+    pub fn summary(&self) -> String {
+        format!(
+            "aud {} bri {} bt {} pwr {}",
+            self.audio_backend, self.brightness_backend, self.bluetooth_backend, self.power_backend
+        )
+    }
+}
+
 impl Default for ControlsSnapshot {
     fn default() -> Self {
         Self {
@@ -165,6 +182,15 @@ impl ControlsService {
 
     pub fn snapshot(&self) -> &ControlsSnapshot {
         &self.snapshot
+    }
+
+    pub fn diagnostics(&self) -> ControlsDiagnostics {
+        ControlsDiagnostics {
+            audio_backend: self.audio_backend.backend_name(),
+            brightness_backend: self.brightness_backend.backend_name(),
+            bluetooth_backend: self.bluetooth_backend.backend_name(),
+            power_backend: self.power_backend.backend_name(),
+        }
     }
 
     pub fn apply_refresh(&mut self, refresh: ControlsRefresh) {
@@ -325,6 +351,10 @@ mod tests {
     }
 
     impl crate::services::controls_backends::AudioBackend for MockAudioBackend {
+        fn backend_name(&self) -> &'static str {
+            "mock-audio"
+        }
+
         fn audio_info(&self) -> AudioInfo {
             self.audio.clone()
         }
@@ -382,6 +412,10 @@ mod tests {
     }
 
     impl crate::services::controls_backends::BrightnessBackend for MockBrightnessBackend {
+        fn backend_name(&self) -> &'static str {
+            "mock-brightness"
+        }
+
         fn snapshot(&self) -> BrightnessSnapshot {
             self.snapshot.clone()
         }
@@ -399,6 +433,10 @@ mod tests {
     }
 
     impl crate::services::controls_backends::BluetoothBackend for MockBluetoothBackend {
+        fn backend_name(&self) -> &'static str {
+            "mock-bluetooth"
+        }
+
         fn enabled(&self) -> bool {
             self.enabled
         }
@@ -422,6 +460,10 @@ mod tests {
     }
 
     impl crate::services::controls_backends::PowerBackend for MockPowerBackend {
+        fn backend_name(&self) -> &'static str {
+            "mock-power"
+        }
+
         fn profile(&self) -> String {
             self.profile.clone()
         }
@@ -639,5 +681,17 @@ mod tests {
         assert_eq!(bluetooth_calls.lock().unwrap().as_slice(), [false]);
         assert_eq!(*overskride_calls.lock().unwrap(), 1);
         assert_eq!(follow_up, super::ControlsFollowUp::RefreshCompositor);
+    }
+
+    #[test]
+    fn diagnostics_expose_backend_names() {
+        let (service, ..) = test_service();
+        let diagnostics = service.diagnostics();
+
+        assert_eq!(diagnostics.audio_backend, "mock-audio");
+        assert_eq!(diagnostics.brightness_backend, "mock-brightness");
+        assert_eq!(diagnostics.bluetooth_backend, "mock-bluetooth");
+        assert_eq!(diagnostics.power_backend, "mock-power");
+        assert!(diagnostics.summary().contains("mock-audio"));
     }
 }

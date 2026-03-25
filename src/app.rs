@@ -252,6 +252,22 @@ impl ThinkPadBar {
         lower == "special" || lower.starts_with("special:")
     }
 
+    fn battery_runtime_summary(battery: &crate::services::controls::BatteryInfo) -> String {
+        match battery.time_remaining.as_deref() {
+            Some(time_remaining) => {
+                format!(
+                    "{}% {} ({time_remaining})",
+                    battery.capacity, battery.status
+                )
+            }
+            None => format!("{}% {}", battery.capacity, battery.status),
+        }
+    }
+
+    fn fan_runtime_summary(fan: &crate::services::controls::FanInfo) -> String {
+        format!("{} RPM ({})", fan.speed, fan.level)
+    }
+
     fn set_battery_percent_string(&mut self, value: u8) {
         self.battery_str.clear();
         let _ = write!(&mut self.battery_str, "{}%", value);
@@ -1567,6 +1583,8 @@ impl ThinkPadBar {
                         ),
                 );
             let sys_data = self.system_info_service.snapshot();
+            let controls_diagnostics = self.controls_service.diagnostics();
+            let idle_snapshot = self.idle_inhibitor_service.snapshot();
             col = col
                 .push(item("", "CPU Usage", sys_data.cpu_str.clone()))
                 .push(item("󰍛", "Memory Usage", sys_data.mem_str.clone()))
@@ -1580,7 +1598,33 @@ impl ThinkPadBar {
                 ))
                 .push(item("🌐", "IP Address", sys_data.ip_address.clone()))
                 .push(item("⬇", "Download Speed", sys_data.net_down_str.clone()))
-                .push(item("⬆", "Upload Speed", sys_data.net_up_str.clone()));
+                .push(item("⬆", "Upload Speed", sys_data.net_up_str.clone()))
+                .push(Space::with_height(Length::Fixed(8.0)))
+                .push(text("ThinkPad Hardware").size(14).style(move |_| {
+                    iced::widget::text::Style {
+                        color: Some(Color::from_rgb8(0x9e, 0xce, 0x6a)),
+                    }
+                }))
+                .push(item(
+                    "󰁹",
+                    "Battery Runtime",
+                    Self::battery_runtime_summary(&self.controls.battery),
+                ))
+                .push(item(
+                    "󰾆",
+                    "Power Profile",
+                    self.controls.power_profile.clone(),
+                ))
+                .push(item(
+                    "󰈐",
+                    "Fan Runtime",
+                    Self::fan_runtime_summary(&self.controls.fan),
+                ))
+                .push(item(
+                    "",
+                    "Idle Inhibitor",
+                    idle_snapshot.label().to_string(),
+                ));
 
             if self.debug_ui_enabled {
                 col = col
@@ -1648,6 +1692,16 @@ impl ThinkPadBar {
                             self.network_service.configured_backend(),
                             self.network_service.active_backend()
                         ),
+                    ))
+                    .push(item(
+                        "🎛",
+                        "Controls Backends",
+                        controls_diagnostics.summary(),
+                    ))
+                    .push(item(
+                        "☕",
+                        "Idle Inhibitor Runtime",
+                        idle_snapshot.debug_summary(),
                     ));
             }
 
@@ -2608,6 +2662,37 @@ mod tests {
         assert!(ThinkPadBar::is_special_workspace("SPECIAL:tools"));
         assert!(!ThinkPadBar::is_special_workspace("1"));
         assert!(!ThinkPadBar::is_special_workspace("dev"));
+    }
+
+    #[test]
+    fn battery_runtime_summary_includes_time_when_present() {
+        assert_eq!(
+            ThinkPadBar::battery_runtime_summary(&crate::services::controls::BatteryInfo {
+                capacity: 64,
+                status: "Discharging".to_string(),
+                time_remaining: Some("2h 6m remaining".to_string()),
+            }),
+            "64% Discharging (2h 6m remaining)"
+        );
+        assert_eq!(
+            ThinkPadBar::battery_runtime_summary(&crate::services::controls::BatteryInfo {
+                capacity: 100,
+                status: "Full".to_string(),
+                time_remaining: None,
+            }),
+            "100% Full"
+        );
+    }
+
+    #[test]
+    fn fan_runtime_summary_formats_speed_and_level() {
+        assert_eq!(
+            ThinkPadBar::fan_runtime_summary(&crate::services::controls::FanInfo {
+                speed: "2700".to_string(),
+                level: "auto".to_string(),
+            }),
+            "2700 RPM (auto)"
+        );
     }
 
     #[test]

@@ -6,6 +6,10 @@ use tracing::{info, warn};
 pub struct PlatformProfilePowerBackend;
 
 impl super::PowerBackend for PlatformProfilePowerBackend {
+    fn backend_name(&self) -> &'static str {
+        "platform_profile+tlp"
+    }
+
     fn profile(&self) -> String {
         current_profile()
     }

@@ -15,6 +15,10 @@ impl WpctlAudioBackend {
 }
 
 impl super::AudioBackend for WpctlAudioBackend {
+    fn backend_name(&self) -> &'static str {
+        "wpctl+pactl"
+    }
+
     fn audio_info(&self) -> crate::services::controls::AudioInfo {
         let (volume, muted) = Self::get_volume("@DEFAULT_AUDIO_SINK@").unwrap_or((0, false));
         crate::services::controls::AudioInfo { volume, muted }

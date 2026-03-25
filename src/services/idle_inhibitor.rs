@@ -13,9 +13,44 @@ use wayland_protocols::wp::idle_inhibit::zv1::client::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IdleInhibitorDiagnostics {
+    pub backend_name: &'static str,
+    pub requested_enabled: bool,
+    pub surface_bound: bool,
+    pub compositor_version: Option<u32>,
+    pub idle_manager_version: Option<u32>,
+}
+
+impl IdleInhibitorDiagnostics {
+    fn backend_label(self) -> &'static str {
+        if self.backend_name.is_empty() {
+            "none"
+        } else {
+            self.backend_name
+        }
+    }
+
+    pub fn summary(self, available: bool, enabled: bool) -> String {
+        format!(
+            "{} avail:{} enabled:{} req:{} surf:{} cmp:{} idle:{}",
+            self.backend_label(),
+            available,
+            enabled,
+            self.requested_enabled,
+            self.surface_bound,
+            self.compositor_version
+                .map_or_else(|| "-".to_string(), |version| version.to_string()),
+            self.idle_manager_version
+                .map_or_else(|| "-".to_string(), |version| version.to_string())
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IdleInhibitorSnapshot {
     pub available: bool,
     pub enabled: bool,
+    pub diagnostics: IdleInhibitorDiagnostics,
 }
 
 impl IdleInhibitorSnapshot {
@@ -28,11 +63,17 @@ impl IdleInhibitorSnapshot {
             "Off"
         }
     }
+
+    pub fn debug_summary(self) -> String {
+        self.diagnostics.summary(self.available, self.enabled)
+    }
 }
 
 trait IdleInhibitorBackend {
+    fn backend_name(&self) -> &'static str;
     fn available(&self) -> bool;
     fn enabled(&self) -> bool;
+    fn diagnostics(&self) -> IdleInhibitorDiagnostics;
     fn set_enabled(&mut self, enabled: bool);
 }
 
@@ -89,6 +130,10 @@ impl WaylandIdleInhibitorBackend {
 }
 
 impl IdleInhibitorBackend for WaylandIdleInhibitorBackend {
+    fn backend_name(&self) -> &'static str {
+        "wayland"
+    }
+
     fn available(&self) -> bool {
         self.state.surface.as_ref().is_some_and(Proxy::is_alive)
             && self
@@ -100,6 +145,24 @@ impl IdleInhibitorBackend for WaylandIdleInhibitorBackend {
 
     fn enabled(&self) -> bool {
         self.state.inhibitor.as_ref().is_some_and(Proxy::is_alive)
+    }
+
+    fn diagnostics(&self) -> IdleInhibitorDiagnostics {
+        IdleInhibitorDiagnostics {
+            backend_name: self.backend_name(),
+            requested_enabled: false,
+            surface_bound: self.state.surface.as_ref().is_some_and(Proxy::is_alive),
+            compositor_version: self
+                .state
+                .compositor
+                .as_ref()
+                .map(|(compositor, _)| compositor.version()),
+            idle_manager_version: self
+                .state
+                .idle_manager
+                .as_ref()
+                .map(|(manager, _)| manager.version()),
+        }
     }
 
     fn set_enabled(&mut self, enabled: bool) {
@@ -264,18 +327,29 @@ impl IdleInhibitorService {
     }
 
     fn refresh_snapshot(&mut self) {
-        let (available, enabled) = if let Some(backend) = self.backend.as_ref() {
-            (backend.available(), backend.enabled())
+        let (available, enabled, mut diagnostics) = if let Some(backend) = self.backend.as_ref() {
+            (
+                backend.available(),
+                backend.enabled(),
+                backend.diagnostics(),
+            )
         } else {
-            (false, false)
+            (false, false, IdleInhibitorDiagnostics::default())
         };
-        self.snapshot = IdleInhibitorSnapshot { available, enabled };
+        diagnostics.requested_enabled = self.requested_enabled;
+        self.snapshot = IdleInhibitorSnapshot {
+            available,
+            enabled,
+            diagnostics,
+        };
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{IdleInhibitorBackend, IdleInhibitorService, IdleInhibitorSnapshot};
+    use super::{
+        IdleInhibitorBackend, IdleInhibitorDiagnostics, IdleInhibitorService, IdleInhibitorSnapshot,
+    };
 
     #[derive(Default)]
     struct FakeBackend {
@@ -285,12 +359,26 @@ mod tests {
     }
 
     impl IdleInhibitorBackend for FakeBackend {
+        fn backend_name(&self) -> &'static str {
+            "fake"
+        }
+
         fn available(&self) -> bool {
             self.available
         }
 
         fn enabled(&self) -> bool {
             self.enabled
+        }
+
+        fn diagnostics(&self) -> IdleInhibitorDiagnostics {
+            IdleInhibitorDiagnostics {
+                backend_name: self.backend_name(),
+                requested_enabled: false,
+                surface_bound: self.available,
+                compositor_version: self.available.then_some(5),
+                idle_manager_version: self.available.then_some(1),
+            }
         }
 
         fn set_enabled(&mut self, enabled: bool) {
@@ -323,6 +411,7 @@ mod tests {
             IdleInhibitorSnapshot {
                 available: false,
                 enabled: false,
+                diagnostics: IdleInhibitorDiagnostics::default(),
             }
         );
     }
@@ -333,6 +422,7 @@ mod tests {
             IdleInhibitorSnapshot {
                 available: false,
                 enabled: false,
+                diagnostics: IdleInhibitorDiagnostics::default(),
             }
             .label(),
             "N/A"
@@ -341,6 +431,7 @@ mod tests {
             IdleInhibitorSnapshot {
                 available: true,
                 enabled: false,
+                diagnostics: IdleInhibitorDiagnostics::default(),
             }
             .label(),
             "Off"
@@ -349,6 +440,7 @@ mod tests {
             IdleInhibitorSnapshot {
                 available: true,
                 enabled: true,
+                diagnostics: IdleInhibitorDiagnostics::default(),
             }
             .label(),
             "On"
@@ -368,6 +460,7 @@ mod tests {
             IdleInhibitorSnapshot {
                 available: false,
                 enabled: false,
+                diagnostics: IdleInhibitorDiagnostics::default(),
             }
         );
     }
@@ -384,6 +477,13 @@ mod tests {
             IdleInhibitorSnapshot {
                 available: true,
                 enabled: false,
+                diagnostics: IdleInhibitorDiagnostics {
+                    backend_name: "fake",
+                    requested_enabled: false,
+                    surface_bound: true,
+                    compositor_version: Some(5),
+                    idle_manager_version: Some(1),
+                },
             }
         );
     }
@@ -401,7 +501,28 @@ mod tests {
             IdleInhibitorSnapshot {
                 available: true,
                 enabled: true,
+                diagnostics: IdleInhibitorDiagnostics {
+                    backend_name: "fake",
+                    requested_enabled: true,
+                    surface_bound: true,
+                    compositor_version: Some(5),
+                    idle_manager_version: Some(1),
+                },
             }
+        );
+    }
+
+    #[test]
+    fn debug_summary_reports_backend_runtime_details() {
+        let service = IdleInhibitorService::with_backend(FakeBackend {
+            available: true,
+            enabled: false,
+            set_enabled_calls: Vec::new(),
+        });
+
+        assert_eq!(
+            service.snapshot().debug_summary(),
+            "fake avail:true enabled:false req:false surf:true cmp:5 idle:1"
         );
     }
 }

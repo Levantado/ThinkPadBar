@@ -6,6 +6,10 @@ use tracing::{info, warn};
 pub struct SysfsBrightnessBackend;
 
 impl super::BrightnessBackend for SysfsBrightnessBackend {
+    fn backend_name(&self) -> &'static str {
+        "sysfs+brightnessctl+light"
+    }
+
     fn snapshot(&self) -> crate::services::controls::BrightnessSnapshot {
         crate::services::controls::BrightnessSnapshot::from_percent(
             read_backlight_percent().unwrap_or(0),

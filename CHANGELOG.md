@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.76] - 2026-03-25
+
+### Changed
+- Added a practical systems-polish slice across native Wayland diagnostics, ThinkPad hardware visibility, and backend observability:
+  - `IdleInhibitorService` now exposes typed runtime diagnostics for the native Wayland backend, including backend name, requested state, surface binding, and compositor/idle-inhibit protocol versions;
+  - System Info now includes a `ThinkPad Hardware` block with battery runtime, active power profile, fan runtime, and idle inhibitor status;
+  - debug-only `Observability` now reports controls backend identities plus the live idle-inhibitor runtime summary.
+
+### Quality
+- Added regression tests for:
+  - controls backend diagnostics exposure,
+  - idle inhibitor diagnostics/debug summary,
+  - ThinkPad hardware summary formatting in `app.rs`.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.75] - 2026-03-25
 
 ### Changed
