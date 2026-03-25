@@ -50,6 +50,9 @@ pub struct ThinkPadBar {
     system_info_service: crate::services::system_info::SystemInfoService,
     tray_ui_service: crate::services::tray_ui::TrayUiService,
     controls_coalescing: ControlsCoalescing,
+    controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer<
+        crate::services::controls::ControlsRefreshKind,
+    >,
     perf: PerfCounters,
     show_debug_overlay: bool,
     debug_ui_enabled: bool,
@@ -81,7 +84,10 @@ pub enum Message {
     Tick(chrono::DateTime<chrono::Local>),
     TickSlow(chrono::DateTime<chrono::Local>),
     RefreshControls(crate::services::controls::ControlsRefreshKind),
-    ControlsRefreshed(crate::services::controls::ControlsRefresh),
+    ControlsRefreshed(
+        crate::services::controls::ControlsRefreshKind,
+        crate::services::controls::ControlsRefresh,
+    ),
     ControlsEvent(crate::services::controls::ControlsEvent),
     ControlsCommandCompleted(crate::services::controls::ControlsFollowUp),
     RefreshCompositor,
@@ -338,15 +344,25 @@ impl ThinkPadBar {
         self.set_audio_summary_string();
     }
 
-    fn request_controls_refresh(
+    fn spawn_controls_refresh(
         &self,
         kind: crate::services::controls::ControlsRefreshKind,
     ) -> Task<Message> {
         let controls_service = self.controls_service.clone();
         Task::perform(
             async move { controls_service.refresh(kind).await },
-            Message::ControlsRefreshed,
+            move |refresh| Message::ControlsRefreshed(kind, refresh),
         )
+    }
+
+    fn request_controls_refresh(
+        &mut self,
+        kind: crate::services::controls::ControlsRefreshKind,
+    ) -> Task<Message> {
+        if !self.controls_refresh_coalescing.request(kind) {
+            return Task::none();
+        }
+        self.spawn_controls_refresh(kind)
     }
 
     fn execute_controls_command(
@@ -476,6 +492,8 @@ impl ThinkPadBar {
                 system_info_service,
                 tray_ui_service,
                 controls_coalescing: ControlsCoalescing::default(),
+                controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(
+                ),
                 perf: PerfCounters::default(),
                 show_debug_overlay: false,
                 debug_ui_enabled: Self::debug_ui_enabled(),
@@ -516,10 +534,13 @@ impl ThinkPadBar {
                     crate::services::controls::ControlsRefreshKind::AudioMic,
                 );
             }
-            Message::ControlsRefreshed(refresh) => {
+            Message::ControlsRefreshed(kind, refresh) => {
                 self.controls_service.apply_refresh(refresh);
                 self.controls = self.controls_service.snapshot().clone();
                 self.sync_control_summary_strings();
+                if self.controls_refresh_coalescing.complete(&kind) {
+                    return self.spawn_controls_refresh(kind);
+                }
             }
             Message::ControlsCommandCompleted(follow_up) => match follow_up {
                 crate::services::controls::ControlsFollowUp::Refresh(kind) => {
@@ -2817,6 +2838,7 @@ mod tests {
             ),
             tray_ui_service: crate::services::tray_ui::TrayUiService::new(),
             controls_coalescing: ControlsCoalescing::default(),
+            controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(),
             perf: super::PerfCounters::default(),
             show_debug_overlay: false,
             debug_ui_enabled: false,
@@ -2880,5 +2902,115 @@ mod tests {
             coalescing.take_command_if_current(CoalescedControlKind::Volume, volume),
             Some(crate::services::controls::ControlsCommand::SetVolume(33))
         );
+    }
+
+    #[test]
+    fn controls_refresh_coalesces_same_kind_until_completion() {
+        let kind = crate::services::controls::ControlsRefreshKind::Brightness;
+        let mut bar = ThinkPadBar {
+            config: crate::config::Config::default(),
+            dbus_conn: None,
+            clock: String::new(),
+            controls: crate::services::controls::ControlsSnapshot::default(),
+            network_service: crate::services::network::NetworkService::new(
+                &crate::config::NetworkConfig::default(),
+            ),
+            idle_inhibitor_service:
+                crate::services::idle_inhibitor::IdleInhibitorService::unavailable_for_tests(),
+            popup: Popup::None,
+            battery_str: String::new(),
+            audio_str: String::new(),
+            main_window_id: None,
+            popup_window_id: None,
+            calendar_offset: 0,
+            compositor_service: crate::services::compositor::CompositorService::hermetic_for_tests(
+                crate::services::compositor::CompositorBackendKind::Hyprland,
+                crate::services::compositor::CompositorBackendKind::Hyprland,
+            ),
+            controls_service: crate::services::controls::ControlsService::with_snapshot_for_tests(
+                crate::services::controls::ControlsSnapshot::default(),
+            ),
+            popup_anchor_service: crate::services::popup_anchor::PopupAnchorService::new(24),
+            session_service: crate::services::session::SessionService::default(),
+            system_info_service: crate::services::system_info::SystemInfoService::with_snapshot(
+                crate::modules::system::SysData::default(),
+            ),
+            tray_ui_service: crate::services::tray_ui::TrayUiService::new(),
+            controls_coalescing: ControlsCoalescing::default(),
+            controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(),
+            perf: super::PerfCounters::default(),
+            show_debug_overlay: false,
+            debug_ui_enabled: false,
+        };
+
+        let _ = bar.update(super::Message::RefreshControls(kind));
+        assert!(bar.controls_refresh_coalescing.is_inflight(&kind));
+        assert!(!bar.controls_refresh_coalescing.is_queued(&kind));
+
+        let _ = bar.update(super::Message::RefreshControls(kind));
+        assert!(bar.controls_refresh_coalescing.is_inflight(&kind));
+        assert!(bar.controls_refresh_coalescing.is_queued(&kind));
+
+        let _ = bar.update(super::Message::ControlsRefreshed(
+            kind,
+            crate::services::controls::ControlsRefresh::default(),
+        ));
+        assert!(bar.controls_refresh_coalescing.is_inflight(&kind));
+        assert!(!bar.controls_refresh_coalescing.is_queued(&kind));
+
+        let _ = bar.update(super::Message::ControlsRefreshed(
+            kind,
+            crate::services::controls::ControlsRefresh::default(),
+        ));
+        assert!(!bar.controls_refresh_coalescing.is_inflight(&kind));
+        assert!(!bar.controls_refresh_coalescing.is_queued(&kind));
+    }
+
+    #[test]
+    fn controls_follow_up_refresh_queues_when_kind_is_inflight() {
+        let kind = crate::services::controls::ControlsRefreshKind::Brightness;
+        let mut bar = ThinkPadBar {
+            config: crate::config::Config::default(),
+            dbus_conn: None,
+            clock: String::new(),
+            controls: crate::services::controls::ControlsSnapshot::default(),
+            network_service: crate::services::network::NetworkService::new(
+                &crate::config::NetworkConfig::default(),
+            ),
+            idle_inhibitor_service:
+                crate::services::idle_inhibitor::IdleInhibitorService::unavailable_for_tests(),
+            popup: Popup::None,
+            battery_str: String::new(),
+            audio_str: String::new(),
+            main_window_id: None,
+            popup_window_id: None,
+            calendar_offset: 0,
+            compositor_service: crate::services::compositor::CompositorService::hermetic_for_tests(
+                crate::services::compositor::CompositorBackendKind::Hyprland,
+                crate::services::compositor::CompositorBackendKind::Hyprland,
+            ),
+            controls_service: crate::services::controls::ControlsService::with_snapshot_for_tests(
+                crate::services::controls::ControlsSnapshot::default(),
+            ),
+            popup_anchor_service: crate::services::popup_anchor::PopupAnchorService::new(24),
+            session_service: crate::services::session::SessionService::default(),
+            system_info_service: crate::services::system_info::SystemInfoService::with_snapshot(
+                crate::modules::system::SysData::default(),
+            ),
+            tray_ui_service: crate::services::tray_ui::TrayUiService::new(),
+            controls_coalescing: ControlsCoalescing::default(),
+            controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(),
+            perf: super::PerfCounters::default(),
+            show_debug_overlay: false,
+            debug_ui_enabled: false,
+        };
+
+        let _ = bar.update(super::Message::RefreshControls(kind));
+        let _ = bar.update(super::Message::ControlsCommandCompleted(
+            crate::services::controls::ControlsFollowUp::Refresh(kind),
+        ));
+
+        assert!(bar.controls_refresh_coalescing.is_inflight(&kind));
+        assert!(bar.controls_refresh_coalescing.is_queued(&kind));
     }
 }

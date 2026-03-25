@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.80] - 2026-03-26
+
+### Changed
+- Extended `P2 Coalescing Foundation` from slider command bursts to refresh/request paths:
+  - added a reusable `RequestCoalescer<K>` primitive in `services/coalescing.rs` for per-key in-flight deduplication with a single queued rerun;
+  - wired `RefreshControls(...)` through the new coalescing gate, so repeated brightness, fan, slow, and audio refresh requests no longer spawn parallel duplicate backend tasks for the same refresh kind;
+  - made `ControlsRefreshed` carry its originating refresh kind, allowing the app to deterministically rerun exactly one queued refresh after an in-flight request completes.
+
+### Quality
+- Added regression tests for:
+  - request coalescer restart-on-completion behavior,
+  - independent coalescing state for distinct refresh keys,
+  - app-level refresh deduplication for repeated brightness refreshes,
+  - queued follow-up refresh behavior while the same control refresh is already in flight.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.79] - 2026-03-26
 
 ### Changed
