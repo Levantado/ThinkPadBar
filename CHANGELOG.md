@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.67] - 2026-03-25
+
+### Changed
+- Completed the remaining app-to-service migration seam for connectivity and tray runtime flows:
+  - added `services/connectivity.rs` so Wi-Fi/network runtime ownership now sits behind a single `ConnectivityService` that wraps `NetworkService` and `WifiFlowService`;
+  - `app.rs` no longer stores separate `network_service` and `wifi_flow` fields or dispatches their commands independently;
+  - tray runtime subscription is now exposed through `TrayUiService::subscription()` and `TrayRuntimeEvent`, so `app.rs` no longer consumes the lower-level tray service runtime directly.
+- Reduced `app.rs` further into typed orchestration-only behavior:
+  - Wi-Fi scan/connect/toggle flows now route through `ConnectivityRequest` emitted by `ConnectivityService`;
+  - tray runtime handling now stays behind `TrayUiService` boundaries instead of mixing service/runtime details into app message flow.
+
+### Quality
+- Added regression tests for:
+  - connectivity service backend exposure,
+  - Wi-Fi menu-open scan intent,
+  - secure-network selection remaining local until password submission.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` (`81` tests passed).
+
 ## [0.6.66] - 2026-03-25
 
 ### Changed

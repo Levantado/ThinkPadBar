@@ -1,3 +1,6 @@
+#[derive(Debug, Clone)]
+pub struct TrayRuntimeEvent(pub(crate) crate::modules::tray::TrayMessage);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayUiPrimaryAction {
     ResolveCandidates { id: String, candidates: Vec<String> },
@@ -32,6 +35,10 @@ impl TrayUiService {
         &self.tray.items
     }
 
+    pub fn subscription() -> iced::Subscription<TrayRuntimeEvent> {
+        crate::services::tray::subscription().map(TrayRuntimeEvent)
+    }
+
     pub fn menu_cursor(&self) -> Option<(i32, i32)> {
         self.menu_cursor
     }
@@ -46,10 +53,10 @@ impl TrayUiService {
 
     pub fn handle_runtime_message(
         &mut self,
-        msg: crate::modules::tray::TrayMessage,
+        msg: TrayRuntimeEvent,
         open_tray_menu_id: Option<&str>,
     ) -> bool {
-        self.tray.update(msg);
+        self.tray.update(msg.0);
         if let Some(open_id) = open_tray_menu_id {
             return !self.tray.items.contains_key(open_id);
         }
