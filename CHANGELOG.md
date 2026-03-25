@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.66] - 2026-03-25
+
+### Changed
+- Continued the service migration for remaining direct `app.rs` flows:
+  - added `services/system_info.rs` so system-monitor state now lives behind `SystemInfoService` instead of direct `SysMonitor`/`SysData` ownership in app state;
+  - added `services/session.rs` so launcher and power actions now execute through typed `SessionCommand` / `SessionFollowUp` boundaries;
+  - added `services/tray_ui.rs` so tray UI state, menu cursor tracking, candidate generation, and local tray-menu selection validation are no longer implemented ad hoc in `app.rs`.
+- Reduced `app.rs` further into orchestration-only logic:
+  - removed direct ownership of `SysMonitor`, `SysData`, `show_power_menu`, tray state, and tray-menu cursor from app state;
+  - popup close/open paths now clear session/tray transient state through service APIs;
+  - tray primary/secondary/menu-item interaction paths now go through `TrayUiService`.
+
+### Quality
+- Added regression tests for:
+  - `SystemInfoService` snapshot/thermal refresh behavior,
+  - `SessionService` launcher command and power-menu state,
+  - `TrayUiService` tray search candidate generation and invalid menu selection handling.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` (`78` tests passed).
+
 ## [0.6.65] - 2026-03-25
 
 ### Changed
