@@ -2556,7 +2556,7 @@ impl ThinkPadBar {
             iced::time::every(std::time::Duration::from_secs(slow_secs))
                 .map(|_| Message::TickSlow(chrono::Local::now())),
             crate::modules::workspaces::subscription(),
-            crate::modules::tray::Tray::subscription().map(Message::TrayMessage),
+            crate::services::tray::subscription().map(Message::TrayMessage),
             crate::modules::audio::subscription(),
             iced::event::listen_with(|event, _status, window| match event {
                 iced::Event::Window(iced::window::Event::Unfocused) => {

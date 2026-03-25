@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.58] - 2026-03-25
+
+### Changed
+- Step 1 of `services/*` migration:
+  - introduced `src/services/mod.rs` and `src/services/tray.rs`,
+  - moved tray runtime subscription/event loop ownership from `modules/tray` to `services/tray`,
+  - `app` now subscribes via `crate::services::tray::subscription()`.
+- `modules/tray` now acts as module state/model + activation backend helpers, while service layer owns integration loop wiring.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.57] - 2026-03-25
 
 ### Fixed
