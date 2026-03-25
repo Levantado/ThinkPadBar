@@ -17,6 +17,7 @@ pub enum Popup {
     ControlCenter,
     SystemMonitor,
     Calendar,
+    TrayMenu(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +136,7 @@ pub enum Message {
     TrayItemClicked(String),
     TrayItemRightClicked(String),
     TrayItemClickResolved(String, bool),
+    TrayMenuItemSelected(String, i32),
     AudioUpdated(crate::modules::audio::AudioInfo),
     MicUpdated(crate::modules::mic::MicInfo),
     BrightnessUpdated(String),
@@ -203,6 +205,40 @@ impl ThinkPadBar {
             Popup::Calendar => (400, 420),
             Popup::SystemMonitor => (400, 520),
             Popup::ControlCenter => (420, 760),
+            Popup::TrayMenu(_) => (320, 420),
+        }
+    }
+
+    fn menu_item_label(item: &crate::modules::tray::MenuItem) -> String {
+        item.label
+            .as_ref()
+            .map(|v| v.replace('_', ""))
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "(item)".to_string())
+    }
+
+    fn collect_tray_menu_items(
+        items: &[crate::modules::tray::MenuItem],
+        depth: usize,
+        out: &mut Vec<(Option<i32>, String, bool)>,
+    ) {
+        for item in items {
+            if !item.visible {
+                continue;
+            }
+            if item.menu_type == crate::modules::tray::MenuType::Separator {
+                out.push((None, String::new(), false));
+                continue;
+            }
+            let mut label = String::new();
+            for _ in 0..depth {
+                label.push_str("  ");
+            }
+            label.push_str(&Self::menu_item_label(item));
+            out.push((Some(item.id), label, item.enabled));
+            if !item.submenu.is_empty() {
+                Self::collect_tray_menu_items(&item.submenu, depth + 1, out);
+            }
         }
     }
 
@@ -922,6 +958,12 @@ impl ThinkPadBar {
             }
             Message::TrayMessage(msg) => {
                 self.tray.update(msg);
+                if let Popup::TrayMenu(open_id) = &self.popup {
+                    if !self.tray.items.contains_key(open_id) {
+                        self.popup = Popup::None;
+                        return Task::batch(self.popup_hide_tasks());
+                    }
+                }
             }
             Message::TrayItemClicked(id) => {
                 if let Some(item) = self.tray.items.get(&id) {
@@ -941,6 +983,14 @@ impl ThinkPadBar {
                 }
             }
             Message::TrayItemRightClicked(id) => {
+                if self.tray.has_menu_entries(&id) {
+                    if self.popup == Popup::TrayMenu(id.clone()) {
+                        self.popup = Popup::None;
+                        return Task::batch(self.popup_hide_tasks());
+                    }
+                    self.popup = Popup::TrayMenu(id);
+                    return Task::batch(self.popup_show_tasks(self.popup.clone()));
+                }
                 self.tray
                     .update(crate::modules::tray::TrayMessage::ActivateItemSecondary(id));
                 return Task::none();
@@ -951,6 +1001,15 @@ impl ThinkPadBar {
                         .update(crate::modules::tray::TrayMessage::ActivateItem(id));
                 }
                 return Task::perform(async {}, |_| Message::UpdateWorkspaces);
+            }
+            Message::TrayMenuItemSelected(id, menu_item_id) => {
+                self.tray
+                    .update(crate::modules::tray::TrayMessage::ActivateMenuItem(
+                        id,
+                        menu_item_id,
+                    ));
+                self.popup = Popup::None;
+                return Task::batch(self.popup_hide_tasks());
             }
             Message::AudioUpdated(info) => {
                 let audio_changed = self.audio != info;
@@ -1471,6 +1530,55 @@ impl ThinkPadBar {
     }
 
     fn view_popup(&self) -> Element<'_, Message, Theme, iced::Renderer> {
+        if let Popup::TrayMenu(tray_id) = &self.popup {
+            let mut flat = Vec::new();
+            if let Some(menu) = self.tray.menu_for(tray_id) {
+                Self::collect_tray_menu_items(&menu.submenus, 0, &mut flat);
+            }
+            let mut content = Column::new()
+                .spacing(6)
+                .push(
+                    text("Tray Menu")
+                        .size(16)
+                        .style(|_| iced::widget::text::Style {
+                            color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                        }),
+                );
+            for (item_id, label, enabled) in flat {
+                if let Some(item_id) = item_id {
+                    let mut btn = button(text(label).size(13))
+                        .width(Length::Fill)
+                        .padding(Padding::from([4, 8]));
+                    if enabled {
+                        btn = btn.on_press(Message::TrayMenuItemSelected(tray_id.clone(), item_id));
+                    }
+                    content = content.push(btn);
+                } else {
+                    content = content.push(iced::widget::horizontal_rule(1));
+                }
+            }
+            return container(
+                container(scrollable(content))
+                    .width(Length::Fill)
+                    .padding(Padding::from([12, 12]))
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(Color {
+                            a: self.config.appearance.opacity,
+                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
+                        })),
+                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                        border: iced::Border {
+                            radius: 12.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        }
+
         if self.popup == Popup::Calendar {
             let now = chrono::Local::now();
 
@@ -2624,6 +2732,7 @@ mod tests {
             icon_handle: None,
             item_is_menu: false,
             menu_path: None,
+            menu_layout: None,
         };
         let c = ThinkPadBar::tray_search_candidates(&item, "org.kde.StatusNotifierItem-1234");
         assert!(c.iter().any(|v| v == "my app"));

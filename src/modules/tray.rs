@@ -2,6 +2,7 @@ use iced::widget::image::Handle;
 use std::collections::HashMap;
 use system_tray::client::{ActivateRequest, Client, Event, UpdateEvent};
 use system_tray::item::StatusNotifierItem;
+pub use system_tray::menu::{MenuItem, MenuType, TrayMenu};
 use tokio::time::{timeout, Duration};
 use tracing::debug;
 
@@ -13,6 +14,7 @@ pub struct TrayItem {
     pub icon_handle: Option<Handle>,
     pub item_is_menu: bool,
     pub menu_path: Option<String>,
+    pub menu_layout: Option<TrayMenu>,
 }
 
 #[derive(Debug, Clone)]
@@ -23,12 +25,20 @@ pub enum TrayMessage {
     EventBatch(Vec<Event>),
     ActivateItem(String),
     ActivateItemSecondary(String),
-    Initialize(tokio::sync::mpsc::UnboundedSender<String>),
+    ActivateMenuItem(String, i32),
+    Initialize(tokio::sync::mpsc::UnboundedSender<TrayCommand>),
+}
+
+#[derive(Debug, Clone)]
+pub enum TrayCommand {
+    Default(String),
+    Secondary(String),
+    MenuItem { id: String, menu_item_id: i32 },
 }
 
 pub struct Tray {
     pub items: HashMap<String, TrayItem>,
-    pub activate_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    pub activate_tx: Option<tokio::sync::mpsc::UnboundedSender<TrayCommand>>,
     icon_cache: HashMap<String, Handle>,
 }
 
@@ -73,6 +83,7 @@ impl Tray {
                         icon_handle,
                         item_is_menu: item.item_is_menu,
                         menu_path: item.menu.clone(),
+                        menu_layout: None,
                     },
                 );
             }
@@ -97,6 +108,9 @@ impl Tray {
                         }
                         UpdateEvent::MenuConnect(path) => {
                             item.menu_path = Some(path);
+                        }
+                        UpdateEvent::Menu(layout) => {
+                            item.menu_layout = Some(layout);
                         }
                         _ => {}
                     }
@@ -126,18 +140,34 @@ impl Tray {
             }
             TrayMessage::ActivateItem(id) => {
                 if let Some(tx) = &self.activate_tx {
-                    let _ = tx.send(id);
+                    let _ = tx.send(TrayCommand::Default(id));
                 }
             }
             TrayMessage::ActivateItemSecondary(id) => {
                 if let Some(tx) = &self.activate_tx {
-                    let _ = tx.send(format!("secondary:{id}"));
+                    let _ = tx.send(TrayCommand::Secondary(id));
+                }
+            }
+            TrayMessage::ActivateMenuItem(id, menu_item_id) => {
+                if let Some(tx) = &self.activate_tx {
+                    let _ = tx.send(TrayCommand::MenuItem { id, menu_item_id });
                 }
             }
             TrayMessage::Initialize(tx) => {
                 self.activate_tx = Some(tx);
             }
         }
+    }
+
+    pub fn menu_for(&self, id: &str) -> Option<&TrayMenu> {
+        self.items
+            .get(id)
+            .and_then(|item| item.menu_layout.as_ref())
+    }
+
+    pub fn has_menu_entries(&self, id: &str) -> bool {
+        self.menu_for(id)
+            .is_some_and(|menu| menu.submenus.iter().any(|item| item.visible))
     }
 }
 
@@ -249,14 +279,6 @@ pub(crate) fn current_cursor_pos_with_fallback(last_known: (i32, i32)) -> (i32, 
     crate::modules::workspaces::hyprland_command("j/cursorpos")
         .and_then(|raw| parse_cursor_pos(&raw))
         .unwrap_or(last_known)
-}
-
-pub(crate) fn parse_activation_channel_id(raw: String) -> (bool, String) {
-    if let Some(address) = raw.strip_prefix("secondary:") {
-        (true, address.to_string())
-    } else {
-        (false, raw)
-    }
 }
 
 fn parse_status_notifier_address(address: &str) -> (&str, String) {
@@ -748,9 +770,9 @@ fn themed_icon_paths(theme_root: &str, name: &str) -> Vec<String> {
 mod tests {
     use super::{
         choose_secondary_plan, destination_from_item_address, icon_name_candidates,
-        parse_activation_channel_id, parse_cursor_pos, parse_status_notifier_address,
-        select_registered_item_address, themed_icon_paths, update_secondary_preference,
-        ActivationResult, SecondaryAction, SecondaryPlan,
+        parse_cursor_pos, parse_status_notifier_address, select_registered_item_address,
+        themed_icon_paths, update_secondary_preference, ActivationResult, SecondaryAction,
+        SecondaryPlan, Tray, TrayItem, TrayMenu,
     };
     use std::collections::HashMap;
 
@@ -759,6 +781,33 @@ mod tests {
         let c = icon_name_candidates("sample-icon.svg");
         assert!(c.iter().any(|v| v == "sample-icon.svg"));
         assert!(c.iter().any(|v| v == "sample-icon"));
+    }
+
+    #[test]
+    fn tray_has_menu_entries_uses_visible_menu_items() {
+        let mut tray = Tray::new();
+        tray.items.insert(
+            "item".to_string(),
+            TrayItem {
+                _id: "item".to_string(),
+                title: None,
+                icon_name: None,
+                icon_handle: None,
+                item_is_menu: false,
+                menu_path: Some("/menu".to_string()),
+                menu_layout: Some(TrayMenu {
+                    id: 1,
+                    submenus: vec![crate::modules::tray::MenuItem {
+                        id: 42,
+                        label: Some("Open".to_string()),
+                        visible: true,
+                        enabled: true,
+                        ..Default::default()
+                    }],
+                }),
+            },
+        );
+        assert!(tray.has_menu_entries("item"));
     }
 
     #[test]
@@ -788,20 +837,6 @@ mod tests {
         assert!(p
             .iter()
             .any(|v| v == "/usr/share/icons/Papirus-Dark/24x24/status/sample-panel.png"));
-    }
-
-    #[test]
-    fn parse_activation_channel_id_detects_secondary_prefix() {
-        let (secondary, id) = parse_activation_channel_id("secondary:org.test.Item".to_string());
-        assert!(secondary);
-        assert_eq!(id, "org.test.Item");
-    }
-
-    #[test]
-    fn parse_activation_channel_id_keeps_default_id() {
-        let (secondary, id) = parse_activation_channel_id("org.test.Item".to_string());
-        assert!(!secondary);
-        assert_eq!(id, "org.test.Item");
     }
 
     #[test]

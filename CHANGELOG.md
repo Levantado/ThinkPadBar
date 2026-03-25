@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.59] - 2026-03-25
+
+### Changed
+- Step 2 of tray hardening: introduced owned tray menu model in app/module flow.
+- `modules/tray` now stores per-item `menu_layout` state (`TrayMenu`) from tray events.
+- Right-click behavior is now deterministic:
+  - if local tray menu model exists, open local tray menu popup and execute selected menu item via `DBusMenu` command path,
+  - otherwise keep existing secondary-click activation strategy fallback chain.
+- Introduced typed tray command channel (`TrayCommand`) between module state and service runtime.
+
+### Quality
+- Added regression coverage for menu-entry availability helper and existing tray fallback paths.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.58] - 2026-03-25
 
 ### Changed
