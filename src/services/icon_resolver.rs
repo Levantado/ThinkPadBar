@@ -40,9 +40,35 @@ impl IconSearchEnv {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IconResolverDiagnostics {
+    pub cache_entries: usize,
+    pub negative_entries: usize,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub last_hit: Option<String>,
+    pub last_miss: Option<String>,
+    pub last_resolved_path: Option<String>,
+}
+
+impl IconResolverDiagnostics {
+    pub fn summary(&self) -> String {
+        let last = self
+            .last_miss
+            .as_deref()
+            .or(self.last_hit.as_deref())
+            .unwrap_or("-");
+        format!(
+            "cache {} neg {} h/m {}/{} last {}",
+            self.cache_entries, self.negative_entries, self.cache_hits, self.cache_misses, last
+        )
+    }
+}
+
 #[derive(Default)]
 pub struct IconResolver {
     cache: HashMap<IconLookupKey, Option<Handle>>,
+    diagnostics: IconResolverDiagnostics,
 }
 
 impl IconResolver {
@@ -50,18 +76,39 @@ impl IconResolver {
         Self::default()
     }
 
+    pub fn diagnostics(&self) -> IconResolverDiagnostics {
+        let mut diagnostics = self.diagnostics.clone();
+        diagnostics.cache_entries = self.cache.len();
+        diagnostics.negative_entries = self.cache.values().filter(|value| value.is_none()).count();
+        diagnostics
+    }
+
     pub fn resolve(&mut self, raw: &str, theme_hint: Option<&str>) -> Option<Handle> {
         let key = IconLookupKey {
             raw: raw.to_string(),
             theme_hint: theme_hint.map(str::to_string),
         };
-        if let Some(cached) = self.cache.get(&key) {
-            return cached.clone();
+        if let Some(cached) = self.cache.get(&key).cloned() {
+            self.diagnostics.cache_hits = self.diagnostics.cache_hits.saturating_add(1);
+            self.diagnostics.last_hit = Some(raw.to_string());
+            return cached;
         }
 
         let env = IconSearchEnv::from_process();
-        let resolved = resolve_icon_path(raw, theme_hint, &env)
+        let resolved_path = resolve_icon_path(raw, theme_hint, &env);
+        let resolved = resolved_path
+            .as_ref()
             .map(|path| Handle::from_path(path.to_string_lossy().into_owned()));
+        self.diagnostics.cache_misses = self.diagnostics.cache_misses.saturating_add(1);
+        self.diagnostics.last_hit = None;
+        self.diagnostics.last_miss = None;
+        self.diagnostics.last_resolved_path = None;
+        if let Some(path) = resolved_path.as_ref() {
+            self.diagnostics.last_hit = Some(raw.to_string());
+            self.diagnostics.last_resolved_path = Some(path.to_string_lossy().into_owned());
+        } else {
+            self.diagnostics.last_miss = Some(raw.to_string());
+        }
         self.cache.insert(key, resolved.clone());
         resolved
     }
@@ -475,5 +522,28 @@ mod tests {
         let mut resolver = IconResolver::new();
         assert!(resolver.resolve("definitely-missing-icon", None).is_none());
         assert!(resolver.resolve("definitely-missing-icon", None).is_none());
+    }
+
+    #[test]
+    fn resolver_diagnostics_track_cache_and_last_resolution_result() {
+        let temp = unique_temp_dir("thinkpadbar-icon-diagnostics");
+        let icon = temp.join("sample.png");
+        std::fs::write(&icon, b"png").expect("icon file");
+
+        let mut resolver = IconResolver::new();
+        assert!(resolver.resolve(&icon.to_string_lossy(), None).is_some());
+        assert!(resolver.resolve("definitely-missing-icon", None).is_none());
+
+        let diagnostics = resolver.diagnostics();
+        assert_eq!(diagnostics.cache_entries, 2);
+        assert_eq!(diagnostics.negative_entries, 1);
+        assert_eq!(diagnostics.cache_misses, 2);
+        assert_eq!(
+            diagnostics.last_miss.as_deref(),
+            Some("definitely-missing-icon")
+        );
+        assert!(diagnostics.summary().contains("cache 2 neg 1"));
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 }

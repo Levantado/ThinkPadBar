@@ -19,6 +19,49 @@ pub struct TrayItem {
     pub owned_menu: Option<crate::services::tray_menu::OwnedTrayMenu>,
 }
 
+impl TrayItem {
+    pub fn fallback_label(&self) -> String {
+        self.title
+            .as_deref()
+            .and_then(first_visible_alphanumeric)
+            .or_else(|| {
+                self.icon_name
+                    .as_deref()
+                    .and_then(icon_fallback_label_from_name)
+            })
+            .map(|ch| ch.to_string())
+            .unwrap_or_else(|| {
+                if self.item_is_menu {
+                    "≡".to_string()
+                } else {
+                    "•".to_string()
+                }
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrayDiagnostics {
+    pub total_items: usize,
+    pub resolved_icons: usize,
+    pub unresolved_icons: usize,
+    pub fallback_labels: usize,
+    pub resolver: crate::services::icon_resolver::IconResolverDiagnostics,
+    pub last_unresolved_item: Option<String>,
+}
+
+impl TrayDiagnostics {
+    pub fn summary(&self) -> String {
+        format!(
+            "{}/{} resolved fallback {} {}",
+            self.resolved_icons,
+            self.total_items,
+            self.fallback_labels,
+            self.resolver.summary()
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum TrayMessage {
     ItemAdded(String, Box<StatusNotifierItem>),
@@ -183,6 +226,66 @@ impl Tray {
         self.owned_menu_for(id)
             .is_some_and(crate::services::tray_menu::OwnedTrayMenu::has_visible_actions)
     }
+
+    pub fn diagnostics(&self) -> TrayDiagnostics {
+        let total_items = self.items.len();
+        let resolved_icons = self
+            .items
+            .values()
+            .filter(|item| item.icon_handle.is_some())
+            .count();
+        let fallback_labels = self
+            .items
+            .values()
+            .filter(|item| item.icon_handle.is_none())
+            .filter(|item| item.title.is_some() || item.icon_name.is_some())
+            .count();
+        let last_unresolved_item = self.items.values().find_map(|item| {
+            if item.icon_handle.is_some() {
+                return None;
+            }
+            item.title
+                .clone()
+                .or_else(|| item.icon_name.clone())
+                .or_else(|| Some(item._id.clone()))
+        });
+
+        TrayDiagnostics {
+            total_items,
+            resolved_icons,
+            unresolved_icons: total_items.saturating_sub(resolved_icons),
+            fallback_labels,
+            resolver: self.icon_resolver.diagnostics(),
+            last_unresolved_item,
+        }
+    }
+}
+
+fn first_visible_alphanumeric(raw: &str) -> Option<char> {
+    raw.chars()
+        .find(|ch| ch.is_alphanumeric())
+        .map(to_display_uppercase)
+}
+
+fn icon_fallback_label_from_name(raw: &str) -> Option<char> {
+    let basename = raw
+        .rsplit('/')
+        .next()
+        .unwrap_or(raw)
+        .trim_end_matches(".svg")
+        .trim_end_matches(".png")
+        .trim_end_matches(".xpm")
+        .trim_end_matches("-symbolic")
+        .trim_end_matches("-panel");
+
+    basename
+        .rsplit(|ch: char| !ch.is_alphanumeric())
+        .find(|segment| !segment.is_empty())
+        .and_then(first_visible_alphanumeric)
+}
+
+fn to_display_uppercase(ch: char) -> char {
+    ch.to_uppercase().next().unwrap_or(ch)
 }
 
 fn apply_menu_diffs(tray_menu: &mut TrayMenu, diffs: &[MenuDiff]) {
@@ -711,6 +814,7 @@ mod tests {
         ActivationResult, SecondaryAction, SecondaryPlan, Tray, TrayItem, TrayMenu, TrayMessage,
         UpdateEvent,
     };
+    use iced::widget::image::Handle;
     use std::collections::HashMap;
     use system_tray::menu::{MenuDiff, MenuItemUpdate};
 
@@ -751,6 +855,87 @@ mod tests {
             },
         );
         assert!(tray.has_menu_entries("item"));
+    }
+
+    #[test]
+    fn tray_item_fallback_label_prefers_title_then_icon_name_then_generic() {
+        let titled = TrayItem {
+            _id: "item".to_string(),
+            title: Some("My App".to_string()),
+            icon_name: Some("org.example.raw-icon".to_string()),
+            icon_handle: None,
+            item_is_menu: false,
+            menu_path: None,
+            menu_layout: None,
+            owned_menu: None,
+        };
+        assert_eq!(titled.fallback_label(), "M");
+
+        let icon_named = TrayItem {
+            _id: "item".to_string(),
+            title: None,
+            icon_name: Some("org.example.myapp-panel-symbolic".to_string()),
+            icon_handle: None,
+            item_is_menu: false,
+            menu_path: None,
+            menu_layout: None,
+            owned_menu: None,
+        };
+        assert_eq!(icon_named.fallback_label(), "M");
+
+        let menu = TrayItem {
+            _id: "menu".to_string(),
+            title: None,
+            icon_name: None,
+            icon_handle: None,
+            item_is_menu: true,
+            menu_path: None,
+            menu_layout: None,
+            owned_menu: None,
+        };
+        assert_eq!(menu.fallback_label(), "≡");
+    }
+
+    #[test]
+    fn tray_diagnostics_count_resolved_and_unresolved_icons() {
+        let mut tray = Tray::new();
+        tray.items.insert(
+            "resolved".to_string(),
+            TrayItem {
+                _id: "resolved".to_string(),
+                title: Some("Resolved".to_string()),
+                icon_name: Some("resolved".to_string()),
+                icon_handle: Some(Handle::from_path("/tmp/resolved.png")),
+                item_is_menu: false,
+                menu_path: None,
+                menu_layout: None,
+                owned_menu: None,
+            },
+        );
+        tray.items.insert(
+            "fallback".to_string(),
+            TrayItem {
+                _id: "fallback".to_string(),
+                title: Some("Fallback".to_string()),
+                icon_name: None,
+                icon_handle: None,
+                item_is_menu: false,
+                menu_path: None,
+                menu_layout: None,
+                owned_menu: None,
+            },
+        );
+
+        let diagnostics = tray.diagnostics();
+        assert_eq!(diagnostics.total_items, 2);
+        assert_eq!(diagnostics.resolved_icons, 1);
+        assert_eq!(diagnostics.unresolved_icons, 1);
+        assert_eq!(diagnostics.fallback_labels, 1);
+        assert_eq!(
+            diagnostics.last_unresolved_item.as_deref(),
+            Some("Fallback")
+        );
+        assert!(diagnostics.summary().contains("1/2 resolved"));
     }
 
     #[test]

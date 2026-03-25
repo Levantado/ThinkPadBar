@@ -1129,23 +1129,11 @@ impl ThinkPadBar {
                     .on_press(Message::TrayItemClicked(id_clone))
                     .on_right_press(Message::TrayItemRightClicked(id_right)),
                 );
-            } else if let Some(name) = &item.icon_name {
-                let id_right = id.clone();
-                tray_row = tray_row.push(
-                    mouse_area(
-                        container(text(name.chars().next().unwrap_or('?').to_string()).size(14))
-                            .width(Length::Fixed(16.0))
-                            .height(Length::Fixed(16.0))
-                            .align_x(iced::alignment::Horizontal::Center),
-                    )
-                    .on_press(Message::TrayItemClicked(id_clone))
-                    .on_right_press(Message::TrayItemRightClicked(id_right)),
-                );
             } else {
-                let id_right = id.clone();
+                let label = item.fallback_label();
                 tray_row = tray_row.push(
                     mouse_area(
-                        container(text("?").size(14))
+                        container(text(label).size(14))
                             .width(Length::Fixed(16.0))
                             .height(Length::Fixed(16.0))
                             .align_x(iced::alignment::Horizontal::Center),
@@ -1773,6 +1761,7 @@ impl ThinkPadBar {
             let sys_data = self.system_info_service.snapshot();
             let controls_diagnostics = self.controls_service.diagnostics();
             let idle_snapshot = self.idle_inhibitor_service.snapshot();
+            let tray_diagnostics = self.tray_ui_service.diagnostics();
             col = col
                 .push(item("", "CPU Usage", sys_data.cpu_str.clone()))
                 .push(item("󰍛", "Memory Usage", sys_data.mem_str.clone()))
@@ -1890,7 +1879,12 @@ impl ThinkPadBar {
                         "☕",
                         "Idle Inhibitor Runtime",
                         idle_snapshot.debug_summary(),
-                    ));
+                    ))
+                    .push(item("🖼", "Tray Icons", tray_diagnostics.summary()));
+
+                if let Some(last_unresolved) = tray_diagnostics.last_unresolved_item {
+                    col = col.push(item("⚠", "Tray Icon Last Unresolved", last_unresolved));
+                }
             }
 
             return container(

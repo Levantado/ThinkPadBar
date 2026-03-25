@@ -57,6 +57,10 @@ impl TrayUiService {
             .and_then(|id| self.tray.owned_menu_for(id))
     }
 
+    pub fn diagnostics(&self) -> crate::services::tray_model::TrayDiagnostics {
+        self.tray.diagnostics()
+    }
+
     pub fn close_transient_ui(&mut self) {
         self.open_menu_id = None;
         self.menu_cursor = None;

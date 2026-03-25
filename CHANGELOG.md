@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.83] - 2026-03-26
+
+### Changed
+- Extended `P3 Icon Resolver` with runtime diagnostics and better tray fallbacks:
+  - `IconResolver` now reports cache/negative-cache counts, cache hit/miss totals, and last resolution outcome so icon lookup can be diagnosed from the app debug surface without enabling extra logs;
+  - tray runtime now exposes `TrayDiagnostics`, including resolved/unresolved icon counts and the last unresolved tray item label;
+  - unresolved tray items now render a deterministic fallback glyph derived from title or icon name, instead of falling back to raw `icon_name[0]` or `?`.
+
+### Quality
+- Added regression tests for:
+  - icon-resolver diagnostics counters and last-result tracking,
+  - tray diagnostics counting resolved vs unresolved icons,
+  - deterministic fallback-label selection for tray items.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.82] - 2026-03-26
 
 ### Changed
