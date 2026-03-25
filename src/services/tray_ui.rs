@@ -8,18 +8,20 @@ pub enum TrayUiPrimaryAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayUiSecondaryAction {
-    OpenMenu(String),
-    ActivateSecondary(String),
+    OpenMenu,
+    CloseMenu,
+    ActivateSecondary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayUiSelectionAction {
-    ActivateMenuItem { id: String, menu_item_id: i32 },
+    ActivateMenuItem { menu_item_id: i32 },
     CloseMenu,
 }
 
 pub struct TrayUiService {
     tray: crate::services::tray_model::Tray,
+    open_menu_id: Option<String>,
     menu_cursor: Option<(i32, i32)>,
 }
 
@@ -27,6 +29,7 @@ impl TrayUiService {
     pub fn new() -> Self {
         Self {
             tray: crate::services::tray_model::Tray::new(),
+            open_menu_id: None,
             menu_cursor: None,
         }
     }
@@ -45,22 +48,24 @@ impl TrayUiService {
         self.menu_cursor
     }
 
-    pub fn clear_menu_cursor(&mut self) {
+    pub fn open_menu(&self) -> Option<&crate::services::tray_menu::OwnedTrayMenu> {
+        self.open_menu_id
+            .as_deref()
+            .and_then(|id| self.tray.owned_menu_for(id))
+    }
+
+    pub fn close_transient_ui(&mut self) {
+        self.open_menu_id = None;
         self.menu_cursor = None;
     }
 
-    pub fn owned_menu_for(&self, id: &str) -> Option<&crate::services::tray_menu::OwnedTrayMenu> {
-        self.tray.owned_menu_for(id)
-    }
-
-    pub fn handle_runtime_message(
-        &mut self,
-        msg: TrayRuntimeEvent,
-        open_tray_menu_id: Option<&str>,
-    ) -> bool {
+    pub fn handle_runtime_message(&mut self, msg: TrayRuntimeEvent) -> bool {
         self.tray.update(msg.0);
-        if let Some(open_id) = open_tray_menu_id {
-            return !self.tray.items.contains_key(open_id);
+        if let Some(open_id) = self.open_menu_id.as_deref() {
+            if !self.tray.items.contains_key(open_id) {
+                self.close_transient_ui();
+                return true;
+            }
         }
         false
     }
@@ -76,19 +81,24 @@ impl TrayUiService {
     pub fn handle_secondary_click(
         &mut self,
         id: String,
-        open_tray_menu_id: Option<&str>,
         cursor: Option<(i32, i32)>,
     ) -> TrayUiSecondaryAction {
         if self.tray.has_menu_entries(&id) {
-            self.menu_cursor = cursor;
-            if open_tray_menu_id.is_some_and(|open_id| open_id == id) {
-                self.menu_cursor = None;
+            if self
+                .open_menu_id
+                .as_deref()
+                .is_some_and(|open_id| open_id == id)
+            {
+                self.close_transient_ui();
+                return TrayUiSecondaryAction::CloseMenu;
             }
-            return TrayUiSecondaryAction::OpenMenu(id);
+            self.open_menu_id = Some(id);
+            self.menu_cursor = cursor;
+            return TrayUiSecondaryAction::OpenMenu;
         }
         self.tray
             .update(crate::services::tray_model::TrayMessage::ActivateItemSecondary(id.clone()));
-        TrayUiSecondaryAction::ActivateSecondary(id)
+        TrayUiSecondaryAction::ActivateSecondary
     }
 
     pub fn handle_click_resolved(&mut self, id: String, found: bool) -> bool {
@@ -99,16 +109,16 @@ impl TrayUiService {
         true
     }
 
-    pub fn handle_menu_selection(
-        &mut self,
-        id: String,
-        menu_item_id: i32,
-    ) -> TrayUiSelectionAction {
+    pub fn handle_menu_selection(&mut self, menu_item_id: i32) -> TrayUiSelectionAction {
+        let Some(id) = self.open_menu_id.clone() else {
+            self.close_transient_ui();
+            return TrayUiSelectionAction::CloseMenu;
+        };
         let is_valid = self
             .tray
             .owned_menu_for(&id)
             .is_some_and(|menu| menu.contains_action_id(menu_item_id));
-        self.menu_cursor = None;
+        self.close_transient_ui();
         if !is_valid {
             return TrayUiSelectionAction::CloseMenu;
         }
@@ -117,7 +127,7 @@ impl TrayUiService {
                 id.clone(),
                 menu_item_id,
             ));
-        TrayUiSelectionAction::ActivateMenuItem { id, menu_item_id }
+        TrayUiSelectionAction::ActivateMenuItem { menu_item_id }
     }
 
     fn search_candidates(item: &crate::services::tray_model::TrayItem, id: &str) -> Vec<String> {
@@ -179,11 +189,12 @@ impl TrayUiService {
 
 #[cfg(test)]
 mod tests {
-    use super::{TrayUiSelectionAction, TrayUiService};
+    use super::{TrayRuntimeEvent, TrayUiSecondaryAction, TrayUiSelectionAction, TrayUiService};
+    use crate::services::tray_model::{TrayItem, TrayMenu, TrayMessage};
 
     #[test]
     fn tray_candidate_generation_is_generic_and_normalized() {
-        let item = crate::services::tray_model::TrayItem {
+        let item = TrayItem {
             _id: "irrelevant".to_string(),
             title: Some("My App".to_string()),
             icon_name: Some("org.example.myapp-panel-symbolic".to_string()),
@@ -205,8 +216,149 @@ mod tests {
     #[test]
     fn invalid_menu_selection_closes_menu() {
         let mut service = TrayUiService::new();
-        let action = service.handle_menu_selection("missing".to_string(), 42);
+        let action = service.handle_menu_selection(42);
         assert_eq!(action, TrayUiSelectionAction::CloseMenu);
         assert!(service.menu_cursor().is_none());
+    }
+
+    #[test]
+    fn secondary_click_toggles_open_menu_state_for_same_item() {
+        let mut service = TrayUiService::new();
+        service.tray.items.insert(
+            "item".to_string(),
+            TrayItem {
+                _id: "item".to_string(),
+                title: Some("Item".to_string()),
+                icon_name: None,
+                icon_handle: None,
+                item_is_menu: false,
+                menu_path: Some("/menu".to_string()),
+                menu_layout: Some(TrayMenu {
+                    id: 1,
+                    submenus: vec![system_tray::menu::MenuItem {
+                        id: 42,
+                        label: Some("Open".to_string()),
+                        visible: true,
+                        enabled: true,
+                        ..Default::default()
+                    }],
+                }),
+                owned_menu: Some(crate::services::tray_menu::OwnedTrayMenu::from_layout(
+                    &TrayMenu {
+                        id: 1,
+                        submenus: vec![system_tray::menu::MenuItem {
+                            id: 42,
+                            label: Some("Open".to_string()),
+                            visible: true,
+                            enabled: true,
+                            ..Default::default()
+                        }],
+                    },
+                )),
+            },
+        );
+
+        let first = service.handle_secondary_click("item".to_string(), Some((10, 20)));
+        assert_eq!(first, TrayUiSecondaryAction::OpenMenu);
+        assert_eq!(service.open_menu_id.as_deref(), Some("item"));
+        assert_eq!(service.menu_cursor(), Some((10, 20)));
+
+        let second = service.handle_secondary_click("item".to_string(), Some((30, 40)));
+        assert_eq!(second, TrayUiSecondaryAction::CloseMenu);
+        assert_eq!(service.open_menu_id, None);
+        assert_eq!(service.menu_cursor(), None);
+    }
+
+    #[test]
+    fn runtime_remove_closes_open_menu_state() {
+        let mut service = TrayUiService::new();
+        service.tray.items.insert(
+            "item".to_string(),
+            TrayItem {
+                _id: "item".to_string(),
+                title: Some("Item".to_string()),
+                icon_name: None,
+                icon_handle: None,
+                item_is_menu: true,
+                menu_path: Some("/menu".to_string()),
+                menu_layout: Some(TrayMenu {
+                    id: 1,
+                    submenus: vec![system_tray::menu::MenuItem {
+                        id: 1,
+                        label: Some("Open".to_string()),
+                        visible: true,
+                        enabled: true,
+                        ..Default::default()
+                    }],
+                }),
+                owned_menu: Some(crate::services::tray_menu::OwnedTrayMenu::from_layout(
+                    &TrayMenu {
+                        id: 1,
+                        submenus: vec![system_tray::menu::MenuItem {
+                            id: 1,
+                            label: Some("Open".to_string()),
+                            visible: true,
+                            enabled: true,
+                            ..Default::default()
+                        }],
+                    },
+                )),
+            },
+        );
+        let _ = service.handle_secondary_click("item".to_string(), Some((1, 2)));
+
+        let closed = service.handle_runtime_message(TrayRuntimeEvent(TrayMessage::ItemRemoved(
+            "item".to_string(),
+        )));
+        assert!(closed);
+        assert_eq!(service.open_menu_id, None);
+        assert_eq!(service.menu_cursor(), None);
+    }
+
+    #[test]
+    fn menu_selection_uses_current_open_menu_id() {
+        let mut service = TrayUiService::new();
+        service.tray.items.insert(
+            "item".to_string(),
+            TrayItem {
+                _id: "item".to_string(),
+                title: Some("Item".to_string()),
+                icon_name: None,
+                icon_handle: None,
+                item_is_menu: false,
+                menu_path: Some("/menu".to_string()),
+                menu_layout: Some(TrayMenu {
+                    id: 1,
+                    submenus: vec![system_tray::menu::MenuItem {
+                        id: 7,
+                        label: Some("Open".to_string()),
+                        visible: true,
+                        enabled: true,
+                        ..Default::default()
+                    }],
+                }),
+                owned_menu: Some(crate::services::tray_menu::OwnedTrayMenu::from_layout(
+                    &TrayMenu {
+                        id: 1,
+                        submenus: vec![system_tray::menu::MenuItem {
+                            id: 7,
+                            label: Some("Open".to_string()),
+                            visible: true,
+                            enabled: true,
+                            ..Default::default()
+                        }],
+                    },
+                )),
+            },
+        );
+        let _ = service.handle_secondary_click("item".to_string(), Some((1, 2)));
+
+        let action = service.handle_menu_selection(7);
+        assert_eq!(
+            action,
+            TrayUiSelectionAction::ActivateMenuItem { menu_item_id: 7 }
+        );
+        assert_eq!(service.open_menu_id, None);
+        assert_eq!(service.menu_cursor(), None);
     }
 }

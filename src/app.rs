@@ -16,7 +16,7 @@ pub enum Popup {
     ControlCenter,
     SystemMonitor,
     Calendar,
-    TrayMenu(String),
+    TrayMenu,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +108,7 @@ pub enum Message {
     TrayItemClicked(String),
     TrayItemRightClicked(String),
     TrayItemClickResolved(String, bool),
-    TrayMenuItemSelected(String, i32),
+    TrayMenuItemSelected(i32),
     OpenOverskride,
     SessionCommandCompleted(crate::services::session::SessionFollowUp),
     DBusConnected(zbus::Connection),
@@ -170,7 +170,7 @@ impl ThinkPadBar {
             Popup::ControlCenter => crate::services::popup_anchor::PopupSurfaceKind::ControlCenter,
             Popup::SystemMonitor => crate::services::popup_anchor::PopupSurfaceKind::SystemMonitor,
             Popup::Calendar => crate::services::popup_anchor::PopupSurfaceKind::Calendar,
-            Popup::TrayMenu(_) => crate::services::popup_anchor::PopupSurfaceKind::TrayMenu,
+            Popup::TrayMenu => crate::services::popup_anchor::PopupSurfaceKind::TrayMenu,
         }
     }
 
@@ -504,7 +504,7 @@ impl ThinkPadBar {
                 if Self::should_close_popup_on_unfocus(self.popup_window_id, &self.popup, window_id)
                 {
                     self.popup = Popup::None;
-                    self.tray_ui_service.clear_menu_cursor();
+                    self.tray_ui_service.close_transient_ui();
                     self.session_service.close_transient_ui();
                     self.network_service.close_transient_ui();
                     self.calendar_offset = 0;
@@ -549,7 +549,7 @@ impl ThinkPadBar {
 
                 if self.popup != Popup::None && active_window_changed {
                     self.popup = Popup::None;
-                    self.tray_ui_service.clear_menu_cursor();
+                    self.tray_ui_service.close_transient_ui();
                     self.session_service.close_transient_ui();
                     self.network_service.close_transient_ui();
                     self.calendar_offset = 0;
@@ -583,7 +583,7 @@ impl ThinkPadBar {
 
                 if self.popup == target {
                     self.popup = Popup::None;
-                    self.tray_ui_service.clear_menu_cursor();
+                    self.tray_ui_service.close_transient_ui();
                     self.session_service.close_transient_ui();
                     self.network_service.close_transient_ui();
                     if target == Popup::Calendar {
@@ -758,11 +758,7 @@ impl ThinkPadBar {
                 return Task::batch(tasks);
             }
             Message::TrayEvent(msg) => {
-                let open_id = match &self.popup {
-                    Popup::TrayMenu(id) => Some(id.as_str()),
-                    _ => None,
-                };
-                if self.tray_ui_service.handle_runtime_message(msg, open_id) {
+                if self.tray_ui_service.handle_runtime_message(msg) {
                     self.popup = Popup::None;
                     return Task::batch(self.popup_hide_tasks());
                 }
@@ -789,25 +785,19 @@ impl ThinkPadBar {
                 }
             }
             Message::TrayItemRightClicked(id) => {
-                let open_id = match &self.popup {
-                    Popup::TrayMenu(open_id) => Some(open_id.as_str()),
-                    _ => None,
-                };
-                match self.tray_ui_service.handle_secondary_click(
-                    id.clone(),
-                    open_id,
-                    self.compositor_service.cursor_position(),
-                ) {
-                    crate::services::tray_ui::TrayUiSecondaryAction::OpenMenu(menu_id) => {
-                        if self.popup == Popup::TrayMenu(menu_id.clone()) {
-                            self.popup = Popup::None;
-                            self.tray_ui_service.clear_menu_cursor();
-                            return Task::batch(self.popup_hide_tasks());
-                        }
-                        self.popup = Popup::TrayMenu(menu_id);
+                match self
+                    .tray_ui_service
+                    .handle_secondary_click(id.clone(), self.compositor_service.cursor_position())
+                {
+                    crate::services::tray_ui::TrayUiSecondaryAction::OpenMenu => {
+                        self.popup = Popup::TrayMenu;
                         return Task::batch(self.popup_show_tasks(self.popup.clone()));
                     }
-                    crate::services::tray_ui::TrayUiSecondaryAction::ActivateSecondary(_) => {
+                    crate::services::tray_ui::TrayUiSecondaryAction::CloseMenu => {
+                        self.popup = Popup::None;
+                        return Task::batch(self.popup_hide_tasks());
+                    }
+                    crate::services::tray_ui::TrayUiSecondaryAction::ActivateSecondary => {
                         return Task::none();
                     }
                 }
@@ -817,8 +807,8 @@ impl ThinkPadBar {
                     return Task::perform(async {}, |_| Message::RefreshCompositor);
                 }
             }
-            Message::TrayMenuItemSelected(id, menu_item_id) => {
-                match self.tray_ui_service.handle_menu_selection(id, menu_item_id) {
+            Message::TrayMenuItemSelected(menu_item_id) => {
+                match self.tray_ui_service.handle_menu_selection(menu_item_id) {
                     crate::services::tray_ui::TrayUiSelectionAction::CloseMenu => {
                         self.popup = Popup::None;
                         return Task::batch(self.popup_hide_tasks());
@@ -1316,7 +1306,7 @@ impl ThinkPadBar {
 
     fn view_popup(&self) -> Element<'_, Message, Theme, iced::Renderer> {
         let compositor = self.compositor_service.snapshot();
-        if let Popup::TrayMenu(tray_id) = &self.popup {
+        if let Popup::TrayMenu = &self.popup {
             let mut content = Column::new()
                 .spacing(6)
                 .push(
@@ -1326,7 +1316,7 @@ impl ThinkPadBar {
                             color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
                         }),
                 );
-            if let Some(menu) = self.tray_ui_service.owned_menu_for(tray_id) {
+            if let Some(menu) = self.tray_ui_service.open_menu() {
                 for node in menu.nodes() {
                     match node {
                         crate::services::tray_menu::OwnedTrayMenuNode::Separator => {
@@ -1343,10 +1333,7 @@ impl ThinkPadBar {
                                 .width(Length::Fill)
                                 .padding(Padding::from([4, 8]));
                             if action.enabled {
-                                btn = btn.on_press(Message::TrayMenuItemSelected(
-                                    tray_id.clone(),
-                                    action.id,
-                                ));
+                                btn = btn.on_press(Message::TrayMenuItemSelected(action.id));
                             }
                             content = content.push(btn);
                         }

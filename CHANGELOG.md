@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.73] - 2026-03-25
+
+### Changed
+- Completed the remaining `M3 Tray Domain Cleanup` step:
+  - `TrayUiService` now owns the current open tray-menu id in addition to menu cursor state, so `app.rs` no longer carries tray-specific popup identity state;
+  - `Popup::TrayMenu` is now a plain popup kind without embedded item id, and tray menu selection dispatch uses the current service-owned open menu context;
+  - tray runtime removal and repeated secondary-click behavior now close/open the current tray menu through service-owned state transitions instead of `app`-level string matching.
+
+### Quality
+- Added regression tests for:
+  - repeated secondary-click toggling the same tray menu open/closed,
+  - runtime tray-item removal closing an open tray menu,
+  - menu item selection using the current service-owned open menu id.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` (`89` tests passed).
+
 ## [0.6.72] - 2026-03-25
 
 ### Changed
