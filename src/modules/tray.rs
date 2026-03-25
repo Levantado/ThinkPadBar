@@ -495,16 +495,6 @@ impl std::fmt::Display for ActivationResult {
     }
 }
 
-impl ActivationResult {
-    fn successful_action(&self) -> Option<SecondaryAction> {
-        match self {
-            ActivationResult::PrimaryOk(action) => Some(*action),
-            ActivationResult::FallbackOk { fallback, .. } => Some(*fallback),
-            ActivationResult::Failed { .. } => None,
-        }
-    }
-}
-
 async fn ensure_context_connection(
     cached: &mut Option<zbus::Connection>,
 ) -> Result<&zbus::Connection, zbus::Error> {
@@ -618,10 +608,13 @@ fn update_secondary_preference(
     id: &str,
     result: &ActivationResult,
 ) {
-    if let Some(success_action) = result.successful_action() {
-        preferred_secondary_actions.insert(id.to_string(), success_action);
-    } else {
-        preferred_secondary_actions.remove(id);
+    match result {
+        ActivationResult::PrimaryOk(success_action) => {
+            preferred_secondary_actions.insert(id.to_string(), *success_action);
+        }
+        ActivationResult::FallbackOk { .. } | ActivationResult::Failed { .. } => {
+            preferred_secondary_actions.remove(id);
+        }
     }
 }
 
@@ -849,6 +842,13 @@ mod tests {
                 primary: SecondaryAction::ContextMenu,
                 fallback: SecondaryAction::SecondaryActivate,
             },
+        );
+        assert!(!prefs.contains_key("item-a"));
+
+        update_secondary_preference(
+            &mut prefs,
+            "item-a",
+            &ActivationResult::PrimaryOk(SecondaryAction::SecondaryActivate),
         );
         assert_eq!(
             prefs.get("item-a"),

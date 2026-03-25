@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.54] - 2026-03-25
+
+### Fixed
+- Adjusted per-item tray right-click pinning after runtime validation:
+  - successful method is pinned only when the primary route succeeds,
+  - fallback success no longer gets pinned as preferred action,
+  - fallback/failure clears stale preference for the item.
+- This prevents post-first-click degradation where a one-off fallback could lock subsequent clicks into a non-deterministic/ineffective path.
+
+### Quality
+- Updated regression test for preference lifecycle (`primary` pin + fallback/failure clear).
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.53] - 2026-03-25
 
 ### Fixed
