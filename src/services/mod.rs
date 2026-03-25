@@ -1,6 +1,7 @@
 pub mod compositor;
 pub mod connectivity;
 pub mod controls;
+pub mod idle_inhibitor;
 pub mod network;
 pub mod popup_anchor;
 pub mod session;

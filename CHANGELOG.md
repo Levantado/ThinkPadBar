@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.68] - 2026-03-25
+
+### Changed
+- Added native Wayland idle inhibition using `zwp_idle_inhibit_manager_v1`:
+  - introduced `services/idle_inhibitor.rs`, which binds the compositor's idle-inhibit manager from the existing main bar `wl_surface` backend instead of using external commands or compositor-specific shell integration;
+  - the inhibitor is attached to the main layer-surface window, so the bar can keep the session awake while remaining inside the application's existing Wayland lifecycle.
+- Extended the control popup with an idle-inhibitor toggle button:
+  - the new button lives alongside the Wi-Fi and Bluetooth toggles,
+  - it reflects `On` / `Off` / `N/A` based on real Wayland capability availability.
+- Added a live idle-inhibitor status icon to the main pill:
+  - when the inhibitor is active, an extra `coffee` icon is shown next to the existing connectivity/battery indicators.
+
+### Quality
+- Added regression tests for:
+  - idle-inhibitor snapshot defaults,
+  - idle-inhibitor label mapping,
+  - no-support toggle behavior remaining inactive.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` (`84` tests passed).
+
 ## [0.6.67] - 2026-03-25
 
 ### Changed

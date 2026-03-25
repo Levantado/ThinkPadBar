@@ -4180,7 +4180,7 @@ dependencies = [
 
 [[package]]
 name = "thinkpadbar"
-version = "0.6.67"
+version = "0.6.68"
 dependencies = [
  "chrono",
  "dirs",
@@ -4193,6 +4193,8 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols",
  "zbus 5.14.0",
 ]
 

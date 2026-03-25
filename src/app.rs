@@ -36,6 +36,7 @@ pub struct ThinkPadBar {
     clock: String,
     controls: crate::services::controls::ControlsSnapshot,
     connectivity_service: crate::services::connectivity::ConnectivityService,
+    idle_inhibitor_service: crate::services::idle_inhibitor::IdleInhibitorService,
     popup: Popup,
     battery_str: String,
     audio_str: String,
@@ -102,6 +103,7 @@ pub enum Message {
     WifiConnectResult(bool),
     ToggleWifi(bool),
     ToggleBluetooth(bool),
+    ToggleIdleInhibitor,
     NextKeyboardLayout,
     TogglePowerMenu,
     PowerAction(PowerAction),
@@ -117,6 +119,7 @@ pub enum Message {
     WifiUpdated(crate::services::connectivity::WifiInfo),
     OpenOverskride,
     SessionCommandCompleted(crate::services::session::SessionFollowUp),
+    IdleInhibitorSurface(crate::services::idle_inhibitor::IdleInhibitorSurfaceEvent),
     DBusConnected(zbus::Connection),
     DBusConnectAttempted(Option<zbus::Connection>),
     PopupWindowUnfocused(Id),
@@ -366,6 +369,8 @@ impl ThinkPadBar {
             let controls_snapshot = controls_service.snapshot().clone();
             let connectivity_service =
                 crate::services::connectivity::ConnectivityService::new(&cfg.network);
+            let idle_inhibitor_service =
+                crate::services::idle_inhibitor::IdleInhibitorService::new();
             let popup_anchor_service =
                 crate::services::popup_anchor::PopupAnchorService::new(cfg.appearance.bar_height);
             let session_service = crate::services::session::SessionService::new();
@@ -384,6 +389,7 @@ impl ThinkPadBar {
                 clock: Local::now().format("%a %d %b %H:%M").to_string(),
                 controls: controls_snapshot,
                 connectivity_service,
+                idle_inhibitor_service,
                 popup: Popup::None,
                 battery_str: String::new(),
                 audio_str: String::new(),
@@ -758,6 +764,9 @@ impl ThinkPadBar {
                 self.controls = self.controls_service.snapshot().clone();
                 return self.execute_controls_command(command);
             }
+            Message::ToggleIdleInhibitor => {
+                self.idle_inhibitor_service.toggle();
+            }
             Message::OpenOverskride => {
                 return self.execute_controls_command(
                     crate::services::controls::ControlsCommand::OpenOverskride,
@@ -874,6 +883,10 @@ impl ThinkPadBar {
             }
             Message::WifiUpdated(info) => {
                 self.connectivity_service.sync_wifi_info(info);
+            }
+            Message::IdleInhibitorSurface(event) => {
+                self.idle_inhibitor_service
+                    .observe_surface(self.main_window_id, event);
             }
         }
         Task::none()
@@ -1124,6 +1137,7 @@ impl ThinkPadBar {
         } else {
             "󰂲"
         };
+        let idle_snapshot = self.idle_inhibitor_service.snapshot();
 
         let bat_cap = self.controls.battery.capacity;
         let bat_status = &self.controls.battery.status;
@@ -1166,12 +1180,16 @@ impl ThinkPadBar {
             (icon, color)
         };
 
+        let mut combined_pill_row = Row::new()
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .push(text(wifi_icon).size(14))
+            .push(text(bt_icon).size(14));
+        if idle_snapshot.enabled {
+            combined_pill_row = combined_pill_row.push(text("").size(14));
+        }
         let combined_pill = container(
-            Row::new()
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .push(text(wifi_icon).size(14))
-                .push(text(bt_icon).size(14))
+            combined_pill_row
                 .push(
                     text(bat_icon)
                         .size(14)
@@ -2152,6 +2170,61 @@ impl ThinkPadBar {
                 }
             }
         });
+        let idle_snapshot = self.idle_inhibitor_service.snapshot();
+        let idle_btn = {
+            let mut btn = button(
+                Row::new()
+                    .spacing(4)
+                    .align_y(Alignment::Center)
+                    .push(text("").size(18))
+                    .push(text(idle_snapshot.label()).size(12)),
+            )
+            .width(Length::FillPortion(1))
+            .padding(Padding::from([12, 12]))
+            .style(move |_, _| {
+                if idle_snapshot.enabled {
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb8(
+                            0x7a, 0xa2, 0xf7,
+                        ))),
+                        text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
+                        border: iced::Border {
+                            radius: 16.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                } else if idle_snapshot.available {
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb8(
+                            0x29, 0x2e, 0x42,
+                        ))),
+                        text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                        border: iced::Border {
+                            radius: 16.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                } else {
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb8(
+                            0x23, 0x27, 0x38,
+                        ))),
+                        text_color: Color::from_rgb8(0x56, 0x5f, 0x89),
+                        border: iced::Border {
+                            radius: 16.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                }
+            });
+            if idle_snapshot.available {
+                btn = btn.on_press(Message::ToggleIdleInhibitor);
+            }
+            btn
+        };
         let bt_app_btn = button(
             Row::new()
                 .spacing(4)
@@ -2348,7 +2421,13 @@ impl ThinkPadBar {
             .spacing(20)
             .push(top_row)
             .push(sliders_col)
-            .push(Row::new().spacing(16).push(wifi_btn).push(bt_btn))
+            .push(
+                Row::new()
+                    .spacing(16)
+                    .push(wifi_btn)
+                    .push(bt_btn)
+                    .push(idle_btn),
+            )
             .push(Row::new().spacing(16).push(bt_app_btn));
 
         if wifi_snapshot.menu_open {
@@ -2527,6 +2606,14 @@ impl ThinkPadBar {
                 iced::Event::Window(iced::window::Event::Unfocused) => {
                     Some(Message::PopupWindowUnfocused(window))
                 }
+                iced::Event::PlatformSpecific(iced::event::PlatformSpecific::Wayland(
+                    iced::event::wayland::Event::Layer(_, surface, window_id),
+                )) => Some(Message::IdleInhibitorSurface(
+                    crate::services::idle_inhibitor::IdleInhibitorSurfaceEvent {
+                        window_id,
+                        surface,
+                    },
+                )),
                 _ => None,
             }),
         ])
@@ -2591,6 +2678,7 @@ mod tests {
             connectivity_service: crate::services::connectivity::ConnectivityService::new(
                 &crate::config::NetworkConfig::default(),
             ),
+            idle_inhibitor_service: crate::services::idle_inhibitor::IdleInhibitorService::new(),
             popup: Popup::None,
             battery_str: String::new(),
             audio_str: String::new(),

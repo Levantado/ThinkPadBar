@@ -1,6 +1,6 @@
 [package]
 name = "thinkpadbar"
-version = "0.6.67"
+version = "0.6.68"
 edition = "2021"
 
 
@@ -18,3 +18,5 @@ dirs = "6.0"
 libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wayland-client = "0.31.13"
+wayland-protocols = { version = "0.32.11", features = ["client", "unstable"] }
