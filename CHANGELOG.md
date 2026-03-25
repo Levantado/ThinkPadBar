@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.79] - 2026-03-26
+
+### Changed
+- Started `P2 Coalescing Foundation` with a minimal reusable control-path coalescer:
+  - added `services/coalescing.rs` with a small generic `ValueCoalescer<T>` primitive for latest-value wins semantics;
+  - wired control-center slider bursts through coalesced flushes for `volume`, `mic volume`, and `brightness`, so dragging sliders no longer spawns a backend command for every intermediate value;
+  - kept UI preview immediate while deferring the actual backend command to a short coalesced flush window.
+
+### Quality
+- Added regression tests for:
+  - stale coalescing generations not consuming the latest pending value,
+  - current generations consuming a value only once,
+  - per-kind coalescing independence for `volume` and `brightness`,
+  - latest-generation wins behavior in the `app` control coalescing path.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.78] - 2026-03-26
 
 ### Changed

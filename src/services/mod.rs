@@ -1,3 +1,4 @@
+pub mod coalescing;
 pub mod compositor;
 pub mod controls;
 pub mod controls_backends;

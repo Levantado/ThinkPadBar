@@ -8,6 +8,7 @@ use iced::{
     Alignment, Color, Element, Length, Padding, Task, Theme,
 };
 use std::fmt::Write as _;
+use std::time::Duration;
 use tracing::info;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,7 @@ pub struct ThinkPadBar {
     session_service: crate::services::session::SessionService,
     system_info_service: crate::services::system_info::SystemInfoService,
     tray_ui_service: crate::services::tray_ui::TrayUiService,
+    controls_coalescing: ControlsCoalescing,
     perf: PerfCounters,
     show_debug_overlay: bool,
     debug_ui_enabled: bool,
@@ -91,6 +93,7 @@ pub enum Message {
     SetMicVolume(u32),
     SetFanLevel(String),
     SetBrightness(u32),
+    FlushCoalescedControl(CoalescedControlKind, u64),
     SetPowerProfile(String),
     CyclePerformanceProfile,
     NetworkCommand(crate::services::network::NetworkCommand),
@@ -118,7 +121,54 @@ pub enum Message {
     ToggleDebugOverlay,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoalescedControlKind {
+    Volume,
+    MicVolume,
+    Brightness,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ControlsCoalescing {
+    volume: crate::services::coalescing::ValueCoalescer<u32>,
+    mic_volume: crate::services::coalescing::ValueCoalescer<u32>,
+    brightness: crate::services::coalescing::ValueCoalescer<u32>,
+}
+
+impl ControlsCoalescing {
+    fn push(&mut self, kind: CoalescedControlKind, value: u32) -> u64 {
+        match kind {
+            CoalescedControlKind::Volume => self.volume.push(value),
+            CoalescedControlKind::MicVolume => self.mic_volume.push(value),
+            CoalescedControlKind::Brightness => self.brightness.push(value),
+        }
+    }
+
+    fn take_command_if_current(
+        &mut self,
+        kind: CoalescedControlKind,
+        generation: u64,
+    ) -> Option<crate::services::controls::ControlsCommand> {
+        match kind {
+            CoalescedControlKind::Volume => self
+                .volume
+                .take_if_current(generation)
+                .map(crate::services::controls::ControlsCommand::SetVolume),
+            CoalescedControlKind::MicVolume => self
+                .mic_volume
+                .take_if_current(generation)
+                .map(crate::services::controls::ControlsCommand::SetMicVolume),
+            CoalescedControlKind::Brightness => self
+                .brightness
+                .take_if_current(generation)
+                .map(crate::services::controls::ControlsCommand::SetBrightness),
+        }
+    }
+}
+
 impl ThinkPadBar {
+    const CONTROL_COALESCE_DELAY_MS: u64 = 75;
+
     fn debug_ui_enabled_from_rust_log(raw: Option<&str>) -> bool {
         let Some(raw) = raw else {
             return false;
@@ -310,6 +360,19 @@ impl ThinkPadBar {
         )
     }
 
+    fn schedule_coalesced_control_flush(
+        kind: CoalescedControlKind,
+        generation: u64,
+    ) -> Task<Message> {
+        Task::perform(
+            async move {
+                tokio::time::sleep(Duration::from_millis(Self::CONTROL_COALESCE_DELAY_MS)).await;
+                (kind, generation)
+            },
+            |(kind, generation)| Message::FlushCoalescedControl(kind, generation),
+        )
+    }
+
     fn request_compositor_refresh(&mut self) -> Task<Message> {
         self.perf.workspace_refresh_requested =
             self.perf.workspace_refresh_requested.saturating_add(1);
@@ -412,6 +475,7 @@ impl ThinkPadBar {
                 session_service,
                 system_info_service,
                 tray_ui_service,
+                controls_coalescing: ControlsCoalescing::default(),
                 perf: PerfCounters::default(),
                 show_debug_overlay: false,
                 debug_ui_enabled: Self::debug_ui_enabled(),
@@ -627,7 +691,13 @@ impl ThinkPadBar {
                 self.controls_service.preview_command(&command);
                 self.controls = self.controls_service.snapshot().clone();
                 self.sync_control_summary_strings();
-                return self.execute_controls_command(command);
+                let generation = self
+                    .controls_coalescing
+                    .push(CoalescedControlKind::Volume, val);
+                return Self::schedule_coalesced_control_flush(
+                    CoalescedControlKind::Volume,
+                    generation,
+                );
             }
             Message::ToggleAudioMute => {
                 return self.execute_controls_command(
@@ -638,7 +708,13 @@ impl ThinkPadBar {
                 let command = crate::services::controls::ControlsCommand::SetMicVolume(val);
                 self.controls_service.preview_command(&command);
                 self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                let generation = self
+                    .controls_coalescing
+                    .push(CoalescedControlKind::MicVolume, val);
+                return Self::schedule_coalesced_control_flush(
+                    CoalescedControlKind::MicVolume,
+                    generation,
+                );
             }
             Message::ToggleMicMute => {
                 return self.execute_controls_command(
@@ -649,7 +725,21 @@ impl ThinkPadBar {
                 let command = crate::services::controls::ControlsCommand::SetBrightness(val);
                 self.controls_service.preview_command(&command);
                 self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                let generation = self
+                    .controls_coalescing
+                    .push(CoalescedControlKind::Brightness, val);
+                return Self::schedule_coalesced_control_flush(
+                    CoalescedControlKind::Brightness,
+                    generation,
+                );
+            }
+            Message::FlushCoalescedControl(kind, generation) => {
+                if let Some(command) = self
+                    .controls_coalescing
+                    .take_command_if_current(kind, generation)
+                {
+                    return self.execute_controls_command(command);
+                }
             }
             Message::SetFanLevel(level) => {
                 let command = crate::services::controls::ControlsCommand::SetFanLevel(level);
@@ -2626,7 +2716,7 @@ impl ThinkPadBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{Popup, ThinkPadBar};
+    use super::{CoalescedControlKind, ControlsCoalescing, Popup, ThinkPadBar};
     use iced::window::Id;
 
     #[test]
@@ -2726,6 +2816,7 @@ mod tests {
                 crate::modules::system::SysData::default(),
             ),
             tray_ui_service: crate::services::tray_ui::TrayUiService::new(),
+            controls_coalescing: ControlsCoalescing::default(),
             perf: super::PerfCounters::default(),
             show_debug_overlay: false,
             debug_ui_enabled: false,
@@ -2755,5 +2846,39 @@ mod tests {
         assert!(!ThinkPadBar::debug_ui_enabled_from_rust_log(Some(
             "hyper=debug,thinkpadbar=info"
         )));
+    }
+
+    #[test]
+    fn control_coalescing_keeps_only_latest_generation_per_kind() {
+        let mut coalescing = ControlsCoalescing::default();
+        let first = coalescing.push(CoalescedControlKind::Volume, 15);
+        let second = coalescing.push(CoalescedControlKind::Volume, 42);
+
+        assert_eq!(
+            coalescing.take_command_if_current(CoalescedControlKind::Volume, first),
+            None
+        );
+        assert_eq!(
+            coalescing.take_command_if_current(CoalescedControlKind::Volume, second),
+            Some(crate::services::controls::ControlsCommand::SetVolume(42))
+        );
+    }
+
+    #[test]
+    fn control_coalescing_tracks_each_kind_independently() {
+        let mut coalescing = ControlsCoalescing::default();
+        let volume = coalescing.push(CoalescedControlKind::Volume, 33);
+        let brightness = coalescing.push(CoalescedControlKind::Brightness, 77);
+
+        assert_eq!(
+            coalescing.take_command_if_current(CoalescedControlKind::Brightness, brightness),
+            Some(crate::services::controls::ControlsCommand::SetBrightness(
+                77
+            ))
+        );
+        assert_eq!(
+            coalescing.take_command_if_current(CoalescedControlKind::Volume, volume),
+            Some(crate::services::controls::ControlsCommand::SetVolume(33))
+        );
     }
 }
