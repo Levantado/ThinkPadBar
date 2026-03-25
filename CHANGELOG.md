@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.65] - 2026-03-25
+
+### Changed
+- Completed the next app-orchestration reduction step from plan item 4:
+  - added `services/controls.rs` with owned `ControlsSnapshot`, typed `ControlsRefreshKind`, `ControlsEvent`, `ControlsCommand`, and `ControlsFollowUp`;
+  - moved control-center runtime orchestration in `app.rs` from direct module calls to `ControlsService` refresh/command boundaries;
+  - removed direct app ownership of audio/mic/brightness/fan/battery/power/bluetooth runtime fields in favor of typed service snapshot state.
+- Deepened compositor service ownership:
+  - `CompositorSnapshot` now includes keyboard layout,
+  - `CompositorService` now owns typed compositor subscriptions/events and keyboard-layout actions,
+  - `app.rs` now refreshes compositor state through `CompositorEvent`/`CompositorRefreshed` instead of module-level workspace messages.
+- Lower layers no longer depend on `app::Message` for these flows:
+  - `modules/audio.rs` subscription now emits typed controls events,
+  - `modules/workspaces.rs` subscription now emits typed compositor events.
+
+### Quality
+- Added regression tests for:
+  - controls service brightness parsing,
+  - controls snapshot preview/apply flows,
+  - compositor snapshot still honoring backend fallback semantics after typed event migration.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` (`73` tests passed).
+
 ## [0.6.64] - 2026-03-25
 
 ### Changed

@@ -1,4 +1,5 @@
 use iced::Subscription;
+use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Instant;
@@ -12,11 +13,17 @@ pub enum CompositorBackendKind {
     Niri,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositorEvent {
+    StateChanged,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositorSnapshot {
     pub workspaces: Vec<WorkspaceInfo>,
     pub active_window: String,
     pub special_workspace_visible: bool,
+    pub keyboard_layout: String,
     pub configured_backend: CompositorBackendKind,
     pub active_backend: CompositorBackendKind,
 }
@@ -62,8 +69,10 @@ pub trait CompositorBackend {
     fn get_workspaces(&self) -> Vec<WorkspaceInfo>;
     fn is_special_workspace_visible(&self) -> bool;
     fn get_active_window_title(&self) -> String;
+    fn get_keyboard_layout(&self) -> String;
     fn switch_workspace(&self, id: i32, name: &str);
-    fn subscription(&self) -> Subscription<crate::app::Message>;
+    fn next_keyboard_layout(&self);
+    fn subscription(&self) -> Subscription<CompositorEvent>;
     fn cursor_position(&self) -> Option<(i32, i32)>;
     fn find_and_switch_to_app(&self, name: String) -> Pin<Box<dyn Future<Output = bool> + Send>>;
 }
@@ -73,7 +82,7 @@ pub struct HyprlandBackend;
 
 impl HyprlandBackend {
     fn parse_cursor_pos(raw: &str) -> Option<(i32, i32)> {
-        let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+        let value = serde_json::from_str::<Value>(raw).ok()?;
         let x = value.get("x")?.as_f64()?.round() as i32;
         let y = value.get("y")?.as_f64()?.round() as i32;
         Some((x, y))
@@ -93,11 +102,19 @@ impl CompositorBackend for HyprlandBackend {
         crate::modules::workspaces::get_active_window_title()
     }
 
+    fn get_keyboard_layout(&self) -> String {
+        crate::modules::keyboard::get_layout()
+    }
+
     fn switch_workspace(&self, id: i32, name: &str) {
         crate::modules::workspaces::switch_workspace(id, name);
     }
 
-    fn subscription(&self) -> Subscription<crate::app::Message> {
+    fn next_keyboard_layout(&self) {
+        crate::modules::keyboard::next_layout();
+    }
+
+    fn subscription(&self) -> Subscription<CompositorEvent> {
         crate::modules::workspaces::subscription()
     }
 
@@ -142,6 +159,7 @@ impl CompositorService {
             workspaces: self.backend.get_workspaces(),
             active_window: self.backend.get_active_window_title(),
             special_workspace_visible: self.backend.is_special_workspace_visible(),
+            keyboard_layout: self.backend.get_keyboard_layout(),
             configured_backend: self.configured_backend,
             active_backend: self.active_backend,
         }
@@ -167,7 +185,11 @@ impl CompositorService {
         self.backend.switch_workspace(id, name);
     }
 
-    pub fn subscription(&self) -> Subscription<crate::app::Message> {
+    pub fn next_keyboard_layout(&self) {
+        self.backend.next_keyboard_layout();
+    }
+
+    pub fn subscription(&self) -> Subscription<CompositorEvent> {
         self.backend.subscription()
     }
 

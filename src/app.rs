@@ -34,20 +34,10 @@ pub struct ThinkPadBar {
     dbus_conn: Option<zbus::Connection>,
     compositor: crate::services::compositor::CompositorSnapshot,
     clock: String,
-    brightness: String,
-    audio: crate::modules::audio::AudioInfo,
-    mic: crate::modules::mic::MicInfo,
-    fan: crate::modules::fan::FanInfo,
-    battery: crate::modules::battery::BatteryInfo,
-    power_profile: String,
+    controls: crate::services::controls::ControlsSnapshot,
     wifi_flow: crate::services::wifi_flow::WifiFlowService,
     show_power_menu: bool,
-    keyboard_layout: String,
-    bluetooth: bool,
     popup: Popup,
-    volume_level: u32,
-    mic_volume_level: u32,
-    brightness_level: u32,
     battery_str: String,
     audio_str: String,
     main_window_id: Option<Id>,
@@ -57,6 +47,7 @@ pub struct ThinkPadBar {
     calendar_offset: i32,
     tray: crate::modules::tray::Tray,
     compositor_service: crate::services::compositor::CompositorService,
+    controls_service: crate::services::controls::ControlsService,
     network_service: crate::services::network::NetworkService,
     popup_anchor_service: crate::services::popup_anchor::PopupAnchorService,
     perf: PerfCounters,
@@ -89,12 +80,14 @@ impl PerfCounters {
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick(chrono::DateTime<chrono::Local>),
-    TickBrightness(chrono::DateTime<chrono::Local>),
-    TickThermal(chrono::DateTime<chrono::Local>),
     TickSlow(chrono::DateTime<chrono::Local>),
-    RefreshAudioMic,
-    UpdateWorkspaces,
-    WorkspacesUpdated(crate::services::compositor::RefreshResult, String),
+    RefreshControls(crate::services::controls::ControlsRefreshKind),
+    ControlsRefreshed(crate::services::controls::ControlsRefresh),
+    ControlsEvent(crate::services::controls::ControlsEvent),
+    ControlsCommandCompleted(crate::services::controls::ControlsFollowUp),
+    RefreshCompositor,
+    CompositorEvent(crate::services::compositor::CompositorEvent),
+    CompositorRefreshed(crate::services::compositor::RefreshResult),
     SwitchWorkspace(i32, String),
     TogglePopup(Popup),
     SetVolume(u32),
@@ -124,14 +117,7 @@ pub enum Message {
     TrayItemRightClicked(String),
     TrayItemClickResolved(String, bool),
     TrayMenuItemSelected(String, i32),
-    AudioUpdated(crate::modules::audio::AudioInfo),
-    MicUpdated(crate::modules::mic::MicInfo),
-    BrightnessUpdated(String),
-    FanUpdated(crate::modules::fan::FanInfo),
-    BatteryUpdated(crate::modules::battery::BatteryInfo),
-    PowerProfileUpdated(String),
     WifiUpdated(crate::services::network::WifiInfo),
-    BluetoothUpdated(bool),
     OpenOverskride,
     DBusConnected(zbus::Connection),
     DBusConnectAttempted(Option<zbus::Connection>),
@@ -271,11 +257,6 @@ impl ThinkPadBar {
         lower == "special" || lower.starts_with("special:")
     }
 
-    fn set_brightness_percent_string(&mut self, value: u32) {
-        self.brightness.clear();
-        let _ = write!(&mut self.brightness, "{}%", value);
-    }
-
     fn set_battery_percent_string(&mut self, value: u8) {
         self.battery_str.clear();
         let _ = write!(&mut self.battery_str, "{}%", value);
@@ -283,12 +264,54 @@ impl ThinkPadBar {
 
     fn set_audio_summary_string(&mut self) {
         self.audio_str.clear();
-        if self.audio.muted {
+        if self.controls.audio.muted {
             self.audio_str.push_str("󰝟 ");
         } else {
             self.audio_str.push_str(" ");
         }
-        let _ = write!(&mut self.audio_str, "{}%", self.audio.volume);
+        let _ = write!(&mut self.audio_str, "{}%", self.controls.audio.volume);
+    }
+
+    fn sync_control_summary_strings(&mut self) {
+        self.set_battery_percent_string(self.controls.battery.capacity);
+        self.set_audio_summary_string();
+    }
+
+    fn request_controls_refresh(
+        &self,
+        kind: crate::services::controls::ControlsRefreshKind,
+    ) -> Task<Message> {
+        let controls_service = self.controls_service.clone();
+        Task::perform(
+            async move { controls_service.refresh(kind).await },
+            Message::ControlsRefreshed,
+        )
+    }
+
+    fn execute_controls_command(
+        &self,
+        command: crate::services::controls::ControlsCommand,
+    ) -> Task<Message> {
+        let controls_service = self.controls_service.clone();
+        Task::perform(
+            async move { controls_service.execute(command).await },
+            Message::ControlsCommandCompleted,
+        )
+    }
+
+    fn request_compositor_refresh(&mut self) -> Task<Message> {
+        self.perf.workspace_refresh_requested =
+            self.perf.workspace_refresh_requested.saturating_add(1);
+        if !self.compositor_service.request_refresh() {
+            self.perf.workspace_refresh_coalesced =
+                self.perf.workspace_refresh_coalesced.saturating_add(1);
+            return Task::none();
+        }
+        let compositor_service = self.compositor_service;
+        Task::perform(
+            async move { compositor_service.refresh().await },
+            Message::CompositorRefreshed,
+        )
     }
 
     fn spawn_command_and_reap(bin: &str, args: &[&str]) {
@@ -416,6 +439,8 @@ impl ThinkPadBar {
             let compositor_service =
                 crate::services::compositor::CompositorService::new(&cfg.compositor);
             let compositor_snapshot = compositor_service.snapshot();
+            let controls_service = crate::services::controls::ControlsService::new();
+            let controls_snapshot = controls_service.snapshot().clone();
             let network_service = crate::services::network::NetworkService::new(&cfg.network);
             let wifi_flow = crate::services::wifi_flow::WifiFlowService::new();
             let popup_anchor_service =
@@ -426,44 +451,35 @@ impl ThinkPadBar {
             // Since we are in a tokio-enabled FnOnce, we can't easily await here without block_on.
             // But iced's run_with expects a Task.
 
-            (
-                Self {
-                    config: cfg,
-                    dbus_conn: None, // Will be initialized on first tick or via Task
-                    compositor: compositor_snapshot,
-                    clock: Local::now().format("%a %d %b %H:%M").to_string(),
-                    brightness: crate::modules::brightness::get_brightness(),
-                    audio: crate::modules::audio::get_info(),
-                    mic: crate::modules::mic::get_info(),
-                    fan: crate::modules::fan::get_fan_info(),
-                    battery: crate::modules::battery::get_battery_info(),
-                    power_profile: crate::modules::power::get_profile(),
-                    wifi_flow,
-                    bluetooth: crate::modules::bluetooth::get_bluetooth_info(),
-                    show_power_menu: false,
-                    keyboard_layout: crate::modules::keyboard::get_layout(),
-                    popup: Popup::None,
-                    volume_level: 0,
-                    mic_volume_level: 0,
-                    brightness_level: 50,
-                    battery_str: String::new(),
-                    audio_str: String::new(),
-                    main_window_id: Some(main_id),
-                    popup_window_id: Some(popup_id),
-                    sys_monitor: monitor,
-                    sys_data: initial_sys_data,
-                    calendar_offset: 0,
-                    tray: crate::modules::tray::Tray::new(),
-                    compositor_service,
-                    network_service,
-                    popup_anchor_service,
-                    perf: PerfCounters::default(),
-                    show_debug_overlay: false,
-                    debug_ui_enabled: Self::debug_ui_enabled(),
-                    tray_menu_cursor: None,
-                },
-                Task::batch(vec![main_task, popup_task]),
-            )
+            let mut app = Self {
+                config: cfg,
+                dbus_conn: None,
+                compositor: compositor_snapshot,
+                clock: Local::now().format("%a %d %b %H:%M").to_string(),
+                controls: controls_snapshot,
+                wifi_flow,
+                show_power_menu: false,
+                popup: Popup::None,
+                battery_str: String::new(),
+                audio_str: String::new(),
+                main_window_id: Some(main_id),
+                popup_window_id: Some(popup_id),
+                sys_monitor: monitor,
+                sys_data: initial_sys_data,
+                calendar_offset: 0,
+                tray: crate::modules::tray::Tray::new(),
+                compositor_service,
+                controls_service,
+                network_service,
+                popup_anchor_service,
+                perf: PerfCounters::default(),
+                show_debug_overlay: false,
+                debug_ui_enabled: Self::debug_ui_enabled(),
+                tray_menu_cursor: None,
+            };
+            app.sync_control_summary_strings();
+
+            (app, Task::batch(vec![main_task, popup_task]))
         }
     }
 
@@ -486,53 +502,50 @@ impl ThinkPadBar {
                 self.sys_data = self.sys_monitor.update(true);
                 return Task::none();
             }
-            Message::RefreshAudioMic => {
-                return Task::batch(vec![
-                    Task::perform(
-                        async { crate::modules::audio::get_info() },
-                        Message::AudioUpdated,
-                    ),
-                    Task::perform(
-                        async { crate::modules::mic::get_info() },
-                        Message::MicUpdated,
-                    ),
-                ]);
+            Message::RefreshControls(kind) => {
+                return self.request_controls_refresh(kind);
             }
-            Message::TickBrightness(_now) => {
-                return Task::perform(
-                    async { crate::modules::brightness::get_brightness() },
-                    Message::BrightnessUpdated,
+            Message::ControlsEvent(
+                crate::services::controls::ControlsEvent::AudioServerChanged,
+            ) => {
+                return self.request_controls_refresh(
+                    crate::services::controls::ControlsRefreshKind::AudioMic,
                 );
             }
-            Message::TickThermal(_now) => {
+            Message::ControlsRefreshed(refresh) => {
+                self.controls_service.apply_refresh(refresh);
+                self.controls = self.controls_service.snapshot().clone();
+                self.sync_control_summary_strings();
+            }
+            Message::ControlsCommandCompleted(follow_up) => match follow_up {
+                crate::services::controls::ControlsFollowUp::Refresh(kind) => {
+                    return self.request_controls_refresh(kind);
+                }
+                crate::services::controls::ControlsFollowUp::RefreshCompositor => {
+                    return self.request_compositor_refresh();
+                }
+            },
+            Message::CompositorEvent(
+                crate::services::compositor::CompositorEvent::StateChanged,
+            ) => {
+                return self.request_compositor_refresh();
+            }
+            Message::RefreshCompositor => {
+                return self.request_compositor_refresh();
+            }
+            Message::TickSlow(_now) => {
                 if let Some(temp) = crate::modules::system::read_temperature_celsius() {
                     self.sys_data.temp = temp;
                     self.sys_data.temp_str = format!("{}°C", temp.round() as u64);
                 }
-                return Task::perform(
-                    async { crate::modules::fan::get_fan_info() },
-                    Message::FanUpdated,
-                );
-            }
-            Message::TickSlow(_now) => {
                 self.sys_data = self.sys_monitor.update(false);
 
                 let mut tasks = vec![
-                    Task::perform(
-                        async { crate::modules::brightness::get_brightness() },
-                        Message::BrightnessUpdated,
+                    self.request_controls_refresh(
+                        crate::services::controls::ControlsRefreshKind::Fan,
                     ),
-                    Task::perform(
-                        async { crate::modules::battery::get_battery_info() },
-                        Message::BatteryUpdated,
-                    ),
-                    Task::perform(
-                        async { crate::modules::power::get_profile() },
-                        Message::PowerProfileUpdated,
-                    ),
-                    Task::perform(
-                        async { crate::modules::bluetooth::get_bluetooth_info() },
-                        Message::BluetoothUpdated,
+                    self.request_controls_refresh(
+                        crate::services::controls::ControlsRefreshKind::Slow,
                     ),
                 ];
 
@@ -588,25 +601,7 @@ impl ThinkPadBar {
                     self.show_debug_overlay = false;
                 }
             }
-            Message::UpdateWorkspaces => {
-                self.perf.workspace_refresh_requested =
-                    self.perf.workspace_refresh_requested.saturating_add(1);
-                if !self.compositor_service.request_refresh() {
-                    self.perf.workspace_refresh_coalesced =
-                        self.perf.workspace_refresh_coalesced.saturating_add(1);
-                    return Task::none();
-                }
-                let compositor_service = self.compositor_service;
-                return Task::perform(
-                    async move {
-                        let refreshed = compositor_service.refresh().await;
-                        let layout = crate::modules::keyboard::get_layout();
-                        (refreshed, layout)
-                    },
-                    |(refreshed, layout)| Message::WorkspacesUpdated(refreshed, layout),
-                );
-            }
-            Message::WorkspacesUpdated(refreshed, layout) => {
+            Message::CompositorRefreshed(refreshed) => {
                 self.perf.workspace_refresh_completed =
                     self.perf.workspace_refresh_completed.saturating_add(1);
                 self.perf.workspace_refresh_last_ms = refreshed.elapsed_ms;
@@ -617,9 +612,6 @@ impl ThinkPadBar {
                 let active_window_changed =
                     self.compositor.active_window != refreshed.snapshot.active_window;
                 self.compositor = refreshed.snapshot;
-                if self.keyboard_layout != layout {
-                    self.keyboard_layout = layout;
-                }
 
                 if self.popup != Popup::None && active_window_changed {
                     self.popup = Popup::None;
@@ -629,20 +621,20 @@ impl ThinkPadBar {
                     self.calendar_offset = 0;
                     let mut tasks = self.popup_hide_tasks();
                     if self.compositor_service.complete_refresh() {
-                        tasks.push(Task::perform(async {}, |_| Message::UpdateWorkspaces));
+                        tasks.push(Task::perform(async {}, |_| Message::RefreshCompositor));
                     }
                     return Task::batch(tasks);
                 }
 
                 if self.compositor_service.complete_refresh() {
-                    return Task::perform(async {}, |_| Message::UpdateWorkspaces);
+                    return Task::perform(async {}, |_| Message::RefreshCompositor);
                 }
             }
             Message::SwitchWorkspace(w_id, ws_name) => {
                 let compositor_service = self.compositor_service;
                 return Task::perform(
                     async move { compositor_service.switch_workspace(w_id, &ws_name) },
-                    |_| Message::UpdateWorkspaces,
+                    |_| Message::RefreshCompositor,
                 );
             }
             Message::TogglePopup(target) => {
@@ -650,13 +642,8 @@ impl ThinkPadBar {
 
                 // Refresh audio when opening ControlCenter
                 if target == Popup::ControlCenter && self.popup != target {
-                    tasks.push(Task::perform(
-                        async { crate::modules::audio::get_info() },
-                        Message::AudioUpdated,
-                    ));
-                    tasks.push(Task::perform(
-                        async { crate::modules::mic::get_info() },
-                        Message::MicUpdated,
+                    tasks.push(self.request_controls_refresh(
+                        crate::services::controls::ControlsRefreshKind::AudioMic,
                     ));
                 }
 
@@ -679,52 +666,45 @@ impl ThinkPadBar {
                 return Task::batch(tasks);
             }
             Message::SetVolume(val) => {
-                self.volume_level = val;
-                self.audio.volume = val;
-                return Task::perform(
-                    async move { crate::modules::audio::set_volume(val).await },
-                    |_| Message::Tick(chrono::Local::now()),
-                );
+                let command = crate::services::controls::ControlsCommand::SetVolume(val);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                self.sync_control_summary_strings();
+                return self.execute_controls_command(command);
             }
             Message::ToggleAudioMute => {
-                return Task::perform(async { crate::modules::audio::toggle_mute().await }, |_| {
-                    Message::Tick(chrono::Local::now())
-                });
+                return self.execute_controls_command(
+                    crate::services::controls::ControlsCommand::ToggleAudioMute,
+                );
             }
             Message::SetMicVolume(val) => {
-                self.mic_volume_level = val;
-                self.mic.volume = val;
-                return Task::perform(
-                    async move { crate::modules::mic::set_volume(val).await },
-                    |_| Message::Tick(chrono::Local::now()),
-                );
+                let command = crate::services::controls::ControlsCommand::SetMicVolume(val);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
             }
             Message::ToggleMicMute => {
-                return Task::perform(async { crate::modules::mic::toggle_mute().await }, |_| {
-                    Message::Tick(chrono::Local::now())
-                });
+                return self.execute_controls_command(
+                    crate::services::controls::ControlsCommand::ToggleMicMute,
+                );
             }
             Message::SetBrightness(val) => {
-                self.brightness_level = val;
-                self.set_brightness_percent_string(val);
-                return Task::perform(
-                    async move { crate::modules::brightness::set_brightness(val) },
-                    |_| Message::TickSlow(chrono::Local::now()),
-                );
+                let command = crate::services::controls::ControlsCommand::SetBrightness(val);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
             }
             Message::SetFanLevel(level) => {
-                self.fan.level = level.clone();
-                return Task::perform(
-                    async move { crate::modules::fan::set_fan_level(&level) },
-                    |_| Message::TickSlow(chrono::Local::now()),
-                );
+                let command = crate::services::controls::ControlsCommand::SetFanLevel(level);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
             }
             Message::SetPowerProfile(prof) => {
-                self.power_profile = prof.clone();
-                return Task::perform(
-                    async move { crate::modules::power::set_profile(&prof).await },
-                    |_| Message::TickSlow(chrono::Local::now()),
-                );
+                let command = crate::services::controls::ControlsCommand::SetPowerProfile(prof);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
             }
             Message::CyclePerformanceProfile => {
                 self.config.performance.cycle_profile_runtime();
@@ -822,25 +802,22 @@ impl ThinkPadBar {
                 }
             }
             Message::ToggleBluetooth(enable) => {
-                return Task::perform(
-                    async move {
-                        let _ = crate::modules::bluetooth::toggle_bluetooth(enable);
-                    },
-                    |_| Message::TickSlow(chrono::Local::now()),
-                );
+                let command = crate::services::controls::ControlsCommand::ToggleBluetooth(enable);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
             }
             Message::OpenOverskride => {
-                return Task::perform(
-                    async {
-                        let _ = crate::modules::bluetooth::open_overskride();
-                    },
-                    |_| Message::UpdateWorkspaces,
+                return self.execute_controls_command(
+                    crate::services::controls::ControlsCommand::OpenOverskride,
                 );
             }
             Message::NextKeyboardLayout => {
-                return Task::perform(async { crate::modules::keyboard::next_layout() }, |_| {
-                    Message::UpdateWorkspaces
-                });
+                let compositor_service = self.compositor_service;
+                return Task::perform(
+                    async move { compositor_service.next_keyboard_layout() },
+                    |_| Message::RefreshCompositor,
+                );
             }
             Message::TogglePowerMenu => {
                 self.show_power_menu = !self.show_power_menu;
@@ -872,7 +849,7 @@ impl ThinkPadBar {
                     async move {
                         let _ = std::process::Command::new(bin).args(args_vec).spawn();
                     },
-                    |_| Message::UpdateWorkspaces,
+                    |_| Message::RefreshCompositor,
                 ));
                 return Task::batch(tasks);
             }
@@ -924,7 +901,7 @@ impl ThinkPadBar {
                     self.tray
                         .update(crate::modules::tray::TrayMessage::ActivateItem(id));
                 }
-                return Task::perform(async {}, |_| Message::UpdateWorkspaces);
+                return Task::perform(async {}, |_| Message::RefreshCompositor);
             }
             Message::TrayMenuItemSelected(id, menu_item_id) => {
                 if !self
@@ -945,45 +922,8 @@ impl ThinkPadBar {
                 self.tray_menu_cursor = None;
                 return Task::batch(self.popup_hide_tasks());
             }
-            Message::AudioUpdated(info) => {
-                let audio_changed = self.audio != info;
-                self.audio = info;
-                self.volume_level = self.audio.volume;
-                if audio_changed {
-                    self.set_audio_summary_string();
-                }
-            }
-            Message::MicUpdated(info) => {
-                self.mic = info.clone();
-                self.mic_volume_level = self.mic.volume;
-                crate::modules::mic::update_led(info.muted);
-            }
-            Message::BrightnessUpdated(val) => {
-                if let Ok(parsed) = val.trim_end_matches('%').parse::<u32>() {
-                    self.brightness_level = parsed.clamp(1, 100);
-                }
-                if self.brightness != val {
-                    self.brightness = val;
-                }
-            }
-            Message::FanUpdated(info) => {
-                self.fan = info;
-            }
-            Message::BatteryUpdated(info) => {
-                let battery_changed = self.battery != info;
-                self.battery = info;
-                if battery_changed {
-                    self.set_battery_percent_string(self.battery.capacity);
-                }
-            }
-            Message::PowerProfileUpdated(prof) => {
-                self.power_profile = prof;
-            }
             Message::WifiUpdated(info) => {
                 self.wifi_flow.sync_wifi_info(info);
-            }
-            Message::BluetoothUpdated(val) => {
-                self.bluetooth = val;
             }
         }
         Task::none()
@@ -1218,7 +1158,7 @@ impl ThinkPadBar {
             ..Default::default()
         });
 
-        let mic_icon = if self.mic.muted || self.mic.volume == 0 {
+        let mic_icon = if self.controls.mic.muted || self.controls.mic.volume == 0 {
             "󰍭"
         } else {
             ""
@@ -1228,10 +1168,14 @@ impl ThinkPadBar {
         } else {
             "󰖪"
         };
-        let bt_icon = if self.bluetooth { "󰂯" } else { "󰂲" };
+        let bt_icon = if self.controls.bluetooth_enabled {
+            "󰂯"
+        } else {
+            "󰂲"
+        };
 
-        let bat_cap = self.battery.capacity;
-        let bat_status = &self.battery.status;
+        let bat_cap = self.controls.battery.capacity;
+        let bat_status = &self.controls.battery.status;
 
         let (bat_icon, bat_color) = if bat_status.contains("Charging") {
             ("󰂄", Color::from_rgb8(0x9e, 0xce, 0x6a)) // Green
@@ -1311,7 +1255,7 @@ impl ThinkPadBar {
                         .spacing(4)
                         .align_y(Alignment::Center)
                         .push(text("󰃠").size(14))
-                        .push(text(self.brightness.as_str()).size(14)),
+                        .push(text(self.controls.brightness.label.as_str()).size(14)),
                 )
                 .push(
                     Row::new()
@@ -1320,7 +1264,7 @@ impl ThinkPadBar {
                         .push(text(mic_icon).size(14))
                         .push(text(self.audio_str.as_str()).size(14)),
                 )
-                .push(text(format!(" {}", self.fan.speed)).size(14)),
+                .push(text(format!(" {}", self.controls.fan.speed)).size(14)),
         )
         .padding(Padding::from([4, 12]))
         .style(move |_| container::Style {
@@ -1334,7 +1278,7 @@ impl ThinkPadBar {
         });
 
         // 4. Keyboard Layout Pill
-        let kbd_pill = container(text(self.keyboard_layout.as_str()).size(14))
+        let kbd_pill = container(text(self.compositor.keyboard_layout.as_str()).size(14))
             .padding(Padding::from([4, 12]))
             .style(move |_| container::Style {
                 background: Some(iced::Background::Color(pill_bg)),
@@ -1827,7 +1771,7 @@ impl ThinkPadBar {
         }
 
         // Control Center Popup
-        let vol_muted = self.audio.muted;
+        let vol_muted = self.controls.audio.muted;
         let vol_row = Row::new()
             .spacing(12)
             .align_y(Alignment::Center)
@@ -1855,7 +1799,7 @@ impl ThinkPadBar {
                 }),
             )
             .push(
-                slider(0..=100, self.volume_level, Message::SetVolume)
+                slider(0..=100, self.controls.audio.volume, Message::SetVolume)
                     .width(Length::Fill)
                     .style(move |_, _| {
                         if vol_muted {
@@ -1918,14 +1862,14 @@ impl ThinkPadBar {
                     }),
             );
 
-        let mic_muted = self.mic.muted;
+        let mic_muted = self.controls.mic.muted;
         let mic_row = Row::new()
             .spacing(12)
             .align_y(Alignment::Center)
             .push(
                 button(
                     container(
-                        text(if mic_muted || self.mic.volume == 0 {
+                        text(if mic_muted || self.controls.mic.volume == 0 {
                             "󰍭"
                         } else {
                             ""
@@ -1953,7 +1897,7 @@ impl ThinkPadBar {
                 }),
             )
             .push(
-                slider(0..=100, self.mic_volume_level, Message::SetMicVolume)
+                slider(0..=100, self.controls.mic.volume, Message::SetMicVolume)
                     .width(Length::Fill)
                     .style(move |_, _| {
                         if mic_muted {
@@ -2026,41 +1970,47 @@ impl ThinkPadBar {
                         .align_x(iced::alignment::Horizontal::Center)
                         .align_y(iced::alignment::Vertical::Center),
                 )
-                .on_press(Message::TickSlow(chrono::Local::now()))
+                .on_press(Message::RefreshControls(
+                    crate::services::controls::ControlsRefreshKind::Brightness,
+                ))
                 .style(move |_, _| iced::widget::button::Style {
                     text_color: Color::WHITE,
                     ..Default::default()
                 }),
             )
             .push(
-                slider(1..=100, self.brightness_level, Message::SetBrightness)
-                    .width(Length::Fill)
-                    .style(move |_, _| iced::widget::slider::Style {
-                        rail: iced::widget::slider::Rail {
-                            backgrounds: (
-                                iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
-                                iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
-                            ),
-                            width: 4.0,
-                            border: iced::Border {
-                                radius: 2.0.into(),
-                                width: 0.0,
-                                color: Color::TRANSPARENT,
-                            },
-                        },
-                        handle: iced::widget::slider::Handle {
-                            shape: iced::widget::slider::HandleShape::Circle { radius: 8.0 },
-                            background: iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
-                            border_width: 0.0,
-                            border_color: Color::TRANSPARENT,
-                        },
-                        breakpoint: iced::widget::slider::Breakpoint {
+                slider(
+                    1..=100,
+                    self.controls.brightness.percent.clamp(1, 100),
+                    Message::SetBrightness,
+                )
+                .width(Length::Fill)
+                .style(move |_, _| iced::widget::slider::Style {
+                    rail: iced::widget::slider::Rail {
+                        backgrounds: (
+                            iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                            iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
+                        ),
+                        width: 4.0,
+                        border: iced::Border {
+                            radius: 2.0.into(),
+                            width: 0.0,
                             color: Color::TRANSPARENT,
                         },
-                    }),
+                    },
+                    handle: iced::widget::slider::Handle {
+                        shape: iced::widget::slider::HandleShape::Circle { radius: 8.0 },
+                        background: iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                        border_width: 0.0,
+                        border_color: Color::TRANSPARENT,
+                    },
+                    breakpoint: iced::widget::slider::Breakpoint {
+                        color: Color::TRANSPARENT,
+                    },
+                }),
             )
             .push(
-                text(self.brightness.as_str())
+                text(self.controls.brightness.label.as_str())
                     .size(13)
                     .width(Length::Fixed(44.0))
                     .align_x(iced::alignment::Horizontal::Right),
@@ -2073,7 +2023,7 @@ impl ThinkPadBar {
             } else {
                 l.to_string()
             };
-            let current_level = self.fan.level.trim();
+            let current_level = self.controls.fan.level.trim();
             let is_active =
                 current_level == lvl || (lvl == "full-speed" && current_level == "disengaged");
 
@@ -2131,7 +2081,7 @@ impl ThinkPadBar {
         ]
         .iter()
         {
-            let is_active = self.power_profile == *vid;
+            let is_active = self.controls.power_profile == *vid;
             let vid_str = vid.to_string();
             let btn = button(
                 text(label.to_string())
@@ -2223,7 +2173,7 @@ impl ThinkPadBar {
             }
         });
 
-        let bt_is_active = self.bluetooth;
+        let bt_is_active = self.controls.bluetooth_enabled;
         let bt_label = if bt_is_active { "On" } else { "Off" };
         let bt_btn = button(
             Row::new()
@@ -2278,8 +2228,8 @@ impl ThinkPadBar {
             ..Default::default()
         });
 
-        let bat_cap = self.battery.capacity;
-        let bat_status = &self.battery.status;
+        let bat_cap = self.controls.battery.capacity;
+        let bat_status = &self.controls.battery.status;
         let (bat_icon, bat_color) = if bat_status.contains("Charging") {
             ("󰂄", Color::from_rgb8(0x9e, 0xce, 0x6a))
         } else if bat_status.contains("Full") || bat_status.contains("Not charging") {
@@ -2334,11 +2284,17 @@ impl ThinkPadBar {
                     }))
                     .push(iced::widget::Space::with_width(8))
                     .push(
-                        text(self.battery.time_remaining.as_deref().unwrap_or(""))
-                            .size(12)
-                            .style(move |_| iced::widget::text::Style {
-                                color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
-                            }),
+                        text(
+                            self.controls
+                                .battery
+                                .time_remaining
+                                .as_deref()
+                                .unwrap_or(""),
+                        )
+                        .size(12)
+                        .style(move |_| iced::widget::text::Style {
+                            color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
+                        }),
                     ),
             )
             .push(iced::widget::Space::with_width(Length::Fill))
@@ -2566,7 +2522,10 @@ impl ThinkPadBar {
                             .spacing(8)
                             .align_y(Alignment::Center)
                             .push(text("󰈐").size(16))
-                            .push(text(format!("Fan Control: {} RPM", self.fan.speed)).size(14)),
+                            .push(
+                                text(format!("Fan Control: {} RPM", self.controls.fan.speed))
+                                    .size(14),
+                            ),
                     )
                     .push(
                         container(fan_row)
@@ -2607,15 +2566,19 @@ impl ThinkPadBar {
 
         iced::Subscription::batch(vec![
             crate::modules::clock::tick(),
-            iced::time::every(std::time::Duration::from_secs(brightness_secs))
-                .map(|_| Message::TickBrightness(chrono::Local::now())),
-            iced::time::every(std::time::Duration::from_secs(thermal_secs))
-                .map(|_| Message::TickThermal(chrono::Local::now())),
+            iced::time::every(std::time::Duration::from_secs(brightness_secs)).map(|_| {
+                Message::RefreshControls(crate::services::controls::ControlsRefreshKind::Brightness)
+            }),
+            iced::time::every(std::time::Duration::from_secs(thermal_secs)).map(|_| {
+                Message::RefreshControls(crate::services::controls::ControlsRefreshKind::Fan)
+            }),
             iced::time::every(std::time::Duration::from_secs(slow_secs))
                 .map(|_| Message::TickSlow(chrono::Local::now())),
-            self.compositor_service.subscription(),
+            self.compositor_service
+                .subscription()
+                .map(Message::CompositorEvent),
             crate::services::tray::subscription().map(Message::TrayMessage),
-            crate::modules::audio::subscription(),
+            crate::services::controls::ControlsService::subscription().map(Message::ControlsEvent),
             iced::event::listen_with(|event, _status, window| match event {
                 iced::Event::Window(iced::window::Event::Unfocused) => {
                     Some(Message::PopupWindowUnfocused(window))
@@ -2701,37 +2664,15 @@ mod tests {
                 workspaces: Vec::new(),
                 active_window: String::new(),
                 special_workspace_visible: false,
+                keyboard_layout: String::new(),
                 configured_backend: crate::services::compositor::CompositorBackendKind::Hyprland,
                 active_backend: crate::services::compositor::CompositorBackendKind::Hyprland,
             },
             clock: String::new(),
-            brightness: String::new(),
-            audio: crate::modules::audio::AudioInfo {
-                volume: 0,
-                muted: false,
-            },
-            mic: crate::modules::mic::MicInfo {
-                volume: 0,
-                muted: false,
-            },
-            fan: crate::modules::fan::FanInfo {
-                speed: "0".to_string(),
-                level: "auto".to_string(),
-            },
-            battery: crate::modules::battery::BatteryInfo {
-                capacity: 0,
-                status: "Unknown".to_string(),
-                time_remaining: None,
-            },
-            power_profile: String::new(),
+            controls: crate::services::controls::ControlsSnapshot::default(),
             wifi_flow: crate::services::wifi_flow::WifiFlowService::new(),
             show_power_menu: false,
-            keyboard_layout: String::new(),
-            bluetooth: false,
             popup: Popup::None,
-            volume_level: 0,
-            mic_volume_level: 0,
-            brightness_level: 0,
             battery_str: String::new(),
             audio_str: String::new(),
             main_window_id: None,
@@ -2743,6 +2684,7 @@ mod tests {
             compositor_service: crate::services::compositor::CompositorService::new(
                 &crate::config::CompositorConfig::default(),
             ),
+            controls_service: crate::services::controls::ControlsService::default(),
             network_service: crate::services::network::NetworkService::new(
                 &crate::config::NetworkConfig::default(),
             ),

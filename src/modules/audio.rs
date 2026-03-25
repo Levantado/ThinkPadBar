@@ -50,7 +50,7 @@ pub async fn toggle_mute() {
         .await;
 }
 
-pub fn subscription() -> iced::Subscription<crate::app::Message> {
+pub fn subscription() -> iced::Subscription<crate::services::controls::ControlsEvent> {
     struct AudioListener;
     iced::Subscription::run_with_id(
         std::any::TypeId::of::<AudioListener>(),
@@ -80,7 +80,8 @@ pub fn subscription() -> iced::Subscription<crate::app::Message> {
 
                 while let Ok(Some(line)) = reader.next_line().await {
                     if line.contains("sink") || line.contains("source") || line.contains("server") {
-                        let _ = output.try_send(crate::app::Message::RefreshAudioMic);
+                        let _ = output
+                            .try_send(crate::services::controls::ControlsEvent::AudioServerChanged);
                     }
                 }
                 // If pactl fails, wait before retry

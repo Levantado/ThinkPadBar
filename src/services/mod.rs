@@ -1,4 +1,5 @@
 pub mod compositor;
+pub mod controls;
 pub mod network;
 pub mod popup_anchor;
 pub mod tray;

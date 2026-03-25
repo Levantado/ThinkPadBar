@@ -243,7 +243,7 @@ pub async fn find_and_switch_to_app(name: String) -> bool {
     )
 }
 
-pub fn subscription() -> Subscription<crate::app::Message> {
+pub fn subscription() -> Subscription<crate::services::compositor::CompositorEvent> {
     struct HyprlandListener;
 
     Subscription::run_with_id(
@@ -278,8 +278,9 @@ pub fn subscription() -> Subscription<crate::app::Message> {
                                         || line.starts_with("urgent>>")
                                         || line.starts_with("configreloaded>>")
                                     {
-                                        let _ =
-                                            output.try_send(crate::app::Message::UpdateWorkspaces);
+                                        let _ = output.try_send(
+                                            crate::services::compositor::CompositorEvent::StateChanged,
+                                        );
                                     }
                                 }
                                 Err(_) => break,
