@@ -2,6 +2,8 @@ use iced::widget::image::Handle;
 use std::collections::HashMap;
 use system_tray::client::{ActivateRequest, Client, Event, UpdateEvent};
 use system_tray::item::StatusNotifierItem;
+use tokio::time::{timeout, Duration, Instant};
+use tracing::{debug, warn};
 
 #[derive(Debug, Clone)]
 pub struct TrayItem {
@@ -9,6 +11,8 @@ pub struct TrayItem {
     pub title: Option<String>,
     pub icon_name: Option<String>,
     pub icon_handle: Option<Handle>,
+    pub item_is_menu: bool,
+    pub menu_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +71,8 @@ impl Tray {
                         title: item.title.clone(),
                         icon_name: item.icon_name.clone(),
                         icon_handle,
+                        item_is_menu: item.item_is_menu,
+                        menu_path: item.menu.clone(),
                     },
                 );
             }
@@ -88,6 +94,9 @@ impl Tray {
                             if let Some(pixmap) = icon_pixmap {
                                 item.icon_handle = pixmap_to_handle(&pixmap);
                             }
+                        }
+                        UpdateEvent::MenuConnect(path) => {
+                            item.menu_path = Some(path);
                         }
                         _ => {}
                     }
@@ -140,6 +149,8 @@ impl Tray {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 let (atx, mut arx) = tokio::sync::mpsc::unbounded_channel::<String>();
                 let mut retry_delay = std::time::Duration::from_secs(1);
+                let mut context_connection: Option<zbus::Connection> = None;
+                let mut last_cursor_pos = (0, 0);
 
                 let _ = tx.send(TrayMessage::Initialize(atx));
 
@@ -190,16 +201,36 @@ impl Tray {
                                 }
                             }
                             Some(raw_id) = arx.recv() => {
-                                let (x, y) = current_cursor_pos();
+                                let (x, y) = current_cursor_pos_with_fallback(last_cursor_pos);
+                                last_cursor_pos = (x, y);
                                 let (is_secondary, id) = parse_activation_channel_id(raw_id);
                                 if is_secondary {
-                                    let context_result = activate_context_menu(&id, x, y).await;
-                                    if context_result.is_err() {
-                                        let _ = client.activate(ActivateRequest::Secondary {
-                                            address: id,
-                                            x,
-                                            y,
-                                        }).await;
+                                    let (item_is_menu, has_menu_path) =
+                                        get_secondary_capabilities(&client, &id);
+                                    let route = choose_secondary_route(item_is_menu, has_menu_path);
+                                    let started_at = Instant::now();
+                                    let result = activate_secondary_with_strategy(
+                                        &client,
+                                        &mut context_connection,
+                                        &id,
+                                        x,
+                                        y,
+                                        route,
+                                    )
+                                    .await;
+                                    debug!(
+                                        "tray secondary click id={} route={:?} menu_only={} has_menu={} cursor=({}, {}) result={} elapsed_ms={}",
+                                        id,
+                                        route,
+                                        item_is_menu,
+                                        has_menu_path,
+                                        x,
+                                        y,
+                                        result,
+                                        started_at.elapsed().as_millis()
+                                    );
+                                    if !result.succeeded() {
+                                        warn!("tray secondary activation failed for {}", id);
                                     }
                                 } else {
                                     let _ = client.activate(ActivateRequest::Default {
@@ -317,15 +348,17 @@ fn find_icon(name: &str, theme_path: Option<&str>) -> Option<Handle> {
     None
 }
 
-fn current_cursor_pos() -> (i32, i32) {
-    if let Some(raw) = crate::modules::workspaces::hyprland_command("j/cursorpos") {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-            let x = v.get("x").and_then(|n| n.as_f64()).unwrap_or(0.0).round() as i32;
-            let y = v.get("y").and_then(|n| n.as_f64()).unwrap_or(0.0).round() as i32;
-            return (x, y);
-        }
-    }
-    (0, 0)
+fn parse_cursor_pos(raw: &str) -> Option<(i32, i32)> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let x = value.get("x")?.as_f64()?.round() as i32;
+    let y = value.get("y")?.as_f64()?.round() as i32;
+    Some((x, y))
+}
+
+fn current_cursor_pos_with_fallback(last_known: (i32, i32)) -> (i32, i32) {
+    crate::modules::workspaces::hyprland_command("j/cursorpos")
+        .and_then(|raw| parse_cursor_pos(&raw))
+        .unwrap_or(last_known)
 }
 
 fn parse_activation_channel_id(raw: String) -> (bool, String) {
@@ -344,13 +377,169 @@ fn parse_status_notifier_address(address: &str) -> (&str, String) {
         })
 }
 
-async fn activate_context_menu(address: &str, x: i32, y: i32) -> Result<(), zbus::Error> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecondaryRoute {
+    ContextMenuFirst,
+    SecondaryFirst,
+}
+
+fn choose_secondary_route(item_is_menu: bool, has_menu_path: bool) -> SecondaryRoute {
+    if item_is_menu || has_menu_path {
+        SecondaryRoute::ContextMenuFirst
+    } else {
+        SecondaryRoute::SecondaryFirst
+    }
+}
+
+fn get_secondary_capabilities(client: &Client, id: &str) -> (bool, bool) {
+    let items_arc = client.items();
+    if let Ok(items) = items_arc.lock() {
+        if let Some((item, _)) = items.get(id) {
+            return (item.item_is_menu, item.menu.is_some());
+        }
+    }
+    (false, false)
+}
+
+#[derive(Debug, Clone)]
+enum ActivationResult {
+    PrimaryOk(&'static str),
+    FallbackOk {
+        primary: &'static str,
+        fallback: &'static str,
+    },
+    Failed {
+        primary: &'static str,
+        fallback: Option<&'static str>,
+    },
+}
+
+impl ActivationResult {
+    fn succeeded(&self) -> bool {
+        matches!(
+            self,
+            ActivationResult::PrimaryOk(_) | ActivationResult::FallbackOk { .. }
+        )
+    }
+}
+
+impl std::fmt::Display for ActivationResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ActivationResult::PrimaryOk(method) => write!(f, "primary_ok:{}", method),
+            ActivationResult::FallbackOk { primary, fallback } => {
+                write!(f, "fallback_ok:{}->{}", primary, fallback)
+            }
+            ActivationResult::Failed { primary, fallback } => {
+                if let Some(fallback) = fallback {
+                    write!(f, "failed:{}->{}", primary, fallback)
+                } else {
+                    write!(f, "failed:{}", primary)
+                }
+            }
+        }
+    }
+}
+
+async fn ensure_context_connection(
+    cached: &mut Option<zbus::Connection>,
+) -> Result<&zbus::Connection, zbus::Error> {
+    if cached.is_none() {
+        *cached = Some(zbus::Connection::session().await?);
+    }
+    match cached.as_ref() {
+        Some(conn) => Ok(conn),
+        None => unreachable!("context connection missing after successful initialization"),
+    }
+}
+
+async fn activate_context_menu(
+    connection: &zbus::Connection,
+    address: &str,
+    x: i32,
+    y: i32,
+) -> Result<(), zbus::Error> {
     let (destination, path) = parse_status_notifier_address(address);
-    let connection = zbus::Connection::session().await?;
     let proxy =
-        zbus::Proxy::new(&connection, destination, path, "org.kde.StatusNotifierItem").await?;
+        zbus::Proxy::new(connection, destination, path, "org.kde.StatusNotifierItem").await?;
     let _: () = proxy.call("ContextMenu", &(x, y)).await?;
     Ok(())
+}
+
+async fn try_context_menu(
+    connection: &mut Option<zbus::Connection>,
+    id: &str,
+    x: i32,
+    y: i32,
+) -> bool {
+    let fut = async {
+        let conn = ensure_context_connection(connection).await?;
+        activate_context_menu(conn, id, x, y).await
+    };
+    match timeout(Duration::from_millis(1000), fut).await {
+        Ok(Ok(())) => true,
+        Ok(Err(err)) => {
+            debug!("tray context menu call failed for {}: {}", id, err);
+            false
+        }
+        Err(_) => {
+            debug!("tray context menu call timed out for {}", id);
+            false
+        }
+    }
+}
+
+async fn try_secondary_activate(client: &Client, id: &str, x: i32, y: i32) -> bool {
+    client
+        .activate(ActivateRequest::Secondary {
+            address: id.to_string(),
+            x,
+            y,
+        })
+        .await
+        .is_ok()
+}
+
+async fn activate_secondary_with_strategy(
+    client: &Client,
+    connection: &mut Option<zbus::Connection>,
+    id: &str,
+    x: i32,
+    y: i32,
+    route: SecondaryRoute,
+) -> ActivationResult {
+    match route {
+        SecondaryRoute::ContextMenuFirst => {
+            if try_context_menu(connection, id, x, y).await {
+                ActivationResult::PrimaryOk("context_menu")
+            } else if try_secondary_activate(client, id, x, y).await {
+                ActivationResult::FallbackOk {
+                    primary: "context_menu",
+                    fallback: "secondary_activate",
+                }
+            } else {
+                ActivationResult::Failed {
+                    primary: "context_menu",
+                    fallback: Some("secondary_activate"),
+                }
+            }
+        }
+        SecondaryRoute::SecondaryFirst => {
+            if try_secondary_activate(client, id, x, y).await {
+                ActivationResult::PrimaryOk("secondary_activate")
+            } else if try_context_menu(connection, id, x, y).await {
+                ActivationResult::FallbackOk {
+                    primary: "secondary_activate",
+                    fallback: "context_menu",
+                }
+            } else {
+                ActivationResult::Failed {
+                    primary: "secondary_activate",
+                    fallback: Some("context_menu"),
+                }
+            }
+        }
+    }
 }
 
 fn icon_name_candidates(raw: &str) -> Vec<String> {
@@ -431,8 +620,8 @@ fn themed_icon_paths(theme_root: &str, name: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        icon_name_candidates, parse_activation_channel_id, parse_status_notifier_address,
-        themed_icon_paths,
+        choose_secondary_route, icon_name_candidates, parse_activation_channel_id,
+        parse_cursor_pos, parse_status_notifier_address, themed_icon_paths, SecondaryRoute,
     };
 
     #[test]
@@ -497,5 +686,31 @@ mod tests {
         let (dest, path) = parse_status_notifier_address("org.kde.StatusNotifierItem-1-1");
         assert_eq!(dest, "org.kde.StatusNotifierItem-1-1");
         assert_eq!(path, "/StatusNotifierItem");
+    }
+
+    #[test]
+    fn parse_cursor_pos_extracts_coordinates() {
+        let parsed = parse_cursor_pos(r#"{"x": 101.2, "y": 202.8}"#);
+        assert_eq!(parsed, Some((101, 203)));
+    }
+
+    #[test]
+    fn choose_secondary_route_prefers_context_for_menu_items() {
+        assert_eq!(
+            choose_secondary_route(true, false),
+            SecondaryRoute::ContextMenuFirst
+        );
+        assert_eq!(
+            choose_secondary_route(false, true),
+            SecondaryRoute::ContextMenuFirst
+        );
+    }
+
+    #[test]
+    fn choose_secondary_route_prefers_secondary_for_non_menu_items() {
+        assert_eq!(
+            choose_secondary_route(false, false),
+            SecondaryRoute::SecondaryFirst
+        );
     }
 }

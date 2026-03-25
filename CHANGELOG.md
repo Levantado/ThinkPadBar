@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.52] - 2026-03-25
+
+### Added
+- `v0.7` module-runtime contract draft in [src/modules/runtime.rs]:
+  - lifecycle hooks (`on_start`, `on_stop`),
+  - event handler (`on_event`),
+  - command/event model for future module isolation.
+- Debug overlay toggle in main bar (`DBG` pill) with live runtime counters.
+- Extended System Monitor observability block:
+  - workspace refresh requested/coalesced/latency,
+  - D-Bus connect success/fail,
+  - capability/runtime contract summary.
+
+### Changed
+- App state now tracks observability counters via explicit `PerfCounters`.
+- Workspace refresh pipeline reports measured elapsed time into perf counters.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.51] - 2026-03-25
+
+### Added
+- `v0.7` foundation: built-in module capability schema draft in [src/modules/capabilities.rs].
+- Runtime observability counters in app state:
+  - workspace refresh requested/coalesced/completed,
+  - workspace refresh last/avg latency (ms),
+  - D-Bus connect attempts/success/fail.
+- System Monitor popup now shows observability block and module capability summary.
+
+### Changed
+- Workspace refresh update pipeline now records end-to-end refresh latency for each `UpdateWorkspaces` task.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
+## [0.6.50] - 2026-03-25
+
+### Fixed
+- Tray right-click (`TD-TRAY-001`) routing is now capability-aware:
+  - `item_is_menu` / `menu` capabilities are preserved in local tray state,
+  - menu-like items prefer `ContextMenu`, other items prefer `SecondaryActivate`.
+- Right-click fallback is now deterministic by strategy:
+  - each route has explicit primary/fallback order (`ContextMenu -> Secondary` or `Secondary -> ContextMenu`).
+- Context-menu path now uses a cached session D-Bus connection and explicit timeout control.
+- Cursor position fallback is stabilized:
+  - parse failures no longer force `(0,0)` immediately; last known cursor coordinates are reused.
+- Added per-click tray diagnostics (`tracing`) for route, capabilities, cursor coordinates, result, and latency.
+
+### Quality
+- Added tray regression tests for route selection and cursor position parsing.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.49] - 2026-03-25
 
 ### Fixed

@@ -8,6 +8,7 @@ use iced::{
     Alignment, Color, Element, Length, Padding, Task, Theme,
 };
 use std::fmt::Write as _;
+use std::time::Instant;
 use tracing::info;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +66,29 @@ pub struct ThinkPadBar {
     tray: crate::modules::tray::Tray,
     workspace_refresh_inflight: bool,
     workspace_refresh_queued: bool,
+    perf: PerfCounters,
+    show_debug_overlay: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PerfCounters {
+    workspace_refresh_requested: u64,
+    workspace_refresh_coalesced: u64,
+    workspace_refresh_completed: u64,
+    workspace_refresh_last_ms: u64,
+    workspace_refresh_total_ms: u128,
+    dbus_connect_attempts: u64,
+    dbus_connect_successes: u64,
+    dbus_connect_failures: u64,
+}
+
+impl PerfCounters {
+    fn workspace_refresh_avg_ms(&self) -> u64 {
+        if self.workspace_refresh_completed == 0 {
+            return 0;
+        }
+        (self.workspace_refresh_total_ms / self.workspace_refresh_completed as u128) as u64
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +104,7 @@ pub enum Message {
         String,
         String,
         bool,
+        u64,
     ),
     SwitchWorkspace(i32, String),
     TogglePopup(Popup),
@@ -122,6 +147,7 @@ pub enum Message {
     DBusConnectAttempted(Option<zbus::Connection>),
     PopupWindowUnfocused(Id),
     OpenLauncher,
+    ToggleDebugOverlay,
 }
 
 impl ThinkPadBar {
@@ -221,7 +247,11 @@ impl ThinkPadBar {
     }
 
     fn request_workspace_refresh(&mut self) -> bool {
+        self.perf.workspace_refresh_requested =
+            self.perf.workspace_refresh_requested.saturating_add(1);
         if self.workspace_refresh_inflight {
+            self.perf.workspace_refresh_coalesced =
+                self.perf.workspace_refresh_coalesced.saturating_add(1);
             self.workspace_refresh_queued = true;
             return false;
         }
@@ -263,6 +293,12 @@ impl ThinkPadBar {
 
         if let Some(title) = &item.title {
             push_candidate(title);
+        }
+        if item.item_is_menu {
+            push_candidate("menu");
+        }
+        if let Some(menu_path) = &item.menu_path {
+            push_candidate(menu_path);
         }
         if let Some(icon_name) = &item.icon_name {
             push_candidate(icon_name);
@@ -402,6 +438,8 @@ impl ThinkPadBar {
                     tray: crate::modules::tray::Tray::new(),
                     workspace_refresh_inflight: false,
                     workspace_refresh_queued: false,
+                    perf: PerfCounters::default(),
+                    show_debug_overlay: false,
                 },
                 Task::batch(vec![main_task, popup_task]),
             )
@@ -497,12 +535,16 @@ impl ThinkPadBar {
                 return Task::batch(tasks);
             }
             Message::DBusConnectAttempted(conn) => {
+                self.perf.dbus_connect_attempts = self.perf.dbus_connect_attempts.saturating_add(1);
                 if let Some(conn) = conn {
                     return Task::perform(async move { conn }, Message::DBusConnected);
                 }
+                self.perf.dbus_connect_failures = self.perf.dbus_connect_failures.saturating_add(1);
             }
             Message::DBusConnected(conn) => {
                 info!("Successfully connected to system D-Bus");
+                self.perf.dbus_connect_successes =
+                    self.perf.dbus_connect_successes.saturating_add(1);
                 self.dbus_conn = Some(conn);
                 return Task::perform(async { chrono::Local::now() }, Message::TickSlow);
             }
@@ -521,25 +563,42 @@ impl ThinkPadBar {
                 let (bin, args) = Self::launcher_command();
                 Self::spawn_command_and_reap(bin, args);
             }
+            Message::ToggleDebugOverlay => {
+                self.show_debug_overlay = !self.show_debug_overlay;
+            }
             Message::UpdateWorkspaces => {
                 if !self.request_workspace_refresh() {
                     return Task::none();
                 }
                 return Task::perform(
                     async {
+                        let started = Instant::now();
                         let ws = crate::modules::workspaces::get_workspaces();
                         let special_visible =
                             crate::modules::workspaces::is_special_workspace_visible();
                         let title = crate::modules::workspaces::get_active_window_title();
                         let layout = crate::modules::keyboard::get_layout();
-                        (ws, title, layout, special_visible)
+                        (
+                            ws,
+                            title,
+                            layout,
+                            special_visible,
+                            started.elapsed().as_millis() as u64,
+                        )
                     },
-                    |(ws, title, layout, special_visible)| {
-                        Message::WorkspacesUpdated(ws, title, layout, special_visible)
+                    |(ws, title, layout, special_visible, elapsed_ms)| {
+                        Message::WorkspacesUpdated(ws, title, layout, special_visible, elapsed_ms)
                     },
                 );
             }
-            Message::WorkspacesUpdated(workspaces, title, layout, special_visible) => {
+            Message::WorkspacesUpdated(workspaces, title, layout, special_visible, elapsed_ms) => {
+                self.perf.workspace_refresh_completed =
+                    self.perf.workspace_refresh_completed.saturating_add(1);
+                self.perf.workspace_refresh_last_ms = elapsed_ms;
+                self.perf.workspace_refresh_total_ms = self
+                    .perf
+                    .workspace_refresh_total_ms
+                    .saturating_add(elapsed_ms as u128);
                 let active_window_changed = self.active_window != title;
 
                 if self.workspaces != workspaces {
@@ -1275,6 +1334,19 @@ impl ThinkPadBar {
                 ..Default::default()
             });
 
+        // 6. Debug toggle pill
+        let dbg_pill = container(text("DBG").size(12))
+            .padding(Padding::from([4, 10]))
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(pill_bg)),
+                text_color: Some(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                border: iced::Border {
+                    radius: pill_border_radius.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
         let right = container(
             Row::new()
                 .spacing(4)
@@ -1286,6 +1358,7 @@ impl ThinkPadBar {
                     mouse_area(combined_pill).on_press(Message::TogglePopup(Popup::ControlCenter)),
                 )
                 .push(mouse_area(kbd_pill).on_press(Message::NextKeyboardLayout))
+                .push(mouse_area(dbg_pill).on_press(Message::ToggleDebugOverlay))
                 .push(mouse_area(clock_pill).on_press(Message::TogglePopup(Popup::Calendar))),
         )
         .width(Length::Shrink);
@@ -1295,27 +1368,67 @@ impl ThinkPadBar {
             .align_x(iced::alignment::Horizontal::Center)
             .align_y(iced::alignment::Vertical::Center);
 
-        container(stack![
+        let mut layers = Vec::new();
+        layers.push(
             container(
                 Row::new()
                     .align_y(Alignment::Center)
                     .push(left)
                     .push(Space::with_width(Length::Fill))
-                    .push(right)
+                    .push(right),
             )
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .into(),
+        );
+        layers.push(
             container(center_overlay)
                 .width(Length::Fill)
                 .align_x(iced::alignment::Horizontal::Center)
                 .align_y(iced::alignment::Vertical::Center)
-        ])
-        .width(Length::Fill)
-        .height(Length::Fixed(self.config.appearance.bar_height as f32))
-        .style(|_| container::Style {
-            background: Some(iced::Background::Color(Color::TRANSPARENT)),
-            ..Default::default()
-        })
-        .into()
+                .into(),
+        );
+        if self.show_debug_overlay {
+            let overlay = container(
+                container(
+                    text(format!(
+                        "ws req:{} coal:{} last:{}ms avg:{}ms dbus ok/fail:{}/{}",
+                        self.perf.workspace_refresh_requested,
+                        self.perf.workspace_refresh_coalesced,
+                        self.perf.workspace_refresh_last_ms,
+                        self.perf.workspace_refresh_avg_ms(),
+                        self.perf.dbus_connect_successes,
+                        self.perf.dbus_connect_failures
+                    ))
+                    .size(10),
+                )
+                .padding(Padding::from([2, 8]))
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(Color {
+                        a: self.config.appearance.opacity,
+                        ..Color::from_rgb8(0x1f, 0x23, 0x33)
+                    })),
+                    text_color: Some(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            )
+            .align_x(iced::alignment::Horizontal::Left)
+            .align_y(iced::alignment::Vertical::Center)
+            .padding(Padding::from([2, 8]));
+            layers.push(overlay.into());
+        }
+
+        container(stack(layers))
+            .width(Length::Fill)
+            .height(Length::Fixed(self.config.appearance.bar_height as f32))
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::TRANSPARENT)),
+                ..Default::default()
+            })
+            .into()
     }
 
     fn view_popup(&self) -> Element<'_, Message, Theme, iced::Renderer> {
@@ -1496,46 +1609,101 @@ impl ThinkPadBar {
                     .into()
             };
 
-            let col = Column::new()
-                .spacing(12)
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .push(text("System Info").size(18).style(move |_| {
-                            iced::widget::text::Style {
-                                color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                            }
-                        }))
-                        .push(Space::with_width(Length::Fill))
-                        .push(
-                            text(concat!("ver ", env!("CARGO_PKG_VERSION")))
-                                .size(10)
-                                .style(move |_| iced::widget::text::Style {
-                                    color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
-                                }),
+            let col =
+                Column::new()
+                    .spacing(12)
+                    .push(
+                        Row::new()
+                            .align_y(Alignment::Center)
+                            .push(text("System Info").size(18).style(move |_| {
+                                iced::widget::text::Style {
+                                    color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                                }
+                            }))
+                            .push(Space::with_width(Length::Fill))
+                            .push(
+                                text(concat!("ver ", env!("CARGO_PKG_VERSION")))
+                                    .size(10)
+                                    .style(move |_| iced::widget::text::Style {
+                                        color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
+                                    }),
+                            ),
+                    )
+                    .push(item("", "CPU Usage", self.sys_data.cpu_str.clone()))
+                    .push(item("󰍛", "Memory Usage", self.sys_data.mem_str.clone()))
+                    .push(item("󰍛", "Swap Usage", self.sys_data.swap_str.clone()))
+                    .push(item("", "Temperature", self.sys_data.temp_str.clone()))
+                    .push(item(
+                        "💿",
+                        "Disk Usage /",
+                        self.sys_data.disk_root_str.clone(),
+                    ))
+                    .push(item(
+                        "💿",
+                        "Disk Usage /boot",
+                        self.sys_data.disk_boot_str.clone(),
+                    ))
+                    .push(item("🌐", "IP Address", self.sys_data.ip_address.clone()))
+                    .push(item(
+                        "⬇",
+                        "Download Speed",
+                        self.sys_data.net_down_str.clone(),
+                    ))
+                    .push(item("⬆", "Upload Speed", self.sys_data.net_up_str.clone()))
+                    .push(Space::with_height(Length::Fixed(8.0)))
+                    .push(text("Observability").size(14).style(move |_| {
+                        iced::widget::text::Style {
+                            color: Some(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                        }
+                    }))
+                    .push(item(
+                        "⏱",
+                        "Workspace Refresh (last/avg ms)",
+                        format!(
+                            "{}/{}",
+                            self.perf.workspace_refresh_last_ms,
+                            self.perf.workspace_refresh_avg_ms()
                         ),
-                )
-                .push(item("", "CPU Usage", self.sys_data.cpu_str.clone()))
-                .push(item("󰍛", "Memory Usage", self.sys_data.mem_str.clone()))
-                .push(item("󰍛", "Swap Usage", self.sys_data.swap_str.clone()))
-                .push(item("", "Temperature", self.sys_data.temp_str.clone()))
-                .push(item(
-                    "💿",
-                    "Disk Usage /",
-                    self.sys_data.disk_root_str.clone(),
-                ))
-                .push(item(
-                    "💿",
-                    "Disk Usage /boot",
-                    self.sys_data.disk_boot_str.clone(),
-                ))
-                .push(item("🌐", "IP Address", self.sys_data.ip_address.clone()))
-                .push(item(
-                    "⬇",
-                    "Download Speed",
-                    self.sys_data.net_down_str.clone(),
-                ))
-                .push(item("⬆", "Upload Speed", self.sys_data.net_up_str.clone()));
+                    ))
+                    .push(item(
+                        "🔁",
+                        "Workspace Refresh (req/coalesced)",
+                        format!(
+                            "{}/{}",
+                            self.perf.workspace_refresh_requested,
+                            self.perf.workspace_refresh_coalesced
+                        ),
+                    ))
+                    .push(item(
+                        "🚌",
+                        "D-Bus Connect (ok/fail)",
+                        format!(
+                            "{}/{}",
+                            self.perf.dbus_connect_successes, self.perf.dbus_connect_failures
+                        ),
+                    ))
+                    .push(item("🧩", "Built-in Modules", {
+                        let modules = crate::modules::capabilities::built_in_modules();
+                        let modules_count = modules.len();
+                        let capability_links: usize =
+                            modules.iter().map(|m| m.capabilities.len()).sum();
+                        let names_total_len: usize = modules.iter().map(|m| m.name.len()).sum();
+                        format!(
+                            "{} modules / {} caps / name-bytes {}",
+                            modules_count, capability_links, names_total_len
+                        )
+                    }))
+                    .push(item(
+                        "🛠",
+                        "Runtime Contract",
+                        format!(
+                            "{} events:{} cmds:{} impl:{}",
+                            crate::modules::runtime::contract_version(),
+                            crate::modules::runtime::canonical_events().len(),
+                            crate::modules::runtime::canonical_commands().len(),
+                            crate::modules::runtime::noop_runtime_descriptor_name()
+                        ),
+                    ));
 
             return container(
                 container(col)
@@ -2412,6 +2580,8 @@ mod tests {
             title: Some("My App".to_string()),
             icon_name: Some("org.example.myapp-panel-symbolic".to_string()),
             icon_handle: None,
+            item_is_menu: false,
+            menu_path: None,
         };
         let c = ThinkPadBar::tray_search_candidates(&item, "org.kde.StatusNotifierItem-1234");
         assert!(c.iter().any(|v| v == "my app"));
@@ -2475,6 +2645,8 @@ mod tests {
             tray: crate::modules::tray::Tray::new(),
             workspace_refresh_inflight: false,
             workspace_refresh_queued: false,
+            perf: super::PerfCounters::default(),
+            show_debug_overlay: false,
         };
 
         assert!(bar.request_workspace_refresh());
