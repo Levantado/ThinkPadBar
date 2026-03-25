@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.62] - 2026-03-25
+
+### Fixed
+- Addressed critical tray consistency issues from runtime/code-review findings:
+  - `UpdateEvent::MenuDiff` is now applied to local tray menu state instead of being ignored, and owned menu model is rebuilt after diffs.
+  - tray activation runtime caches (`resolved_item_addresses`, per-item preferred secondary actions, context connection) are now reset on each client reconnect to avoid stale `:1.xxx` routing state reuse.
+- Added regression tests for:
+  - nested `MenuDiff` propagation into owned menu model,
+  - reconnect cache reset behavior in tray service runtime state.
+
+### Quality
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.61] - 2026-03-25
 
 ### Changed

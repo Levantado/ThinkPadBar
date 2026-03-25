@@ -16,6 +16,16 @@ pub(crate) fn menu_prefetch_sequence(menu_item_id: i32) -> Vec<i32> {
     }
 }
 
+fn reset_runtime_activation_state(
+    context_connection: &mut Option<zbus::Connection>,
+    resolved_item_addresses: &mut HashMap<String, String>,
+    preferred_secondary_actions: &mut HashMap<String, SecondaryAction>,
+) {
+    *context_connection = None;
+    resolved_item_addresses.clear();
+    preferred_secondary_actions.clear();
+}
+
 pub fn subscription() -> iced::Subscription<TrayMessage> {
     struct TrayListener;
 
@@ -36,6 +46,11 @@ pub fn subscription() -> iced::Subscription<TrayMessage> {
                 let client = match Client::new().await {
                     Ok(c) => {
                         retry_delay = std::time::Duration::from_secs(1);
+                        reset_runtime_activation_state(
+                            &mut context_connection,
+                            &mut resolved_item_addresses,
+                            &mut preferred_secondary_actions,
+                        );
                         c
                     }
                     Err(e) => {
@@ -196,7 +211,8 @@ pub fn subscription() -> iced::Subscription<TrayMessage> {
 
 #[cfg(test)]
 mod tests {
-    use super::menu_prefetch_sequence;
+    use super::{menu_prefetch_sequence, reset_runtime_activation_state, SecondaryAction};
+    use std::collections::HashMap;
 
     #[test]
     fn menu_prefetch_sequence_includes_root_and_selected_item() {
@@ -206,5 +222,26 @@ mod tests {
     #[test]
     fn menu_prefetch_sequence_root_only_for_root_selection() {
         assert_eq!(menu_prefetch_sequence(0), vec![0]);
+    }
+
+    #[test]
+    fn reconnect_state_reset_clears_cached_routes_and_addresses() {
+        let mut context_connection = None;
+        let mut resolved_item_addresses = HashMap::from([(
+            ":1.42".to_string(),
+            ":1.42/org/ayatana/NotificationItem/X".to_string(),
+        )]);
+        let mut preferred_secondary_actions =
+            HashMap::from([(":1.42".to_string(), SecondaryAction::ContextMenu)]);
+
+        reset_runtime_activation_state(
+            &mut context_connection,
+            &mut resolved_item_addresses,
+            &mut preferred_secondary_actions,
+        );
+
+        assert!(context_connection.is_none());
+        assert!(resolved_item_addresses.is_empty());
+        assert!(preferred_secondary_actions.is_empty());
     }
 }

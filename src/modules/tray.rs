@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use system_tray::client::{ActivateRequest, Client, Event, UpdateEvent};
 use system_tray::item::StatusNotifierItem;
 pub use system_tray::menu::TrayMenu;
+use system_tray::menu::{MenuDiff, MenuItem, MenuItemUpdate};
 use tokio::time::{timeout, Duration};
 use tracing::debug;
 
@@ -65,6 +66,13 @@ impl Tray {
         None
     }
 
+    fn rebuild_owned_menu(item: &mut TrayItem) {
+        item.owned_menu = item
+            .menu_layout
+            .as_ref()
+            .map(crate::services::tray_menu::OwnedTrayMenu::from_layout);
+    }
+
     pub fn update(&mut self, message: TrayMessage) {
         match message {
             TrayMessage::ItemAdded(id, item) => {
@@ -112,10 +120,14 @@ impl Tray {
                             item.menu_path = Some(path);
                         }
                         UpdateEvent::Menu(layout) => {
-                            item.owned_menu = Some(
-                                crate::services::tray_menu::OwnedTrayMenu::from_layout(&layout),
-                            );
                             item.menu_layout = Some(layout);
+                            Self::rebuild_owned_menu(item);
+                        }
+                        UpdateEvent::MenuDiff(diffs) => {
+                            if let Some(layout) = item.menu_layout.as_mut() {
+                                apply_menu_diffs(layout, &diffs);
+                                Self::rebuild_owned_menu(item);
+                            }
                         }
                         _ => {}
                     }
@@ -171,6 +183,66 @@ impl Tray {
     pub fn has_menu_entries(&self, id: &str) -> bool {
         self.owned_menu_for(id)
             .is_some_and(crate::services::tray_menu::OwnedTrayMenu::has_visible_actions)
+    }
+}
+
+fn apply_menu_diffs(tray_menu: &mut TrayMenu, diffs: &[MenuDiff]) {
+    for diff in diffs {
+        if let Some(item) = find_menu_item_mut(&mut tray_menu.submenus, diff.id) {
+            apply_menu_item_update(item, &diff.update);
+            apply_menu_item_remove(item, &diff.remove);
+        }
+    }
+}
+
+fn find_menu_item_mut(items: &mut [MenuItem], id: i32) -> Option<&mut MenuItem> {
+    for item in items {
+        if item.id == id {
+            return Some(item);
+        }
+        if let Some(found) = find_menu_item_mut(&mut item.submenu, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn apply_menu_item_update(item: &mut MenuItem, update: &MenuItemUpdate) {
+    if let Some(label) = &update.label {
+        item.label.clone_from(label);
+    }
+    if let Some(enabled) = update.enabled {
+        item.enabled = enabled;
+    }
+    if let Some(visible) = update.visible {
+        item.visible = visible;
+    }
+    if let Some(icon_name) = &update.icon_name {
+        item.icon_name.clone_from(icon_name);
+    }
+    if let Some(icon_data) = &update.icon_data {
+        item.icon_data.clone_from(icon_data);
+    }
+    if let Some(toggle_state) = update.toggle_state {
+        item.toggle_state = toggle_state;
+    }
+    if let Some(disposition) = update.disposition {
+        item.disposition = disposition;
+    }
+}
+
+fn apply_menu_item_remove(item: &mut MenuItem, remove: &[String]) {
+    for field in remove {
+        match field.as_str() {
+            "label" => item.label = None,
+            "enabled" => item.enabled = true,
+            "visible" => item.visible = true,
+            "icon-name" => item.icon_name = None,
+            "icon-data" => item.icon_data = None,
+            "toggle-state" => item.toggle_state = Default::default(),
+            "disposition" => item.disposition = Default::default(),
+            _ => {}
+        }
     }
 }
 
@@ -774,9 +846,10 @@ mod tests {
         choose_secondary_plan, destination_from_item_address, icon_name_candidates,
         parse_cursor_pos, parse_status_notifier_address, select_registered_item_address,
         themed_icon_paths, update_secondary_preference, ActivationResult, SecondaryAction,
-        SecondaryPlan, Tray, TrayItem, TrayMenu,
+        SecondaryPlan, Tray, TrayItem, TrayMenu, TrayMessage, UpdateEvent,
     };
     use std::collections::HashMap;
+    use system_tray::menu::{MenuDiff, MenuItemUpdate};
 
     #[test]
     fn icon_name_candidates_include_base_name_without_extension() {
@@ -822,6 +895,69 @@ mod tests {
             },
         );
         assert!(tray.has_menu_entries("item"));
+    }
+
+    #[test]
+    fn menu_diff_updates_nested_item_and_owned_menu_state() {
+        let mut tray = Tray::new();
+        let mut parent = system_tray::menu::MenuItem {
+            id: 1,
+            label: Some("Parent".to_string()),
+            visible: true,
+            enabled: true,
+            ..Default::default()
+        };
+        parent.submenu = vec![system_tray::menu::MenuItem {
+            id: 2,
+            label: Some("Child".to_string()),
+            visible: true,
+            enabled: true,
+            ..Default::default()
+        }];
+        let layout = TrayMenu {
+            id: 0,
+            submenus: vec![parent],
+        };
+
+        tray.items.insert(
+            "item".to_string(),
+            TrayItem {
+                _id: "item".to_string(),
+                title: None,
+                icon_name: None,
+                icon_handle: None,
+                item_is_menu: true,
+                menu_path: Some("/menu".to_string()),
+                owned_menu: Some(crate::services::tray_menu::OwnedTrayMenu::from_layout(
+                    &layout,
+                )),
+                menu_layout: Some(layout),
+            },
+        );
+        tray.update(TrayMessage::ItemUpdated(
+            "item".to_string(),
+            UpdateEvent::MenuDiff(vec![MenuDiff {
+                id: 2,
+                update: MenuItemUpdate {
+                    enabled: Some(false),
+                    label: Some(Some("Child Disabled".to_string())),
+                    ..Default::default()
+                },
+                remove: Vec::new(),
+            }]),
+        ));
+
+        let menu = tray.owned_menu_for("item").expect("menu should exist");
+        let child = menu
+            .nodes()
+            .iter()
+            .find_map(|n| match n {
+                crate::services::tray_menu::OwnedTrayMenuNode::Action(a) if a.id == 2 => Some(a),
+                _ => None,
+            })
+            .expect("child action should exist");
+        assert_eq!(child.label, "Child Disabled");
+        assert!(!child.enabled);
     }
 
     #[test]
