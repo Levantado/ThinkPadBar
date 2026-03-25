@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.87] - 2026-03-26
+
+### Changed
+- Advanced `P5 Observability v2` across the remaining runtime-heavy domains:
+  - `NetworkService` now exposes structured runtime diagnostics with configured/runtime backend, last fallback path, backend-unavailable reason, and last surfaced network error;
+  - tray runtime now persists secondary-click/menu activation observations instead of only logging them, so debug `System Info` can show the last route, result, dispatch failure, and menu activation error;
+  - `IdleInhibitorService` now reports explicit unavailable reasons in its runtime summary instead of a silent `N/A`.
+- Debug `System Info` now includes dedicated `Network Runtime` and `Tray Runtime` lines plus conditional warning rows for network unavailability, network last error, tray dispatch failures, and tray menu activation errors.
+
+### Quality
+- Added regression tests for:
+  - network runtime fallback/error diagnostics,
+  - tray runtime diagnostics persistence and error clearing,
+  - idle-inhibitor unavailable-reason reporting.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.86] - 2026-03-26
 
 ### Changed

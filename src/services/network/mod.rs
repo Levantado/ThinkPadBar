@@ -8,6 +8,27 @@ pub use types::{
     NetworkStatus, WifiInfo, WifiNetwork,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkDiagnostics {
+    pub configured_backend: NetworkBackendKind,
+    pub active_backend: NetworkBackendKind,
+    pub fallback_path: Option<String>,
+    pub unavailable_reason: Option<String>,
+    pub last_error: Option<String>,
+}
+
+impl NetworkDiagnostics {
+    pub fn summary(&self) -> String {
+        let fallback = self.fallback_path.as_deref().unwrap_or("-");
+        let unavailable = self.unavailable_reason.as_deref().unwrap_or("-");
+        let error = self.last_error.as_deref().unwrap_or("-");
+        format!(
+            "cfg {:?} act {:?} fb {} why {} err {}",
+            self.configured_backend, self.active_backend, fallback, unavailable, error
+        )
+    }
+}
+
 trait NetworkBackend {
     fn kind(&self) -> NetworkBackendKind;
     async fn get_wifi_info(&self, conn: &Connection) -> WifiInfo;
@@ -79,6 +100,30 @@ impl NetworkService {
 
     pub fn active_backend(&self) -> NetworkBackendKind {
         self.snapshot.active_backend
+    }
+
+    pub fn diagnostics(&self) -> NetworkDiagnostics {
+        let backend_diagnostics = self.backend.diagnostics();
+        let status_error = match &self.snapshot.status {
+            NetworkStatus::Error(error) => Some(error.clone()),
+            _ => None,
+        };
+
+        let backend_unavailable =
+            (self.snapshot.configured_backend != self.snapshot.active_backend).then(|| {
+                format!(
+                    "configured {:?}, runtime {:?}: backend fallback active",
+                    self.snapshot.configured_backend, self.snapshot.active_backend
+                )
+            });
+
+        NetworkDiagnostics {
+            configured_backend: self.snapshot.configured_backend,
+            active_backend: self.snapshot.active_backend,
+            fallback_path: backend_diagnostics.last_fallback_path,
+            unavailable_reason: backend_unavailable.or(backend_diagnostics.unavailable_reason),
+            last_error: status_error.or(backend_diagnostics.last_error),
+        }
     }
 
     pub fn handle_command(
@@ -369,6 +414,37 @@ mod tests {
         assert_eq!(
             service.snapshot().status,
             NetworkStatus::Connecting("Home".to_string())
+        );
+    }
+
+    #[test]
+    fn diagnostics_report_runtime_backend_fallback_reason() {
+        let cfg = crate::config::NetworkConfig {
+            backend: "networkmanager".to_string(),
+            adapter_path: "/a".to_string(),
+            station_path: "/b".to_string(),
+        };
+        let service = NetworkService::new(&cfg);
+        let diagnostics = service.diagnostics();
+        assert_eq!(
+            diagnostics.configured_backend,
+            NetworkBackendKind::NetworkManager
+        );
+        assert_eq!(diagnostics.active_backend, NetworkBackendKind::Iwd);
+        assert!(diagnostics
+            .unavailable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("backend fallback active")));
+    }
+
+    #[test]
+    fn diagnostics_surface_status_errors() {
+        let mut service = NetworkService::new(&crate::config::NetworkConfig::default());
+        let _ = service.handle_command(NetworkCommand::ToggleMenu, false);
+        let diagnostics = service.diagnostics();
+        assert_eq!(
+            diagnostics.last_error.as_deref(),
+            Some("D-Bus недоступен: не удалось открыть system bus")
         );
     }
 }

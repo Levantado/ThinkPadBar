@@ -1,7 +1,7 @@
 use crate::services::tray_model::{
     activate_secondary_with_plan, choose_secondary_plan, current_cursor_pos_with_fallback,
     get_secondary_capabilities, resolve_item_address, update_secondary_preference, SecondaryAction,
-    TrayCommand, TrayMessage,
+    TrayCommand, TrayMessage, TrayRuntimeUpdate,
 };
 use std::collections::HashMap;
 use system_tray::client::{Client, Event};
@@ -162,6 +162,23 @@ pub fn subscription() -> iced::Subscription<TrayMessage> {
                                         result,
                                         started_at.elapsed().as_millis()
                                     );
+                                    let route = format!(
+                                        "{}->{}",
+                                        plan.primary.as_str(),
+                                        plan.fallback
+                                            .map(SecondaryAction::as_str)
+                                            .unwrap_or("none")
+                                    );
+                                    let failure = (!result.succeeded()).then(|| {
+                                        format!("{} resolved={} {}", id, resolved_address, result)
+                                    });
+                                    let _ = tx.send(TrayMessage::RuntimeUpdate(
+                                        TrayRuntimeUpdate::SecondaryObserved {
+                                            route,
+                                            result: result.to_string(),
+                                            failure,
+                                        },
+                                    ));
                                     if !result.succeeded() {
                                         warn!("tray secondary activation failed for {}", id);
                                     }
@@ -196,10 +213,22 @@ pub fn subscription() -> iced::Subscription<TrayMessage> {
                                             })
                                             .await
                                         {
+                                            let _ = tx.send(TrayMessage::RuntimeUpdate(
+                                                TrayRuntimeUpdate::MenuActivationError(Some(
+                                                    format!(
+                                                        "{} item={} {}",
+                                                        id, menu_item_id, err
+                                                    ),
+                                                )),
+                                            ));
                                             warn!(
                                                 "tray menu item activation failed for {} item={} err={}",
                                                 id, menu_item_id, err
                                             );
+                                        } else {
+                                            let _ = tx.send(TrayMessage::RuntimeUpdate(
+                                                TrayRuntimeUpdate::MenuActivationError(None),
+                                            ));
                                         }
                                     }
                                 }

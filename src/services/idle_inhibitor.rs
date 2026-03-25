@@ -12,17 +12,18 @@ use wayland_protocols::wp::idle_inhibit::zv1::client::{
     zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1, zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IdleInhibitorDiagnostics {
     pub backend_name: &'static str,
     pub requested_enabled: bool,
     pub surface_bound: bool,
     pub compositor_version: Option<u32>,
     pub idle_manager_version: Option<u32>,
+    pub unavailable_reason: Option<String>,
 }
 
 impl IdleInhibitorDiagnostics {
-    fn backend_label(self) -> &'static str {
+    fn backend_label(&self) -> &'static str {
         if self.backend_name.is_empty() {
             "none"
         } else {
@@ -30,9 +31,10 @@ impl IdleInhibitorDiagnostics {
         }
     }
 
-    pub fn summary(self, available: bool, enabled: bool) -> String {
+    pub fn summary(&self, available: bool, enabled: bool) -> String {
+        let why = self.unavailable_reason.as_deref().unwrap_or("-");
         format!(
-            "{} avail:{} enabled:{} req:{} surf:{} cmp:{} idle:{}",
+            "{} avail:{} enabled:{} req:{} surf:{} cmp:{} idle:{} why:{}",
             self.backend_label(),
             available,
             enabled,
@@ -41,12 +43,13 @@ impl IdleInhibitorDiagnostics {
             self.compositor_version
                 .map_or_else(|| "-".to_string(), |version| version.to_string()),
             self.idle_manager_version
-                .map_or_else(|| "-".to_string(), |version| version.to_string())
+                .map_or_else(|| "-".to_string(), |version| version.to_string()),
+            why
         )
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IdleInhibitorSnapshot {
     pub available: bool,
     pub enabled: bool,
@@ -54,7 +57,7 @@ pub struct IdleInhibitorSnapshot {
 }
 
 impl IdleInhibitorSnapshot {
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         if !self.available {
             "N/A"
         } else if self.enabled {
@@ -64,7 +67,7 @@ impl IdleInhibitorSnapshot {
         }
     }
 
-    pub fn debug_summary(self) -> String {
+    pub fn debug_summary(&self) -> String {
         self.diagnostics.summary(self.available, self.enabled)
     }
 }
@@ -148,10 +151,16 @@ impl IdleInhibitorBackend for WaylandIdleInhibitorBackend {
     }
 
     fn diagnostics(&self) -> IdleInhibitorDiagnostics {
+        let surface_bound = self.state.surface.as_ref().is_some_and(Proxy::is_alive);
+        let idle_manager_bound = self
+            .state
+            .idle_manager
+            .as_ref()
+            .is_some_and(|(manager, _)| manager.is_alive());
         IdleInhibitorDiagnostics {
             backend_name: self.backend_name(),
             requested_enabled: false,
-            surface_bound: self.state.surface.as_ref().is_some_and(Proxy::is_alive),
+            surface_bound,
             compositor_version: self
                 .state
                 .compositor
@@ -162,6 +171,15 @@ impl IdleInhibitorBackend for WaylandIdleInhibitorBackend {
                 .idle_manager
                 .as_ref()
                 .map(|(manager, _)| manager.version()),
+            unavailable_reason: if surface_bound && idle_manager_bound {
+                None
+            } else if !surface_bound && !idle_manager_bound {
+                Some("missing wl_surface and idle-inhibit protocol".to_string())
+            } else if !surface_bound {
+                Some("missing wl_surface".to_string())
+            } else {
+                Some("missing zwp_idle_inhibit_manager_v1".to_string())
+            },
         }
     }
 
@@ -304,16 +322,18 @@ impl IdleInhibitorService {
     }
 
     pub fn snapshot(&self) -> IdleInhibitorSnapshot {
-        self.snapshot
+        self.snapshot.clone()
     }
 
     #[cfg(test)]
     pub fn unavailable_for_tests() -> Self {
-        Self {
+        let mut service = Self {
             snapshot: IdleInhibitorSnapshot::default(),
             requested_enabled: false,
             backend: None,
-        }
+        };
+        service.refresh_snapshot();
+        service
     }
 
     pub fn toggle(&mut self) {
@@ -343,7 +363,14 @@ impl IdleInhibitorService {
                 backend.diagnostics(),
             )
         } else {
-            (false, false, IdleInhibitorDiagnostics::default())
+            (
+                false,
+                false,
+                IdleInhibitorDiagnostics {
+                    unavailable_reason: Some("wayland connection unavailable".to_string()),
+                    ..IdleInhibitorDiagnostics::default()
+                },
+            )
         };
         diagnostics.requested_enabled = self.requested_enabled;
         self.snapshot = IdleInhibitorSnapshot {
@@ -387,6 +414,7 @@ mod tests {
                 surface_bound: self.available,
                 compositor_version: self.available.then_some(5),
                 idle_manager_version: self.available.then_some(1),
+                unavailable_reason: (!self.available).then(|| "backend unavailable".to_string()),
             }
         }
 
@@ -411,16 +439,14 @@ mod tests {
     #[test]
     fn snapshot_defaults_to_unavailable_and_disabled() {
         assert_eq!(
-            IdleInhibitorService {
-                snapshot: IdleInhibitorSnapshot::default(),
-                requested_enabled: false,
-                backend: None,
-            }
-            .snapshot(),
+            IdleInhibitorService::unavailable_for_tests().snapshot(),
             IdleInhibitorSnapshot {
                 available: false,
                 enabled: false,
-                diagnostics: IdleInhibitorDiagnostics::default(),
+                diagnostics: IdleInhibitorDiagnostics {
+                    unavailable_reason: Some("wayland connection unavailable".to_string()),
+                    ..IdleInhibitorDiagnostics::default()
+                },
             }
         );
     }
@@ -469,7 +495,10 @@ mod tests {
             IdleInhibitorSnapshot {
                 available: false,
                 enabled: false,
-                diagnostics: IdleInhibitorDiagnostics::default(),
+                diagnostics: IdleInhibitorDiagnostics {
+                    unavailable_reason: Some("wayland connection unavailable".to_string()),
+                    ..IdleInhibitorDiagnostics::default()
+                },
             }
         );
     }
@@ -492,6 +521,7 @@ mod tests {
                     surface_bound: true,
                     compositor_version: Some(5),
                     idle_manager_version: Some(1),
+                    unavailable_reason: None,
                 },
             }
         );
@@ -516,6 +546,7 @@ mod tests {
                     surface_bound: true,
                     compositor_version: Some(5),
                     idle_manager_version: Some(1),
+                    unavailable_reason: None,
                 },
             }
         );
@@ -531,7 +562,16 @@ mod tests {
 
         assert_eq!(
             service.snapshot().debug_summary(),
-            "fake avail:true enabled:false req:false surf:true cmp:5 idle:1"
+            "fake avail:true enabled:false req:false surf:true cmp:5 idle:1 why:-"
+        );
+    }
+
+    #[test]
+    fn debug_summary_reports_unavailable_reason() {
+        let service = IdleInhibitorService::unavailable_for_tests();
+        assert_eq!(
+            service.snapshot().debug_summary(),
+            "none avail:false enabled:false req:false surf:false cmp:- idle:- why:wayland connection unavailable"
         );
     }
 }

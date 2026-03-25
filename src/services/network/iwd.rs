@@ -55,11 +55,19 @@ struct PathCache {
     at: Instant,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IwdBackendDiagnostics {
+    pub last_fallback_path: Option<String>,
+    pub last_error: Option<String>,
+    pub unavailable_reason: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct IwdBackend {
     adapter_path: String,
     station_path: String,
     discovery_cache: Arc<Mutex<PathCache>>,
+    diagnostics: Arc<Mutex<IwdBackendDiagnostics>>,
 }
 
 impl IwdBackend {
@@ -71,6 +79,7 @@ impl IwdBackend {
                 value: None,
                 at: Instant::now() - DISCOVERY_CACHE_TTL,
             })),
+            diagnostics: Arc::new(Mutex::new(IwdBackendDiagnostics::default())),
         }
     }
 
@@ -221,6 +230,47 @@ impl IwdBackend {
             guard.at = Instant::now();
         }
         refreshed
+    }
+
+    pub fn diagnostics(&self) -> IwdBackendDiagnostics {
+        self.diagnostics
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    fn update_diagnostics(&self, apply: impl FnOnce(&mut IwdBackendDiagnostics)) {
+        if let Ok(mut guard) = self.diagnostics.lock() {
+            apply(&mut guard);
+        }
+    }
+
+    fn record_fallback_path(&self, path: &'static str) {
+        self.update_diagnostics(|diagnostics| {
+            diagnostics.last_fallback_path = Some(path.to_string());
+        });
+    }
+
+    fn record_error(&self, error: impl Into<String>) {
+        let error = error.into();
+        self.update_diagnostics(|diagnostics| {
+            diagnostics.last_error = Some(error);
+        });
+    }
+
+    fn clear_error(&self) {
+        self.update_diagnostics(|diagnostics| diagnostics.last_error = None);
+    }
+
+    fn set_unavailable_reason(&self, reason: impl Into<String>) {
+        let reason = reason.into();
+        self.update_diagnostics(|diagnostics| {
+            diagnostics.unavailable_reason = Some(reason);
+        });
+    }
+
+    fn clear_unavailable_reason(&self) {
+        self.update_diagnostics(|diagnostics| diagnostics.unavailable_reason = None);
     }
 
     fn candidate_paths(&self) -> Vec<(String, String)> {
@@ -428,10 +478,18 @@ impl IwdBackend {
     }
 
     pub async fn get_wifi_info(&self, conn: &Connection) -> WifiInfo {
+        self.clear_error();
         let mut enabled = false;
         let mut ssid = String::from("Disconnected");
+        let candidate_paths = self.candidate_paths();
 
-        for (adapter_path, station_path) in self.candidate_paths() {
+        if candidate_paths.is_empty() {
+            self.set_unavailable_reason("no usable IWD adapter/station paths");
+        } else {
+            self.clear_unavailable_reason();
+        }
+
+        for (adapter_path, station_path) in candidate_paths {
             enabled = false;
             ssid = String::from("Disconnected");
 
@@ -459,6 +517,7 @@ impl IwdBackend {
 
                 if ssid == "Disconnected" || ssid.is_empty() {
                     if let Some(found) = Self::fallback_current_ssid() {
+                        self.record_fallback_path("ssid:iwgetid/iw");
                         ssid = found;
                     }
                 }
@@ -467,6 +526,7 @@ impl IwdBackend {
         }
 
         if let Some(found) = Self::fallback_current_ssid() {
+            self.record_fallback_path("ssid:iwgetid/iw");
             ssid = found;
         }
 
@@ -474,9 +534,17 @@ impl IwdBackend {
     }
 
     pub async fn scan_networks(&self, conn: &Connection) -> Vec<WifiNetwork> {
+        self.clear_error();
         let mut networks = Vec::new();
+        let station_paths = self.candidate_station_paths();
 
-        for station_path in self.candidate_station_paths() {
+        if station_paths.is_empty() {
+            self.set_unavailable_reason("no usable IWD station paths");
+        } else {
+            self.clear_unavailable_reason();
+        }
+
+        for station_path in station_paths {
             networks.clear();
             if let Ok(station_builder) = StationProxy::builder(conn).path(station_path.as_str()) {
                 if let Ok(station) = station_builder.build().await {
@@ -514,6 +582,9 @@ impl IwdBackend {
                     }
                     if networks.is_empty() {
                         networks = self.fallback_scan_networks(station_path.as_str());
+                        if !networks.is_empty() {
+                            self.record_fallback_path("scan:iwctl");
+                        }
                     }
                     if !networks.is_empty() {
                         return networks;
@@ -531,7 +602,15 @@ impl IwdBackend {
         ssid: String,
         passphrase: Option<String>,
     ) -> bool {
-        for station_path in self.candidate_station_paths() {
+        self.clear_error();
+        let station_paths = self.candidate_station_paths();
+        if station_paths.is_empty() {
+            self.set_unavailable_reason("no usable IWD station paths");
+        } else {
+            self.clear_unavailable_reason();
+        }
+
+        for station_path in station_paths {
             if let Ok(station_builder) = StationProxy::builder(conn).path(station_path.as_str()) {
                 if let Ok(station) = station_builder.build().await {
                     if let Ok(ordered) = station.get_ordered_networks().await {
@@ -543,11 +622,20 @@ impl IwdBackend {
                                             if network.connect().await.is_ok() {
                                                 return true;
                                             }
-                                            return self.fallback_connect_with_iwctl(
+                                            let fallback_ok = self.fallback_connect_with_iwctl(
                                                 station_path.as_str(),
                                                 &ssid,
                                                 passphrase.as_deref(),
                                             );
+                                            if fallback_ok {
+                                                self.record_fallback_path("connect:iwctl");
+                                            } else {
+                                                self.record_error(format!(
+                                                    "connect failed via iwd and iwctl for {}",
+                                                    ssid
+                                                ));
+                                            }
+                                            return fallback_ok;
                                         }
                                     }
                                 }
@@ -555,28 +643,44 @@ impl IwdBackend {
                         }
                     }
 
-                    if self.fallback_connect_with_iwctl(
+                    let fallback_ok = self.fallback_connect_with_iwctl(
                         station_path.as_str(),
                         &ssid,
                         passphrase.as_deref(),
-                    ) {
+                    );
+                    if fallback_ok {
+                        self.record_fallback_path("connect:iwctl");
                         return true;
                     }
                 }
             }
         }
+        self.record_error(format!("unable to locate/connect network {}", ssid));
         false
     }
 
     pub async fn toggle_wifi(&self, conn: &Connection, enable: bool) {
-        for (adapter_path, _) in self.candidate_paths() {
+        self.clear_error();
+        let candidate_paths = self.candidate_paths();
+        if candidate_paths.is_empty() {
+            self.set_unavailable_reason("no usable IWD adapter paths");
+        } else {
+            self.clear_unavailable_reason();
+        }
+
+        for (adapter_path, _) in candidate_paths {
             if let Ok(builder) = AdapterProxy::builder(conn).path(adapter_path.as_str()) {
                 if let Ok(adapter) = builder.build().await {
-                    let _ = adapter.set_powered(enable).await;
+                    if adapter.set_powered(enable).await.is_err() {
+                        self.record_error(format!("failed to set Wi-Fi powered={enable}"));
+                    }
                     return;
                 }
             }
         }
+        self.record_error(format!(
+            "unable to find adapter to set Wi-Fi powered={enable}"
+        ));
     }
 }
 

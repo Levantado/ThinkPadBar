@@ -1760,6 +1760,7 @@ impl ThinkPadBar {
                 );
             let sys_data = self.system_info_service.snapshot();
             let controls_diagnostics = self.controls_service.diagnostics();
+            let network_diagnostics = self.network_service.diagnostics();
             let idle_snapshot = self.idle_inhibitor_service.snapshot();
             let tray_diagnostics = self.tray_ui_service.diagnostics();
             col = col
@@ -1875,6 +1876,7 @@ impl ThinkPadBar {
                         "Controls Backends",
                         controls_diagnostics.summary(),
                     ))
+                    .push(item("📶", "Network Runtime", network_diagnostics.summary()))
                     .push(item(
                         "🔊",
                         "Audio Runtime",
@@ -1888,10 +1890,27 @@ impl ThinkPadBar {
                         "Idle Inhibitor Runtime",
                         idle_snapshot.debug_summary(),
                     ))
-                    .push(item("🖼", "Tray Icons", tray_diagnostics.summary()));
+                    .push(item("🖼", "Tray Icons", tray_diagnostics.summary()))
+                    .push(item(
+                        "🧭",
+                        "Tray Runtime",
+                        tray_diagnostics.runtime.summary(),
+                    ));
 
                 if let Some(last_unresolved) = tray_diagnostics.last_unresolved_item {
                     col = col.push(item("⚠", "Tray Icon Last Unresolved", last_unresolved));
+                }
+                if let Some(last_error) = network_diagnostics.last_error {
+                    col = col.push(item("⚠", "Network Last Error", last_error));
+                }
+                if let Some(unavailable_reason) = network_diagnostics.unavailable_reason {
+                    col = col.push(item("⚠", "Network Unavailable", unavailable_reason));
+                }
+                if let Some(last_failure) = tray_diagnostics.runtime.last_dispatch_failure {
+                    col = col.push(item("⚠", "Tray Dispatch Failure", last_failure));
+                }
+                if let Some(menu_error) = tray_diagnostics.runtime.last_menu_activation_error {
+                    col = col.push(item("⚠", "Tray Menu Error", menu_error));
                 }
             }
 

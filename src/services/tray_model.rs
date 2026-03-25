@@ -48,6 +48,7 @@ pub struct TrayDiagnostics {
     pub fallback_labels: usize,
     pub resolver: crate::services::icon_resolver::IconResolverDiagnostics,
     pub last_unresolved_item: Option<String>,
+    pub runtime: TrayRuntimeDiagnostics,
 }
 
 impl TrayDiagnostics {
@@ -62,12 +63,44 @@ impl TrayDiagnostics {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrayRuntimeDiagnostics {
+    pub last_secondary_route: Option<String>,
+    pub last_secondary_result: Option<String>,
+    pub last_dispatch_failure: Option<String>,
+    pub last_menu_activation_error: Option<String>,
+}
+
+impl TrayRuntimeDiagnostics {
+    pub fn summary(&self) -> String {
+        let route = self.last_secondary_route.as_deref().unwrap_or("-");
+        let result = self.last_secondary_result.as_deref().unwrap_or("-");
+        let failure = self.last_dispatch_failure.as_deref().unwrap_or("-");
+        let menu = self.last_menu_activation_error.as_deref().unwrap_or("-");
+        format!(
+            "route {} result {} fail {} menu {}",
+            route, result, failure, menu
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrayRuntimeUpdate {
+    SecondaryObserved {
+        route: String,
+        result: String,
+        failure: Option<String>,
+    },
+    MenuActivationError(Option<String>),
+}
+
 #[derive(Debug, Clone)]
 pub enum TrayMessage {
     ItemAdded(String, Box<StatusNotifierItem>),
     ItemUpdated(String, UpdateEvent),
     ItemRemoved(String),
     EventBatch(Vec<Event>),
+    RuntimeUpdate(TrayRuntimeUpdate),
     ActivateItem(String),
     ActivateItemSecondary(String),
     ActivateMenuItem(String, i32, Vec<i32>),
@@ -89,6 +122,7 @@ pub struct Tray {
     pub items: HashMap<String, TrayItem>,
     pub activate_tx: Option<tokio::sync::mpsc::UnboundedSender<TrayCommand>>,
     icon_resolver: crate::services::icon_resolver::IconResolver,
+    runtime_diagnostics: TrayRuntimeDiagnostics,
 }
 
 impl Tray {
@@ -97,6 +131,7 @@ impl Tray {
             items: HashMap::new(),
             activate_tx: None,
             icon_resolver: crate::services::icon_resolver::IconResolver::new(),
+            runtime_diagnostics: TrayRuntimeDiagnostics::default(),
         }
     }
 
@@ -108,6 +143,7 @@ impl Tray {
             items: HashMap::new(),
             activate_tx: None,
             icon_resolver,
+            runtime_diagnostics: TrayRuntimeDiagnostics::default(),
         }
     }
 
@@ -225,6 +261,20 @@ impl Tray {
                     }
                 }
             }
+            TrayMessage::RuntimeUpdate(update) => match update {
+                TrayRuntimeUpdate::SecondaryObserved {
+                    route,
+                    result,
+                    failure,
+                } => {
+                    self.runtime_diagnostics.last_secondary_route = Some(route);
+                    self.runtime_diagnostics.last_secondary_result = Some(result);
+                    self.runtime_diagnostics.last_dispatch_failure = failure;
+                }
+                TrayRuntimeUpdate::MenuActivationError(error) => {
+                    self.runtime_diagnostics.last_menu_activation_error = error;
+                }
+            },
             TrayMessage::ActivateItem(id) => {
                 if let Some(tx) = &self.activate_tx {
                     let _ = tx.send(TrayCommand::Default(id));
@@ -289,6 +339,7 @@ impl Tray {
             fallback_labels,
             resolver: self.icon_resolver.diagnostics(),
             last_unresolved_item,
+            runtime: self.runtime_diagnostics.clone(),
         }
     }
 }
@@ -844,7 +895,7 @@ mod tests {
         choose_secondary_plan, destination_from_item_address, parse_cursor_pos,
         parse_status_notifier_address, select_registered_item_address, update_secondary_preference,
         ActivationResult, SecondaryAction, SecondaryPlan, Tray, TrayItem, TrayMenu, TrayMessage,
-        UpdateEvent,
+        TrayRuntimeUpdate, UpdateEvent,
     };
     use iced::widget::image::Handle;
     use std::collections::HashMap;
@@ -968,6 +1019,56 @@ mod tests {
             Some("Fallback")
         );
         assert!(diagnostics.summary().contains("1/2 resolved"));
+    }
+
+    #[test]
+    fn tray_runtime_diagnostics_capture_secondary_route_and_failure() {
+        let mut tray = Tray::new();
+        tray.update(TrayMessage::RuntimeUpdate(
+            TrayRuntimeUpdate::SecondaryObserved {
+                route: "context_menu->secondary_activate".to_string(),
+                result: "failed:context_menu->menu_root_activate".to_string(),
+                failure: Some(":1.55 resolved=:1.55 failed".to_string()),
+            },
+        ));
+
+        let diagnostics = tray.diagnostics();
+        assert_eq!(
+            diagnostics.runtime.last_secondary_route.as_deref(),
+            Some("context_menu->secondary_activate")
+        );
+        assert_eq!(
+            diagnostics.runtime.last_secondary_result.as_deref(),
+            Some("failed:context_menu->menu_root_activate")
+        );
+        assert_eq!(
+            diagnostics.runtime.last_dispatch_failure.as_deref(),
+            Some(":1.55 resolved=:1.55 failed")
+        );
+    }
+
+    #[test]
+    fn tray_runtime_diagnostics_clear_menu_activation_error_on_success() {
+        let mut tray = Tray::new();
+        tray.update(TrayMessage::RuntimeUpdate(
+            TrayRuntimeUpdate::MenuActivationError(Some(
+                ":1.55 item=42 org.freedesktop.DBus.Error.UnknownMethod".to_string(),
+            )),
+        ));
+        assert!(tray
+            .diagnostics()
+            .runtime
+            .last_menu_activation_error
+            .is_some());
+
+        tray.update(TrayMessage::RuntimeUpdate(
+            TrayRuntimeUpdate::MenuActivationError(None),
+        ));
+        assert!(tray
+            .diagnostics()
+            .runtime
+            .last_menu_activation_error
+            .is_none());
     }
 
     #[test]
