@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.57] - 2026-03-25
+
+### Fixed
+- Extended tray right-click fallback chain for SNI edge-cases:
+  - `ContextMenu` -> `SecondaryActivate` -> `DefaultActivate`,
+  - if all SNI activation methods fail and item has a menu path, execute `DBusMenu` root activation (`MenuItem` with `submenu_id=0`) as final fallback.
+- This targets indicators that expose `com.canonical.dbusmenu` but do not implement `ContextMenu`/`SecondaryActivate`.
+
+### Quality
+- Added regression test for `menu_root_activate` fallback path after default activation failure.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.56] - 2026-03-25
 
 ### Fixed

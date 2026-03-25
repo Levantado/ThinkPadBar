@@ -218,7 +218,7 @@ impl Tray {
                                 )
                                 .await;
                                 if is_secondary {
-                                    let (item_is_menu, has_menu_path) =
+                                    let (item_is_menu, has_menu_path, menu_path) =
                                         get_secondary_capabilities(&client, &id);
                                     let preferred_action =
                                         preferred_secondary_actions.get(&id).copied();
@@ -232,6 +232,7 @@ impl Tray {
                                         &client,
                                         &mut context_connection,
                                         &resolved_address,
+                                        menu_path.as_deref(),
                                         x,
                                         y,
                                         plan,
@@ -471,6 +472,8 @@ async fn resolve_item_address(
 enum SecondaryAction {
     ContextMenu,
     SecondaryActivate,
+    DefaultActivate,
+    MenuRootActivate,
 }
 
 impl SecondaryAction {
@@ -478,6 +481,8 @@ impl SecondaryAction {
         match self {
             Self::ContextMenu => "context_menu",
             Self::SecondaryActivate => "secondary_activate",
+            Self::DefaultActivate => "default_activate",
+            Self::MenuRootActivate => "menu_root_activate",
         }
     }
 }
@@ -517,17 +522,19 @@ fn opposite_secondary_action(action: SecondaryAction) -> SecondaryAction {
     match action {
         SecondaryAction::ContextMenu => SecondaryAction::SecondaryActivate,
         SecondaryAction::SecondaryActivate => SecondaryAction::ContextMenu,
+        SecondaryAction::DefaultActivate => SecondaryAction::ContextMenu,
+        SecondaryAction::MenuRootActivate => SecondaryAction::ContextMenu,
     }
 }
 
-fn get_secondary_capabilities(client: &Client, id: &str) -> (bool, bool) {
+fn get_secondary_capabilities(client: &Client, id: &str) -> (bool, bool, Option<String>) {
     let items_arc = client.items();
     if let Ok(items) = items_arc.lock() {
         if let Some((item, _)) = items.get(id) {
-            return (item.item_is_menu, item.menu.is_some());
+            return (item.item_is_menu, item.menu.is_some(), item.menu.clone());
         }
     }
-    (false, false)
+    (false, false, None)
 }
 
 #[derive(Debug, Clone)]
@@ -629,17 +636,50 @@ async fn try_secondary_activate(client: &Client, id: &str, x: i32, y: i32) -> bo
         .is_ok()
 }
 
+async fn try_default_activate(client: &Client, id: &str, x: i32, y: i32) -> bool {
+    client
+        .activate(ActivateRequest::Default {
+            address: id.to_string(),
+            x,
+            y,
+        })
+        .await
+        .is_ok()
+}
+
+async fn try_menu_root_activate(client: &Client, id: &str, menu_path: Option<&str>) -> bool {
+    let Some(menu_path) = menu_path else {
+        return false;
+    };
+    let address = id.to_string();
+    let menu_path = menu_path.to_string();
+    let _ = client
+        .about_to_show_menuitem(address.clone(), menu_path.clone(), 0)
+        .await;
+    client
+        .activate(ActivateRequest::MenuItem {
+            address,
+            menu_path,
+            submenu_id: 0,
+        })
+        .await
+        .is_ok()
+}
+
 async fn run_secondary_action(
     action: SecondaryAction,
     client: &Client,
     connection: &mut Option<zbus::Connection>,
     id: &str,
+    menu_path: Option<&str>,
     x: i32,
     y: i32,
 ) -> bool {
     match action {
         SecondaryAction::ContextMenu => try_context_menu(connection, id, x, y).await,
         SecondaryAction::SecondaryActivate => try_secondary_activate(client, id, x, y).await,
+        SecondaryAction::DefaultActivate => try_default_activate(client, id, x, y).await,
+        SecondaryAction::MenuRootActivate => try_menu_root_activate(client, id, menu_path).await,
     }
 }
 
@@ -647,33 +687,104 @@ async fn activate_secondary_with_plan(
     client: &Client,
     connection: &mut Option<zbus::Connection>,
     id: &str,
+    menu_path: Option<&str>,
     x: i32,
     y: i32,
     plan: SecondaryPlan,
 ) -> ActivationResult {
-    let primary_ok = run_secondary_action(plan.primary, client, connection, id, x, y).await;
+    let primary_ok =
+        run_secondary_action(plan.primary, client, connection, id, menu_path, x, y).await;
 
     if primary_ok {
         return ActivationResult::PrimaryOk(plan.primary);
     }
 
     if let Some(fallback) = plan.fallback {
-        let fallback_ok = run_secondary_action(fallback, client, connection, id, x, y).await;
+        let fallback_ok =
+            run_secondary_action(fallback, client, connection, id, menu_path, x, y).await;
         if fallback_ok {
             ActivationResult::FallbackOk {
                 primary: plan.primary,
                 fallback,
             }
         } else {
-            ActivationResult::Failed {
-                primary: plan.primary,
-                fallback: Some(fallback),
+            let default_ok = run_secondary_action(
+                SecondaryAction::DefaultActivate,
+                client,
+                connection,
+                id,
+                menu_path,
+                x,
+                y,
+            )
+            .await;
+            if default_ok {
+                ActivationResult::FallbackOk {
+                    primary: plan.primary,
+                    fallback: SecondaryAction::DefaultActivate,
+                }
+            } else {
+                let menu_root_ok = run_secondary_action(
+                    SecondaryAction::MenuRootActivate,
+                    client,
+                    connection,
+                    id,
+                    menu_path,
+                    x,
+                    y,
+                )
+                .await;
+                if menu_root_ok {
+                    ActivationResult::FallbackOk {
+                        primary: plan.primary,
+                        fallback: SecondaryAction::MenuRootActivate,
+                    }
+                } else {
+                    ActivationResult::Failed {
+                        primary: plan.primary,
+                        fallback: Some(SecondaryAction::MenuRootActivate),
+                    }
+                }
             }
         }
     } else {
-        ActivationResult::Failed {
-            primary: plan.primary,
-            fallback: None,
+        let default_ok = run_secondary_action(
+            SecondaryAction::DefaultActivate,
+            client,
+            connection,
+            id,
+            menu_path,
+            x,
+            y,
+        )
+        .await;
+        if default_ok {
+            ActivationResult::FallbackOk {
+                primary: plan.primary,
+                fallback: SecondaryAction::DefaultActivate,
+            }
+        } else {
+            let menu_root_ok = run_secondary_action(
+                SecondaryAction::MenuRootActivate,
+                client,
+                connection,
+                id,
+                menu_path,
+                x,
+                y,
+            )
+            .await;
+            if menu_root_ok {
+                ActivationResult::FallbackOk {
+                    primary: plan.primary,
+                    fallback: SecondaryAction::MenuRootActivate,
+                }
+            } else {
+                ActivationResult::Failed {
+                    primary: plan.primary,
+                    fallback: Some(SecondaryAction::MenuRootActivate),
+                }
+            }
         }
     }
 }
@@ -901,7 +1012,7 @@ mod tests {
     #[tokio::test]
     async fn execute_secondary_plan_runs_single_fallback_and_reports_success() {
         let plan = choose_secondary_plan(true, false, None);
-        let mut stub = StubSecondaryExecutor::new(vec![false], vec![true]);
+        let mut stub = StubSecondaryExecutor::new(vec![false], vec![true], vec![true], vec![true]);
         let result = stub.execute(plan).await;
 
         assert_eq!(
@@ -920,11 +1031,53 @@ mod tests {
     #[tokio::test]
     async fn execute_secondary_plan_skips_fallback_when_primary_succeeds() {
         let plan = choose_secondary_plan(false, false, None);
-        let mut stub = StubSecondaryExecutor::new(vec![true], vec![true]);
+        let mut stub = StubSecondaryExecutor::new(vec![true], vec![true], vec![true], vec![true]);
         let result = stub.execute(plan).await;
 
         assert_eq!(stub.attempts, vec![SecondaryAction::SecondaryActivate]);
         assert_eq!(result.to_string(), "primary_ok:secondary_activate");
+    }
+
+    #[tokio::test]
+    async fn execute_secondary_plan_uses_default_activate_after_two_failures() {
+        let plan = choose_secondary_plan(true, false, None);
+        let mut stub = StubSecondaryExecutor::new(vec![false], vec![false], vec![true], vec![true]);
+        let result = stub.execute(plan).await;
+
+        assert_eq!(
+            stub.attempts,
+            vec![
+                SecondaryAction::ContextMenu,
+                SecondaryAction::SecondaryActivate,
+                SecondaryAction::DefaultActivate
+            ]
+        );
+        assert_eq!(
+            result.to_string(),
+            "fallback_ok:context_menu->default_activate"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_secondary_plan_uses_menu_root_when_default_fails() {
+        let plan = choose_secondary_plan(true, false, None);
+        let mut stub =
+            StubSecondaryExecutor::new(vec![false], vec![false], vec![false], vec![true]);
+        let result = stub.execute(plan).await;
+
+        assert_eq!(
+            stub.attempts,
+            vec![
+                SecondaryAction::ContextMenu,
+                SecondaryAction::SecondaryActivate,
+                SecondaryAction::DefaultActivate,
+                SecondaryAction::MenuRootActivate
+            ]
+        );
+        assert_eq!(
+            result.to_string(),
+            "fallback_ok:context_menu->menu_root_activate"
+        );
     }
 
     #[test]
@@ -964,14 +1117,23 @@ mod tests {
     struct StubSecondaryExecutor {
         context_results: std::collections::VecDeque<bool>,
         secondary_results: std::collections::VecDeque<bool>,
+        default_results: std::collections::VecDeque<bool>,
+        menu_root_results: std::collections::VecDeque<bool>,
         attempts: Vec<SecondaryAction>,
     }
 
     impl StubSecondaryExecutor {
-        fn new(context_results: Vec<bool>, secondary_results: Vec<bool>) -> Self {
+        fn new(
+            context_results: Vec<bool>,
+            secondary_results: Vec<bool>,
+            default_results: Vec<bool>,
+            menu_root_results: Vec<bool>,
+        ) -> Self {
             Self {
                 context_results: context_results.into(),
                 secondary_results: secondary_results.into(),
+                default_results: default_results.into(),
+                menu_root_results: menu_root_results.into(),
                 attempts: Vec::new(),
             }
         }
@@ -988,16 +1150,36 @@ mod tests {
                         primary: plan.primary,
                         fallback,
                     }
+                } else if self.run_action(SecondaryAction::DefaultActivate).await {
+                    ActivationResult::FallbackOk {
+                        primary: plan.primary,
+                        fallback: SecondaryAction::DefaultActivate,
+                    }
+                } else if self.run_action(SecondaryAction::MenuRootActivate).await {
+                    ActivationResult::FallbackOk {
+                        primary: plan.primary,
+                        fallback: SecondaryAction::MenuRootActivate,
+                    }
                 } else {
                     ActivationResult::Failed {
                         primary: plan.primary,
-                        fallback: Some(fallback),
+                        fallback: Some(SecondaryAction::MenuRootActivate),
                     }
+                }
+            } else if self.run_action(SecondaryAction::DefaultActivate).await {
+                ActivationResult::FallbackOk {
+                    primary: plan.primary,
+                    fallback: SecondaryAction::DefaultActivate,
+                }
+            } else if self.run_action(SecondaryAction::MenuRootActivate).await {
+                ActivationResult::FallbackOk {
+                    primary: plan.primary,
+                    fallback: SecondaryAction::MenuRootActivate,
                 }
             } else {
                 ActivationResult::Failed {
                     primary: plan.primary,
-                    fallback: None,
+                    fallback: Some(SecondaryAction::MenuRootActivate),
                 }
             }
         }
@@ -1008,6 +1190,12 @@ mod tests {
                 SecondaryAction::ContextMenu => self.context_results.pop_front().unwrap_or(false),
                 SecondaryAction::SecondaryActivate => {
                     self.secondary_results.pop_front().unwrap_or(false)
+                }
+                SecondaryAction::DefaultActivate => {
+                    self.default_results.pop_front().unwrap_or(false)
+                }
+                SecondaryAction::MenuRootActivate => {
+                    self.menu_root_results.pop_front().unwrap_or(false)
                 }
             }
         }
