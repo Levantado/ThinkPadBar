@@ -8,6 +8,14 @@ use system_tray::client::{Client, Event};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
+pub(crate) fn menu_prefetch_sequence(menu_item_id: i32) -> Vec<i32> {
+    if menu_item_id == 0 {
+        vec![0]
+    } else {
+        vec![0, menu_item_id]
+    }
+}
+
 pub fn subscription() -> iced::Subscription<TrayMessage> {
     struct TrayListener;
 
@@ -150,20 +158,28 @@ pub fn subscription() -> iced::Subscription<TrayMessage> {
                                     .await;
                                     let (_, _, menu_path) = get_secondary_capabilities(&client, &id);
                                     if let Some(menu_path) = menu_path {
-                                        let _ = client
-                                            .about_to_show_menuitem(
-                                                resolved_address.clone(),
-                                                menu_path.clone(),
-                                                0,
-                                            )
-                                            .await;
-                                        let _ = client
+                                        for prefetch_id in menu_prefetch_sequence(menu_item_id) {
+                                            let _ = client
+                                                .about_to_show_menuitem(
+                                                    resolved_address.clone(),
+                                                    menu_path.clone(),
+                                                    prefetch_id,
+                                                )
+                                                .await;
+                                        }
+                                        if let Err(err) = client
                                             .activate(system_tray::client::ActivateRequest::MenuItem {
                                                 address: resolved_address,
                                                 menu_path,
                                                 submenu_id: menu_item_id,
                                             })
-                                            .await;
+                                            .await
+                                        {
+                                            warn!(
+                                                "tray menu item activation failed for {} item={} err={}",
+                                                id, menu_item_id, err
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -176,4 +192,19 @@ pub fn subscription() -> iced::Subscription<TrayMessage> {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::menu_prefetch_sequence;
+
+    #[test]
+    fn menu_prefetch_sequence_includes_root_and_selected_item() {
+        assert_eq!(menu_prefetch_sequence(42), vec![0, 42]);
+    }
+
+    #[test]
+    fn menu_prefetch_sequence_root_only_for_root_selection() {
+        assert_eq!(menu_prefetch_sequence(0), vec![0]);
+    }
 }

@@ -2,7 +2,7 @@ use iced::widget::image::Handle;
 use std::collections::HashMap;
 use system_tray::client::{ActivateRequest, Client, Event, UpdateEvent};
 use system_tray::item::StatusNotifierItem;
-pub use system_tray::menu::{MenuItem, MenuType, TrayMenu};
+pub use system_tray::menu::TrayMenu;
 use tokio::time::{timeout, Duration};
 use tracing::debug;
 
@@ -15,6 +15,7 @@ pub struct TrayItem {
     pub item_is_menu: bool,
     pub menu_path: Option<String>,
     pub menu_layout: Option<TrayMenu>,
+    pub owned_menu: Option<crate::services::tray_menu::OwnedTrayMenu>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +85,7 @@ impl Tray {
                         item_is_menu: item.item_is_menu,
                         menu_path: item.menu.clone(),
                         menu_layout: None,
+                        owned_menu: None,
                     },
                 );
             }
@@ -110,6 +112,9 @@ impl Tray {
                             item.menu_path = Some(path);
                         }
                         UpdateEvent::Menu(layout) => {
+                            item.owned_menu = Some(
+                                crate::services::tray_menu::OwnedTrayMenu::from_layout(&layout),
+                            );
                             item.menu_layout = Some(layout);
                         }
                         _ => {}
@@ -159,15 +164,13 @@ impl Tray {
         }
     }
 
-    pub fn menu_for(&self, id: &str) -> Option<&TrayMenu> {
-        self.items
-            .get(id)
-            .and_then(|item| item.menu_layout.as_ref())
+    pub fn owned_menu_for(&self, id: &str) -> Option<&crate::services::tray_menu::OwnedTrayMenu> {
+        self.items.get(id).and_then(|item| item.owned_menu.as_ref())
     }
 
     pub fn has_menu_entries(&self, id: &str) -> bool {
-        self.menu_for(id)
-            .is_some_and(|menu| menu.submenus.iter().any(|item| item.visible))
+        self.owned_menu_for(id)
+            .is_some_and(crate::services::tray_menu::OwnedTrayMenu::has_visible_actions)
     }
 }
 
@@ -796,7 +799,7 @@ mod tests {
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {
                     id: 1,
-                    submenus: vec![crate::modules::tray::MenuItem {
+                    submenus: vec![system_tray::menu::MenuItem {
                         id: 42,
                         label: Some("Open".to_string()),
                         visible: true,
@@ -804,6 +807,18 @@ mod tests {
                         ..Default::default()
                     }],
                 }),
+                owned_menu: Some(crate::services::tray_menu::OwnedTrayMenu::from_layout(
+                    &TrayMenu {
+                        id: 1,
+                        submenus: vec![system_tray::menu::MenuItem {
+                            id: 42,
+                            label: Some("Open".to_string()),
+                            visible: true,
+                            enabled: true,
+                            ..Default::default()
+                        }],
+                    },
+                )),
             },
         );
         assert!(tray.has_menu_entries("item"));

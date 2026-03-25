@@ -43,11 +43,11 @@ pub struct ThinkPadBar {
     fan: crate::modules::fan::FanInfo,
     battery: crate::modules::battery::BatteryInfo,
     power_profile: String,
-    wifi: crate::modules::wifi::WifiInfo,
+    wifi: crate::services::network::WifiInfo,
     show_wifi_menu: bool,
     show_power_menu: bool,
     keyboard_layout: String,
-    available_networks: Vec<crate::modules::wifi::WifiNetwork>,
+    available_networks: Vec<crate::services::network::WifiNetwork>,
     wifi_password_input: String,
     wifi_selected_ssid: Option<String>,
     wifi_connecting_ssid: Option<String>,
@@ -70,6 +70,7 @@ pub struct ThinkPadBar {
     perf: PerfCounters,
     show_debug_overlay: bool,
     debug_ui_enabled: bool,
+    tray_menu_cursor: Option<(i32, i32)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -117,7 +118,7 @@ pub enum Message {
     SetPowerProfile(String),
     CyclePerformanceProfile,
     ToggleWifiMenu,
-    NetworksScanned(Vec<crate::modules::wifi::WifiNetwork>),
+    NetworksScanned(Vec<crate::services::network::WifiNetwork>),
     SelectWifiNetwork(String, String),
     WifiPasswordChanged(String),
     SubmitWifiPassword,
@@ -143,7 +144,7 @@ pub enum Message {
     FanUpdated(crate::modules::fan::FanInfo),
     BatteryUpdated(crate::modules::battery::BatteryInfo),
     PowerProfileUpdated(String),
-    WifiUpdated(crate::modules::wifi::WifiInfo),
+    WifiUpdated(crate::services::network::WifiInfo),
     BluetoothUpdated(bool),
     OpenOverskride,
     DBusConnected(zbus::Connection),
@@ -209,49 +210,43 @@ impl ThinkPadBar {
         }
     }
 
-    fn menu_item_label(item: &crate::modules::tray::MenuItem) -> String {
-        item.label
-            .as_ref()
-            .map(|v| v.replace('_', ""))
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| "(item)".to_string())
+    fn compute_tray_popup_margin(
+        bar_height: i32,
+        cursor: Option<(i32, i32)>,
+    ) -> (i32, i32, i32, i32) {
+        if let Some((cursor_x, cursor_y)) = cursor {
+            let top = (cursor_y + 8).max(bar_height + 4);
+            let left = (cursor_x + 8).max(8);
+            return (top, 0, 0, left);
+        }
+        (bar_height, 8, 0, 0)
     }
 
-    fn collect_tray_menu_items(
-        items: &[crate::modules::tray::MenuItem],
-        depth: usize,
-        out: &mut Vec<(Option<i32>, String, bool)>,
-    ) {
-        for item in items {
-            if !item.visible {
-                continue;
-            }
-            if item.menu_type == crate::modules::tray::MenuType::Separator {
-                out.push((None, String::new(), false));
-                continue;
-            }
-            let mut label = String::new();
-            for _ in 0..depth {
-                label.push_str("  ");
-            }
-            label.push_str(&Self::menu_item_label(item));
-            out.push((Some(item.id), label, item.enabled));
-            if !item.submenu.is_empty() {
-                Self::collect_tray_menu_items(&item.submenu, depth + 1, out);
-            }
-        }
+    fn tray_popup_margin(&self) -> (i32, i32, i32, i32) {
+        Self::compute_tray_popup_margin(
+            self.config.appearance.bar_height as i32,
+            self.tray_menu_cursor,
+        )
     }
 
     fn popup_hide_tasks(&self) -> Vec<Task<Message>> {
         use iced::platform_specific::shell::commands::layer_surface::{
-            set_exclusive_zone, set_keyboard_interactivity, set_layer, set_size,
-            KeyboardInteractivity, Layer,
+            set_anchor, set_exclusive_zone, set_keyboard_interactivity, set_layer, set_margin,
+            set_size, Anchor, KeyboardInteractivity, Layer,
         };
 
         let mut tasks = Vec::new();
         if let Some(pid) = self.popup_window_id {
             tasks.push(set_exclusive_zone(pid, 0));
             tasks.push(set_layer(pid, Layer::Background));
+            tasks.push(set_anchor(pid, Anchor::TOP | Anchor::RIGHT));
+            tasks.push(set_margin(
+                pid,
+                self.config.appearance.bar_height as i32,
+                8,
+                0,
+                0,
+            ));
             tasks.push(set_keyboard_interactivity(pid, KeyboardInteractivity::None));
             tasks.push(set_size(pid, Some(1), Some(1)));
         }
@@ -260,15 +255,29 @@ impl ThinkPadBar {
 
     fn popup_show_tasks(&self, popup: Popup) -> Vec<Task<Message>> {
         use iced::platform_specific::shell::commands::layer_surface::{
-            set_exclusive_zone, set_keyboard_interactivity, set_layer, set_size,
-            KeyboardInteractivity, Layer,
+            set_anchor, set_exclusive_zone, set_keyboard_interactivity, set_layer, set_margin,
+            set_size, Anchor, KeyboardInteractivity, Layer,
         };
 
         let mut tasks = Vec::new();
-        let (width, height) = self.popup_size_for(popup);
+        let (width, height) = self.popup_size_for(popup.clone());
         if let Some(pid) = self.popup_window_id {
             tasks.push(set_exclusive_zone(pid, 0));
             tasks.push(set_layer(pid, Layer::Top));
+            if matches!(popup, Popup::TrayMenu(_)) {
+                let (top, right, bottom, left) = self.tray_popup_margin();
+                tasks.push(set_anchor(pid, Anchor::TOP | Anchor::LEFT));
+                tasks.push(set_margin(pid, top, right, bottom, left));
+            } else {
+                tasks.push(set_anchor(pid, Anchor::TOP | Anchor::RIGHT));
+                tasks.push(set_margin(
+                    pid,
+                    self.config.appearance.bar_height as i32,
+                    8,
+                    0,
+                    0,
+                ));
+            }
             tasks.push(set_keyboard_interactivity(
                 pid,
                 KeyboardInteractivity::OnDemand,
@@ -480,7 +489,7 @@ impl ThinkPadBar {
                     fan: crate::modules::fan::get_fan_info(),
                     battery: crate::modules::battery::get_battery_info(),
                     power_profile: crate::modules::power::get_profile(),
-                    wifi: crate::modules::wifi::WifiInfo {
+                    wifi: crate::services::network::WifiInfo {
                         enabled: false,
                         ssid: "Loading...".to_string(),
                     },
@@ -510,6 +519,7 @@ impl ThinkPadBar {
                     perf: PerfCounters::default(),
                     show_debug_overlay: false,
                     debug_ui_enabled: Self::debug_ui_enabled(),
+                    tray_menu_cursor: None,
                 },
                 Task::batch(vec![main_task, popup_task]),
             )
@@ -591,7 +601,7 @@ impl ThinkPadBar {
                     let s_path = self.config.network.station_path.clone();
                     tasks.push(Task::perform(
                         async move {
-                            crate::modules::wifi::get_wifi_info(&conn, &a_path, &s_path).await
+                            crate::services::network::get_wifi_info(&conn, &a_path, &s_path).await
                         },
                         Message::WifiUpdated,
                     ));
@@ -622,6 +632,7 @@ impl ThinkPadBar {
                 if Self::should_close_popup_on_unfocus(self.popup_window_id, &self.popup, window_id)
                 {
                     self.popup = Popup::None;
+                    self.tray_menu_cursor = None;
                     self.show_wifi_menu = false;
                     self.show_power_menu = false;
                     self.wifi_selected_ssid = None;
@@ -690,6 +701,7 @@ impl ThinkPadBar {
 
                 if self.popup != Popup::None && active_window_changed {
                     self.popup = Popup::None;
+                    self.tray_menu_cursor = None;
                     self.show_wifi_menu = false;
                     self.show_power_menu = false;
                     self.wifi_selected_ssid = None;
@@ -728,6 +740,7 @@ impl ThinkPadBar {
 
                 if self.popup == target {
                     self.popup = Popup::None;
+                    self.tray_menu_cursor = None;
                     if target == Popup::Calendar {
                         self.calendar_offset = 0;
                     }
@@ -802,7 +815,7 @@ impl ThinkPadBar {
                         let conn = conn.clone();
                         let s_path = self.config.network.station_path.clone();
                         return Task::perform(
-                            async move { crate::modules::wifi::scan_networks(&conn, &s_path).await },
+                            async move { crate::services::network::scan_networks(&conn, &s_path).await },
                             Message::NetworksScanned,
                         );
                     }
@@ -829,8 +842,10 @@ impl ThinkPadBar {
                         let s_path = self.config.network.station_path.clone();
                         return Task::perform(
                             async move {
-                                crate::modules::wifi::connect_network(&conn, &s_path, ssid, None)
-                                    .await
+                                crate::services::network::connect_network(
+                                    &conn, &s_path, ssid, None,
+                                )
+                                .await
                             },
                             Message::WifiConnectResult,
                         );
@@ -858,8 +873,13 @@ impl ThinkPadBar {
                     let s_path = self.config.network.station_path.clone();
                     return Task::perform(
                         async move {
-                            crate::modules::wifi::connect_network(&conn, &s_path, ssid, Some(pass))
-                                .await
+                            crate::services::network::connect_network(
+                                &conn,
+                                &s_path,
+                                ssid,
+                                Some(pass),
+                            )
+                            .await
                         },
                         Message::WifiConnectResult,
                     );
@@ -894,7 +914,8 @@ impl ThinkPadBar {
                     self.wifi.enabled = enable;
                     return Task::perform(
                         async move {
-                            crate::modules::wifi::toggle_wifi(&conn, &a_path, &s_path, enable).await
+                            crate::services::network::toggle_wifi(&conn, &a_path, &s_path, enable)
+                                .await
                         },
                         |_| Message::TickSlow(chrono::Local::now()),
                     );
@@ -961,6 +982,7 @@ impl ThinkPadBar {
                 if let Popup::TrayMenu(open_id) = &self.popup {
                     if !self.tray.items.contains_key(open_id) {
                         self.popup = Popup::None;
+                        self.tray_menu_cursor = None;
                         return Task::batch(self.popup_hide_tasks());
                     }
                 }
@@ -984,8 +1006,10 @@ impl ThinkPadBar {
             }
             Message::TrayItemRightClicked(id) => {
                 if self.tray.has_menu_entries(&id) {
+                    self.tray_menu_cursor = crate::services::compositor::cursor_position();
                     if self.popup == Popup::TrayMenu(id.clone()) {
                         self.popup = Popup::None;
+                        self.tray_menu_cursor = None;
                         return Task::batch(self.popup_hide_tasks());
                     }
                     self.popup = Popup::TrayMenu(id);
@@ -1003,12 +1027,22 @@ impl ThinkPadBar {
                 return Task::perform(async {}, |_| Message::UpdateWorkspaces);
             }
             Message::TrayMenuItemSelected(id, menu_item_id) => {
+                if !self
+                    .tray
+                    .owned_menu_for(&id)
+                    .is_some_and(|menu| menu.contains_action_id(menu_item_id))
+                {
+                    self.popup = Popup::None;
+                    self.tray_menu_cursor = None;
+                    return Task::batch(self.popup_hide_tasks());
+                }
                 self.tray
                     .update(crate::modules::tray::TrayMessage::ActivateMenuItem(
                         id,
                         menu_item_id,
                     ));
                 self.popup = Popup::None;
+                self.tray_menu_cursor = None;
                 return Task::batch(self.popup_hide_tasks());
             }
             Message::AudioUpdated(info) => {
@@ -1531,10 +1565,6 @@ impl ThinkPadBar {
 
     fn view_popup(&self) -> Element<'_, Message, Theme, iced::Renderer> {
         if let Popup::TrayMenu(tray_id) = &self.popup {
-            let mut flat = Vec::new();
-            if let Some(menu) = self.tray.menu_for(tray_id) {
-                Self::collect_tray_menu_items(&menu.submenus, 0, &mut flat);
-            }
             let mut content = Column::new()
                 .spacing(6)
                 .push(
@@ -1544,17 +1574,31 @@ impl ThinkPadBar {
                             color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
                         }),
                 );
-            for (item_id, label, enabled) in flat {
-                if let Some(item_id) = item_id {
-                    let mut btn = button(text(label).size(13))
-                        .width(Length::Fill)
-                        .padding(Padding::from([4, 8]));
-                    if enabled {
-                        btn = btn.on_press(Message::TrayMenuItemSelected(tray_id.clone(), item_id));
+            if let Some(menu) = self.tray.owned_menu_for(tray_id) {
+                for node in menu.nodes() {
+                    match node {
+                        crate::services::tray_menu::OwnedTrayMenuNode::Separator => {
+                            content = content.push(iced::widget::horizontal_rule(1));
+                        }
+                        crate::services::tray_menu::OwnedTrayMenuNode::Action(action) => {
+                            let mut label = String::new();
+                            for _ in 0..action.depth {
+                                label.push_str("  ");
+                            }
+                            label.push_str(&action.label);
+
+                            let mut btn = button(text(label).size(13))
+                                .width(Length::Fill)
+                                .padding(Padding::from([4, 8]));
+                            if action.enabled {
+                                btn = btn.on_press(Message::TrayMenuItemSelected(
+                                    tray_id.clone(),
+                                    action.id,
+                                ));
+                            }
+                            content = content.push(btn);
+                        }
                     }
-                    content = content.push(btn);
-                } else {
-                    content = content.push(iced::widget::horizontal_rule(1));
                 }
             }
             return container(
@@ -2733,6 +2777,7 @@ mod tests {
             item_is_menu: false,
             menu_path: None,
             menu_layout: None,
+            owned_menu: None,
         };
         let c = ThinkPadBar::tray_search_candidates(&item, "org.kde.StatusNotifierItem-1234");
         assert!(c.iter().any(|v| v == "my app"));
@@ -2769,7 +2814,7 @@ mod tests {
                 time_remaining: None,
             },
             power_profile: String::new(),
-            wifi: crate::modules::wifi::WifiInfo {
+            wifi: crate::services::network::WifiInfo {
                 enabled: false,
                 ssid: String::new(),
             },
@@ -2799,6 +2844,7 @@ mod tests {
             perf: super::PerfCounters::default(),
             show_debug_overlay: false,
             debug_ui_enabled: false,
+            tray_menu_cursor: None,
         };
 
         assert!(bar.request_workspace_refresh());
@@ -2811,6 +2857,26 @@ mod tests {
         assert!(!bar.workspace_refresh_queued);
 
         assert!(!bar.complete_workspace_refresh());
+    }
+
+    #[test]
+    fn tray_popup_margin_defaults_to_top_right_anchor() {
+        assert_eq!(
+            ThinkPadBar::compute_tray_popup_margin(40, None),
+            (40, 8, 0, 0)
+        );
+    }
+
+    #[test]
+    fn tray_popup_margin_uses_cursor_with_bar_height_floor() {
+        assert_eq!(
+            ThinkPadBar::compute_tray_popup_margin(40, Some((1200, 20))),
+            (44, 0, 0, 1208)
+        );
+        assert_eq!(
+            ThinkPadBar::compute_tray_popup_margin(40, Some((10, 200))),
+            (208, 0, 0, 18)
+        );
     }
 
     #[test]

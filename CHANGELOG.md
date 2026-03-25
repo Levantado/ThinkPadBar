@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.61] - 2026-03-25
+
+### Changed
+- Continued `services/*` migration (plan p.2):
+  - added `src/services/network/mod.rs` with typed `NetworkBackend` abstraction and `IwdBackend` implementation,
+  - switched app Wi-Fi flows (`get info`, `scan`, `connect`, `toggle`) to `services::network` API.
+- Deepened tray owned menu model (plan p.3):
+  - added `src/services/tray_menu.rs` with typed `OwnedTrayMenu`/`OwnedTrayMenuNode`,
+  - tray state now stores and serves owned menu model per item for popup rendering and ID validation.
+- Implemented `TD-TRAY-002` runtime mitigations (plan p.1):
+  - tray popup now anchors near cursor for tray menu opens (`TOP|LEFT` + dynamic margin) instead of fixed far `TOP|RIGHT` position,
+  - menu item activation path now prefetches dbusmenu state with deterministic sequence (`about_to_show(0)` + selected id) before click dispatch.
+
+### Quality
+- Added regression tests for:
+  - tray popup margin/anchor computation,
+  - tray menu prefetch sequencing,
+  - owned tray menu flattening/depth mapping.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.60] - 2026-03-25
 
 ### Changed
