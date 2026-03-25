@@ -5,11 +5,20 @@ use std::time::Instant;
 
 pub use crate::modules::workspaces::WorkspaceInfo;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompositorBackendKind {
+    #[default]
+    Hyprland,
+    Niri,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositorSnapshot {
     pub workspaces: Vec<WorkspaceInfo>,
     pub active_window: String,
     pub special_workspace_visible: bool,
+    pub configured_backend: CompositorBackendKind,
+    pub active_backend: CompositorBackendKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,11 +115,26 @@ impl CompositorBackend for HyprlandBackend {
 pub struct CompositorService {
     backend: HyprlandBackend,
     refresh: WorkspaceRefreshCoalescer,
+    configured_backend: CompositorBackendKind,
+    active_backend: CompositorBackendKind,
 }
 
 impl CompositorService {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(config: &crate::config::CompositorConfig) -> Self {
+        let configured_backend = match config.backend.trim().to_ascii_lowercase().as_str() {
+            "niri" => CompositorBackendKind::Niri,
+            _ => CompositorBackendKind::Hyprland,
+        };
+        let active_backend = match configured_backend {
+            CompositorBackendKind::Hyprland => CompositorBackendKind::Hyprland,
+            CompositorBackendKind::Niri => CompositorBackendKind::Hyprland,
+        };
+        Self {
+            backend: HyprlandBackend,
+            refresh: WorkspaceRefreshCoalescer::default(),
+            configured_backend,
+            active_backend,
+        }
     }
 
     pub fn snapshot(&self) -> CompositorSnapshot {
@@ -118,6 +142,8 @@ impl CompositorService {
             workspaces: self.backend.get_workspaces(),
             active_window: self.backend.get_active_window_title(),
             special_workspace_visible: self.backend.is_special_workspace_visible(),
+            configured_backend: self.configured_backend,
+            active_backend: self.active_backend,
         }
     }
 
@@ -155,16 +181,17 @@ impl CompositorService {
 }
 
 pub fn cursor_position() -> Option<(i32, i32)> {
-    CompositorService::new().cursor_position()
+    CompositorService::new(&crate::config::CompositorConfig::default()).cursor_position()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CompositorService, WorkspaceRefreshCoalescer};
+    use super::{CompositorBackendKind, CompositorService, WorkspaceRefreshCoalescer};
 
     #[test]
     fn cursor_position_absent_without_runtime_env() {
-        let _ = CompositorService::new().cursor_position();
+        let _ =
+            CompositorService::new(&crate::config::CompositorConfig::default()).cursor_position();
     }
 
     #[test]
@@ -183,7 +210,19 @@ mod tests {
 
     #[test]
     fn service_snapshot_call_is_available() {
-        let service = CompositorService::new();
-        let _ = service.snapshot();
+        let service = CompositorService::new(&crate::config::CompositorConfig::default());
+        let snapshot = service.snapshot();
+        assert_eq!(snapshot.configured_backend, CompositorBackendKind::Hyprland);
+        assert_eq!(snapshot.active_backend, CompositorBackendKind::Hyprland);
+    }
+
+    #[test]
+    fn niri_config_falls_back_to_hyprland_backend() {
+        let service = CompositorService::new(&crate::config::CompositorConfig {
+            backend: "niri".to_string(),
+        });
+        let snapshot = service.snapshot();
+        assert_eq!(snapshot.configured_backend, CompositorBackendKind::Niri);
+        assert_eq!(snapshot.active_backend, CompositorBackendKind::Hyprland);
     }
 }

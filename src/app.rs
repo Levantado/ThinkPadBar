@@ -32,9 +32,7 @@ pub enum PowerAction {
 pub struct ThinkPadBar {
     config: crate::config::Config,
     dbus_conn: Option<zbus::Connection>,
-    workspaces: Vec<crate::services::compositor::WorkspaceInfo>,
-    special_workspace_visible: bool,
-    active_window: String,
+    compositor: crate::services::compositor::CompositorSnapshot,
     clock: String,
     brightness: String,
     audio: crate::modules::audio::AudioInfo,
@@ -42,15 +40,9 @@ pub struct ThinkPadBar {
     fan: crate::modules::fan::FanInfo,
     battery: crate::modules::battery::BatteryInfo,
     power_profile: String,
-    wifi: crate::services::network::WifiInfo,
-    show_wifi_menu: bool,
+    wifi_flow: crate::services::wifi_flow::WifiFlowService,
     show_power_menu: bool,
     keyboard_layout: String,
-    available_networks: Vec<crate::services::network::WifiNetwork>,
-    wifi_password_input: String,
-    wifi_selected_ssid: Option<String>,
-    wifi_connecting_ssid: Option<String>,
-    wifi_status_message: String,
     bluetooth: bool,
     popup: Popup,
     volume_level: u32,
@@ -66,6 +58,7 @@ pub struct ThinkPadBar {
     tray: crate::modules::tray::Tray,
     compositor_service: crate::services::compositor::CompositorService,
     network_service: crate::services::network::NetworkService,
+    popup_anchor_service: crate::services::popup_anchor::PopupAnchorService,
     perf: PerfCounters,
     show_debug_overlay: bool,
     debug_ui_enabled: bool,
@@ -101,13 +94,7 @@ pub enum Message {
     TickSlow(chrono::DateTime<chrono::Local>),
     RefreshAudioMic,
     UpdateWorkspaces,
-    WorkspacesUpdated(
-        Vec<crate::services::compositor::WorkspaceInfo>,
-        String,
-        String,
-        bool,
-        u64,
-    ),
+    WorkspacesUpdated(crate::services::compositor::RefreshResult, String),
     SwitchWorkspace(i32, String),
     TogglePopup(Popup),
     SetVolume(u32),
@@ -199,55 +186,40 @@ impl ThinkPadBar {
         out
     }
 
-    fn popup_size_for(&self, popup: Popup) -> (u32, u32) {
+    fn popup_surface_kind(popup: &Popup) -> crate::services::popup_anchor::PopupSurfaceKind {
         match popup {
-            Popup::None => (1, 1),
-            Popup::Calendar => (400, 420),
-            Popup::SystemMonitor => (400, 520),
-            Popup::ControlCenter => (420, 760),
-            Popup::TrayMenu(_) => (320, 420),
+            Popup::None => crate::services::popup_anchor::PopupSurfaceKind::Hidden,
+            Popup::ControlCenter => crate::services::popup_anchor::PopupSurfaceKind::ControlCenter,
+            Popup::SystemMonitor => crate::services::popup_anchor::PopupSurfaceKind::SystemMonitor,
+            Popup::Calendar => crate::services::popup_anchor::PopupSurfaceKind::Calendar,
+            Popup::TrayMenu(_) => crate::services::popup_anchor::PopupSurfaceKind::TrayMenu,
         }
-    }
-
-    fn compute_tray_popup_margin(
-        bar_height: i32,
-        cursor: Option<(i32, i32)>,
-    ) -> (i32, i32, i32, i32) {
-        if let Some((cursor_x, cursor_y)) = cursor {
-            let top = (cursor_y + 8).max(bar_height + 4);
-            let left = (cursor_x + 8).max(8);
-            return (top, 0, 0, left);
-        }
-        (bar_height, 8, 0, 0)
-    }
-
-    fn tray_popup_margin(&self) -> (i32, i32, i32, i32) {
-        Self::compute_tray_popup_margin(
-            self.config.appearance.bar_height as i32,
-            self.tray_menu_cursor,
-        )
     }
 
     fn popup_hide_tasks(&self) -> Vec<Task<Message>> {
         use iced::platform_specific::shell::commands::layer_surface::{
             set_anchor, set_exclusive_zone, set_keyboard_interactivity, set_layer, set_margin,
-            set_size, Anchor, KeyboardInteractivity, Layer,
+            set_size, KeyboardInteractivity, Layer,
         };
 
         let mut tasks = Vec::new();
+        let plan = self.popup_anchor_service.plan(
+            crate::services::popup_anchor::PopupSurfaceKind::Hidden,
+            None,
+        );
         if let Some(pid) = self.popup_window_id {
             tasks.push(set_exclusive_zone(pid, 0));
             tasks.push(set_layer(pid, Layer::Background));
-            tasks.push(set_anchor(pid, Anchor::TOP | Anchor::RIGHT));
+            tasks.push(set_anchor(pid, plan.anchor));
             tasks.push(set_margin(
                 pid,
-                self.config.appearance.bar_height as i32,
-                8,
-                0,
-                0,
+                plan.margin.0,
+                plan.margin.1,
+                plan.margin.2,
+                plan.margin.3,
             ));
             tasks.push(set_keyboard_interactivity(pid, KeyboardInteractivity::None));
-            tasks.push(set_size(pid, Some(1), Some(1)));
+            tasks.push(set_size(pid, Some(plan.width), Some(plan.height)));
         }
         tasks
     }
@@ -255,33 +227,29 @@ impl ThinkPadBar {
     fn popup_show_tasks(&self, popup: Popup) -> Vec<Task<Message>> {
         use iced::platform_specific::shell::commands::layer_surface::{
             set_anchor, set_exclusive_zone, set_keyboard_interactivity, set_layer, set_margin,
-            set_size, Anchor, KeyboardInteractivity, Layer,
+            set_size, KeyboardInteractivity, Layer,
         };
 
         let mut tasks = Vec::new();
-        let (width, height) = self.popup_size_for(popup.clone());
+        let plan = self
+            .popup_anchor_service
+            .plan(Self::popup_surface_kind(&popup), self.tray_menu_cursor);
         if let Some(pid) = self.popup_window_id {
             tasks.push(set_exclusive_zone(pid, 0));
             tasks.push(set_layer(pid, Layer::Top));
-            if matches!(popup, Popup::TrayMenu(_)) {
-                let (top, right, bottom, left) = self.tray_popup_margin();
-                tasks.push(set_anchor(pid, Anchor::TOP | Anchor::LEFT));
-                tasks.push(set_margin(pid, top, right, bottom, left));
-            } else {
-                tasks.push(set_anchor(pid, Anchor::TOP | Anchor::RIGHT));
-                tasks.push(set_margin(
-                    pid,
-                    self.config.appearance.bar_height as i32,
-                    8,
-                    0,
-                    0,
-                ));
-            }
+            tasks.push(set_anchor(pid, plan.anchor));
+            tasks.push(set_margin(
+                pid,
+                plan.margin.0,
+                plan.margin.1,
+                plan.margin.2,
+                plan.margin.3,
+            ));
             tasks.push(set_keyboard_interactivity(
                 pid,
                 KeyboardInteractivity::OnDemand,
             ));
-            tasks.push(set_size(pid, Some(width), Some(height)));
+            tasks.push(set_size(pid, Some(plan.width), Some(plan.height)));
         }
         tasks
     }
@@ -445,9 +413,13 @@ impl ThinkPadBar {
 
             let mut monitor = crate::modules::system::SysMonitor::new();
             let initial_sys_data = monitor.update(false);
-            let compositor_service = crate::services::compositor::CompositorService::new();
+            let compositor_service =
+                crate::services::compositor::CompositorService::new(&cfg.compositor);
             let compositor_snapshot = compositor_service.snapshot();
             let network_service = crate::services::network::NetworkService::new(&cfg.network);
+            let wifi_flow = crate::services::wifi_flow::WifiFlowService::new();
+            let popup_anchor_service =
+                crate::services::popup_anchor::PopupAnchorService::new(cfg.appearance.bar_height);
 
             // Try to connect to D-Bus synchronously for initialization if possible,
             // or just let it be None and connect later.
@@ -458,29 +430,18 @@ impl ThinkPadBar {
                 Self {
                     config: cfg,
                     dbus_conn: None, // Will be initialized on first tick or via Task
+                    compositor: compositor_snapshot,
                     clock: Local::now().format("%a %d %b %H:%M").to_string(),
-                    workspaces: compositor_snapshot.workspaces,
-                    special_workspace_visible: compositor_snapshot.special_workspace_visible,
-                    active_window: compositor_snapshot.active_window,
                     brightness: crate::modules::brightness::get_brightness(),
                     audio: crate::modules::audio::get_info(),
                     mic: crate::modules::mic::get_info(),
                     fan: crate::modules::fan::get_fan_info(),
                     battery: crate::modules::battery::get_battery_info(),
                     power_profile: crate::modules::power::get_profile(),
-                    wifi: crate::services::network::WifiInfo {
-                        enabled: false,
-                        ssid: "Loading...".to_string(),
-                    },
+                    wifi_flow,
                     bluetooth: crate::modules::bluetooth::get_bluetooth_info(),
-                    show_wifi_menu: false,
                     show_power_menu: false,
                     keyboard_layout: crate::modules::keyboard::get_layout(),
-                    available_networks: Vec::new(),
-                    wifi_password_input: String::new(),
-                    wifi_selected_ssid: None,
-                    wifi_connecting_ssid: None,
-                    wifi_status_message: String::new(),
                     popup: Popup::None,
                     volume_level: 0,
                     mic_volume_level: 0,
@@ -495,6 +456,7 @@ impl ThinkPadBar {
                     tray: crate::modules::tray::Tray::new(),
                     compositor_service,
                     network_service,
+                    popup_anchor_service,
                     perf: PerfCounters::default(),
                     show_debug_overlay: false,
                     debug_ui_enabled: Self::debug_ui_enabled(),
@@ -609,9 +571,8 @@ impl ThinkPadBar {
                 {
                     self.popup = Popup::None;
                     self.tray_menu_cursor = None;
-                    self.show_wifi_menu = false;
                     self.show_power_menu = false;
-                    self.wifi_selected_ssid = None;
+                    self.wifi_flow.close_transient_ui();
                     self.calendar_offset = 0;
                     return Task::batch(self.popup_hide_tasks());
                 }
@@ -640,38 +601,22 @@ impl ThinkPadBar {
                     async move {
                         let refreshed = compositor_service.refresh().await;
                         let layout = crate::modules::keyboard::get_layout();
-                        (
-                            refreshed.snapshot.workspaces,
-                            refreshed.snapshot.active_window,
-                            layout,
-                            refreshed.snapshot.special_workspace_visible,
-                            refreshed.elapsed_ms,
-                        )
+                        (refreshed, layout)
                     },
-                    |(ws, title, layout, special_visible, elapsed_ms)| {
-                        Message::WorkspacesUpdated(ws, title, layout, special_visible, elapsed_ms)
-                    },
+                    |(refreshed, layout)| Message::WorkspacesUpdated(refreshed, layout),
                 );
             }
-            Message::WorkspacesUpdated(workspaces, title, layout, special_visible, elapsed_ms) => {
+            Message::WorkspacesUpdated(refreshed, layout) => {
                 self.perf.workspace_refresh_completed =
                     self.perf.workspace_refresh_completed.saturating_add(1);
-                self.perf.workspace_refresh_last_ms = elapsed_ms;
+                self.perf.workspace_refresh_last_ms = refreshed.elapsed_ms;
                 self.perf.workspace_refresh_total_ms = self
                     .perf
                     .workspace_refresh_total_ms
-                    .saturating_add(elapsed_ms as u128);
-                let active_window_changed = self.active_window != title;
-
-                if self.workspaces != workspaces {
-                    self.workspaces = workspaces;
-                }
-                if self.special_workspace_visible != special_visible {
-                    self.special_workspace_visible = special_visible;
-                }
-                if active_window_changed {
-                    self.active_window = title;
-                }
+                    .saturating_add(refreshed.elapsed_ms as u128);
+                let active_window_changed =
+                    self.compositor.active_window != refreshed.snapshot.active_window;
+                self.compositor = refreshed.snapshot;
                 if self.keyboard_layout != layout {
                     self.keyboard_layout = layout;
                 }
@@ -679,9 +624,8 @@ impl ThinkPadBar {
                 if self.popup != Popup::None && active_window_changed {
                     self.popup = Popup::None;
                     self.tray_menu_cursor = None;
-                    self.show_wifi_menu = false;
                     self.show_power_menu = false;
-                    self.wifi_selected_ssid = None;
+                    self.wifi_flow.close_transient_ui();
                     self.calendar_offset = 0;
                     let mut tasks = self.popup_hide_tasks();
                     if self.compositor_service.complete_refresh() {
@@ -719,6 +663,7 @@ impl ThinkPadBar {
                 if self.popup == target {
                     self.popup = Popup::None;
                     self.tray_menu_cursor = None;
+                    self.wifi_flow.close_transient_ui();
                     if target == Popup::Calendar {
                         self.calendar_offset = 0;
                     }
@@ -784,12 +729,9 @@ impl ThinkPadBar {
             Message::CyclePerformanceProfile => {
                 self.config.performance.cycle_profile_runtime();
             }
-            Message::ToggleWifiMenu => {
-                self.show_wifi_menu = !self.show_wifi_menu;
-                if self.show_wifi_menu {
+            Message::ToggleWifiMenu => match self.wifi_flow.toggle_menu(self.dbus_conn.is_some()) {
+                crate::services::wifi_flow::WifiFlowCommand::Scan => {
                     if let Some(conn) = &self.dbus_conn {
-                        self.wifi_status_message = "Сканирование сетей...".to_string();
-                        self.available_networks.clear();
                         let conn = conn.clone();
                         let network_service = self.network_service.clone();
                         return Task::perform(
@@ -797,95 +739,87 @@ impl ThinkPadBar {
                             Message::NetworksScanned,
                         );
                     }
-                    self.wifi_status_message =
-                        "D-Bus недоступен: не удалось открыть system bus".to_string();
                 }
-            }
+                crate::services::wifi_flow::WifiFlowCommand::None
+                | crate::services::wifi_flow::WifiFlowCommand::Connect { .. }
+                | crate::services::wifi_flow::WifiFlowCommand::TogglePower(_) => {}
+            },
             Message::NetworksScanned(networks) => {
-                self.available_networks = networks;
-                if self.available_networks.is_empty() {
-                    self.wifi_status_message =
-                        "Сети не найдены или сканирование недоступно".to_string();
-                } else {
-                    self.wifi_status_message =
-                        format!("Найдено сетей: {}", self.available_networks.len());
-                }
+                self.wifi_flow.apply_scan_results(networks);
             }
             Message::SelectWifiNetwork(ssid, sec) => {
-                if sec == "open" {
-                    if let Some(conn) = &self.dbus_conn {
-                        self.wifi_connecting_ssid = Some(ssid.clone());
-                        self.wifi_status_message = format!("Подключение к {}...", ssid);
-                        let conn = conn.clone();
-                        let network_service = self.network_service.clone();
-                        return Task::perform(
-                            async move { network_service.connect_network(&conn, ssid, None).await },
-                            Message::WifiConnectResult,
-                        );
+                match self
+                    .wifi_flow
+                    .select_network(ssid, sec, self.dbus_conn.is_some())
+                {
+                    crate::services::wifi_flow::WifiFlowCommand::Connect { ssid, passphrase } => {
+                        if let Some(conn) = &self.dbus_conn {
+                            let conn = conn.clone();
+                            let network_service = self.network_service.clone();
+                            return Task::perform(
+                                async move {
+                                    network_service
+                                        .connect_network(&conn, ssid, passphrase)
+                                        .await
+                                },
+                                Message::WifiConnectResult,
+                            );
+                        }
                     }
-                    self.wifi_status_message =
-                        "D-Bus недоступен: подключение невозможно".to_string();
-                } else {
-                    self.wifi_selected_ssid = Some(ssid);
-                    self.wifi_password_input = String::new();
-                    self.wifi_status_message = "Введите пароль и нажмите Connect".to_string();
+                    crate::services::wifi_flow::WifiFlowCommand::None
+                    | crate::services::wifi_flow::WifiFlowCommand::Scan
+                    | crate::services::wifi_flow::WifiFlowCommand::TogglePower(_) => {}
                 }
             }
             Message::WifiPasswordChanged(val) => {
-                self.wifi_password_input = val;
+                self.wifi_flow.update_password(val);
             }
             Message::SubmitWifiPassword => {
-                if let (Some(ssid), Some(conn)) = (self.wifi_selected_ssid.clone(), &self.dbus_conn)
-                {
-                    self.wifi_connecting_ssid = Some(ssid.clone());
-                    self.wifi_status_message = format!("Подключение к {}...", ssid);
-                    let conn = conn.clone();
-                    let pass = self.wifi_password_input.clone();
-                    self.wifi_selected_ssid = None;
-                    self.show_wifi_menu = false;
-                    let network_service = self.network_service.clone();
-                    return Task::perform(
-                        async move {
-                            network_service
-                                .connect_network(&conn, ssid, Some(pass))
-                                .await
-                        },
-                        Message::WifiConnectResult,
-                    );
+                match self.wifi_flow.submit_password(self.dbus_conn.is_some()) {
+                    crate::services::wifi_flow::WifiFlowCommand::Connect { ssid, passphrase } => {
+                        if let Some(conn) = &self.dbus_conn {
+                            let conn = conn.clone();
+                            let network_service = self.network_service.clone();
+                            return Task::perform(
+                                async move {
+                                    network_service
+                                        .connect_network(&conn, ssid, passphrase)
+                                        .await
+                                },
+                                Message::WifiConnectResult,
+                            );
+                        }
+                    }
+                    crate::services::wifi_flow::WifiFlowCommand::None
+                    | crate::services::wifi_flow::WifiFlowCommand::Scan
+                    | crate::services::wifi_flow::WifiFlowCommand::TogglePower(_) => {}
                 }
-                self.wifi_status_message = "D-Bus недоступен: подключение невозможно".to_string();
             }
             Message::CancelWifiPassword => {
-                self.wifi_selected_ssid = None;
-                self.wifi_status_message = "Подключение отменено".to_string();
+                self.wifi_flow.cancel_password();
             }
             Message::WifiConnectResult(success) => {
-                let ssid = self
-                    .wifi_connecting_ssid
-                    .take()
-                    .unwrap_or_else(|| "выбранной сети".to_string());
-                if success {
-                    self.wifi_status_message = format!("Подключено: {}", ssid);
-                } else {
-                    self.wifi_status_message = format!("Не удалось подключиться к {}", ssid);
-                }
+                self.wifi_flow.apply_connect_result(success);
             }
             Message::ToggleWifi(enable) => {
-                if let Some(conn) = &self.dbus_conn {
-                    let conn = conn.clone();
-                    let network_service = self.network_service.clone();
-                    self.wifi_status_message = if enable {
-                        "Включение Wi-Fi...".to_string()
-                    } else {
-                        "Отключение Wi-Fi...".to_string()
-                    };
-                    self.wifi.enabled = enable;
-                    return Task::perform(
-                        async move { network_service.toggle_wifi(&conn, enable).await },
-                        |_| Message::TickSlow(chrono::Local::now()),
-                    );
+                match self
+                    .wifi_flow
+                    .toggle_power(enable, self.dbus_conn.is_some())
+                {
+                    crate::services::wifi_flow::WifiFlowCommand::TogglePower(enable) => {
+                        if let Some(conn) = &self.dbus_conn {
+                            let conn = conn.clone();
+                            let network_service = self.network_service.clone();
+                            return Task::perform(
+                                async move { network_service.toggle_wifi(&conn, enable).await },
+                                |_| Message::TickSlow(chrono::Local::now()),
+                            );
+                        }
+                    }
+                    crate::services::wifi_flow::WifiFlowCommand::None
+                    | crate::services::wifi_flow::WifiFlowCommand::Scan
+                    | crate::services::wifi_flow::WifiFlowCommand::Connect { .. } => {}
                 }
-                self.wifi_status_message = "D-Bus недоступен: переключение невозможно".to_string();
             }
             Message::ToggleBluetooth(enable) => {
                 return Task::perform(
@@ -1046,17 +980,7 @@ impl ThinkPadBar {
                 self.power_profile = prof;
             }
             Message::WifiUpdated(info) => {
-                self.wifi = info;
-                if self.wifi.enabled {
-                    let ssid = self.wifi.ssid.trim();
-                    if ssid.is_empty() || ssid == "Disconnected" || ssid == "Loading..." {
-                        self.wifi_status_message = "Wi-Fi включен, сеть не определена".to_string();
-                    } else {
-                        self.wifi_status_message = format!("Wi-Fi: {}", ssid);
-                    }
-                } else {
-                    self.wifi_status_message = "Wi-Fi выключен".to_string();
-                }
+                self.wifi_flow.sync_wifi_info(info);
             }
             Message::BluetoothUpdated(val) => {
                 self.bluetooth = val;
@@ -1082,7 +1006,7 @@ impl ThinkPadBar {
     fn view_main_bar(&self) -> Element<'_, Message, Theme, iced::Renderer> {
         // Build Workspaces widget
         let mut ws_row = Row::new().spacing(6).align_y(Alignment::Center);
-        for ws in &self.workspaces {
+        for ws in &self.compositor.workspaces {
             let ws_id = ws.id;
             let ws_name = ws.name.clone();
             let is_active = ws.active;
@@ -1208,8 +1132,8 @@ impl ThinkPadBar {
             .push(container(ws_row).width(Length::Fixed(280.0)));
 
         // Center: Active Window Title
-        let center_title = Self::trunc_with_ellipsis(self.active_window.as_str(), 34);
-        let center_bg = if self.special_workspace_visible {
+        let center_title = Self::trunc_with_ellipsis(self.compositor.active_window.as_str(), 34);
+        let center_bg = if self.compositor.special_workspace_visible {
             Color::from_rgb8(0x64, 0x2f, 0x37)
         } else {
             Color::from_rgb8(0x29, 0x2e, 0x42)
@@ -1299,7 +1223,11 @@ impl ThinkPadBar {
         } else {
             ""
         };
-        let wifi_icon = if self.wifi.enabled { "󰖩" } else { "󰖪" };
+        let wifi_icon = if self.wifi_flow.snapshot().wifi.enabled {
+            "󰖩"
+        } else {
+            "󰖪"
+        };
         let bt_icon = if self.bluetooth { "󰂯" } else { "󰂲" };
 
         let bat_cap = self.battery.capacity;
@@ -1862,6 +1790,17 @@ impl ThinkPadBar {
                             crate::modules::runtime::canonical_commands().len(),
                             crate::modules::runtime::noop_runtime_descriptor_name()
                         ),
+                    ))
+                    .push(item(
+                        "🧭",
+                        "Service Backends",
+                        format!(
+                            "cmp {:?}->{:?} net {:?}->{:?}",
+                            self.compositor.configured_backend,
+                            self.compositor.active_backend,
+                            self.network_service.configured_backend(),
+                            self.network_service.active_backend()
+                        ),
                     ));
             }
 
@@ -2232,8 +2171,9 @@ impl ThinkPadBar {
             prof_row = prof_row.push(btn);
         }
 
-        let wifi_is_active = self.wifi.enabled;
-        let ssid = self.wifi.ssid.trim();
+        let wifi_snapshot = self.wifi_flow.snapshot();
+        let wifi_is_active = wifi_snapshot.wifi.enabled;
+        let ssid = wifi_snapshot.wifi.ssid.trim();
         let has_real_ssid =
             !ssid.is_empty() && ssid != "Disconnected" && ssid != "Loading..." && ssid != "Unknown";
         let wifi_label = if wifi_is_active {
@@ -2511,15 +2451,15 @@ impl ThinkPadBar {
             .push(Row::new().spacing(16).push(wifi_btn).push(bt_btn))
             .push(Row::new().spacing(16).push(bt_app_btn));
 
-        if self.show_wifi_menu {
+        if wifi_snapshot.menu_open {
             let mut inner_col = Column::new().spacing(8);
-            if !self.wifi_status_message.is_empty() {
+            if !wifi_snapshot.status_message.is_empty() {
                 inner_col =
-                    inner_col.push(text(self.wifi_status_message.as_str()).size(12).style(|_| {
-                        iced::widget::text::Style {
+                    inner_col.push(text(wifi_snapshot.status_message.as_str()).size(12).style(
+                        |_| iced::widget::text::Style {
                             color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
-                        }
-                    }));
+                        },
+                    ));
             }
             let toggle_power_btn = button(
                 text(if wifi_is_active {
@@ -2543,8 +2483,8 @@ impl ThinkPadBar {
             });
             inner_col = inner_col.push(toggle_power_btn);
 
-            if let Some(ref ssid) = self.wifi_selected_ssid {
-                let input = text_input("Enter password...", &self.wifi_password_input)
+            if let Some(ref ssid) = wifi_snapshot.selected_ssid {
+                let input = text_input("Enter password...", &wifi_snapshot.password_input)
                     .on_input(Message::WifiPasswordChanged)
                     .on_submit(Message::SubmitWifiPassword)
                     .secure(true)
@@ -2567,7 +2507,7 @@ impl ThinkPadBar {
                     .push(actions);
             } else {
                 let mut net_list = Column::new().spacing(4);
-                for net in &self.available_networks {
+                for net in &wifi_snapshot.available_networks {
                     net_list = net_list.push(
                         button(text(net.ssid.clone()))
                             .width(Length::Fill)
@@ -2757,9 +2697,13 @@ mod tests {
         let mut bar = ThinkPadBar {
             config: crate::config::Config::default(),
             dbus_conn: None,
-            workspaces: Vec::new(),
-            special_workspace_visible: false,
-            active_window: String::new(),
+            compositor: crate::services::compositor::CompositorSnapshot {
+                workspaces: Vec::new(),
+                active_window: String::new(),
+                special_workspace_visible: false,
+                configured_backend: crate::services::compositor::CompositorBackendKind::Hyprland,
+                active_backend: crate::services::compositor::CompositorBackendKind::Hyprland,
+            },
             clock: String::new(),
             brightness: String::new(),
             audio: crate::modules::audio::AudioInfo {
@@ -2780,18 +2724,9 @@ mod tests {
                 time_remaining: None,
             },
             power_profile: String::new(),
-            wifi: crate::services::network::WifiInfo {
-                enabled: false,
-                ssid: String::new(),
-            },
-            show_wifi_menu: false,
+            wifi_flow: crate::services::wifi_flow::WifiFlowService::new(),
             show_power_menu: false,
             keyboard_layout: String::new(),
-            available_networks: Vec::new(),
-            wifi_password_input: String::new(),
-            wifi_selected_ssid: None,
-            wifi_connecting_ssid: None,
-            wifi_status_message: String::new(),
             bluetooth: false,
             popup: Popup::None,
             volume_level: 0,
@@ -2805,10 +2740,13 @@ mod tests {
             sys_data: crate::modules::system::SysData::default(),
             calendar_offset: 0,
             tray: crate::modules::tray::Tray::new(),
-            compositor_service: crate::services::compositor::CompositorService::new(),
+            compositor_service: crate::services::compositor::CompositorService::new(
+                &crate::config::CompositorConfig::default(),
+            ),
             network_service: crate::services::network::NetworkService::new(
                 &crate::config::NetworkConfig::default(),
             ),
+            popup_anchor_service: crate::services::popup_anchor::PopupAnchorService::new(24),
             perf: super::PerfCounters::default(),
             show_debug_overlay: false,
             debug_ui_enabled: false,
@@ -2819,26 +2757,6 @@ mod tests {
         assert!(!bar.compositor_service.request_refresh());
         assert!(bar.compositor_service.complete_refresh());
         assert!(!bar.compositor_service.complete_refresh());
-    }
-
-    #[test]
-    fn tray_popup_margin_defaults_to_top_right_anchor() {
-        assert_eq!(
-            ThinkPadBar::compute_tray_popup_margin(40, None),
-            (40, 8, 0, 0)
-        );
-    }
-
-    #[test]
-    fn tray_popup_margin_uses_cursor_with_bar_height_floor() {
-        assert_eq!(
-            ThinkPadBar::compute_tray_popup_margin(40, Some((1200, 20))),
-            (44, 0, 0, 1208)
-        );
-        assert_eq!(
-            ThinkPadBar::compute_tray_popup_margin(40, Some((10, 200))),
-            (208, 0, 0, 18)
-        );
     }
 
     #[test]

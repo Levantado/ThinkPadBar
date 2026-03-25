@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.64] - 2026-03-25
+
+### Changed
+- Implemented plan items 1-3 around service ownership and app decoupling:
+  - added `WifiFlowService` to own Wi-Fi transient UI flow state, scan/connect/toggle intents, and typed `WifiFlowSnapshot`/`WifiFlowCommand` transitions;
+  - added `PopupAnchorService` to own popup surface sizing and anchor policy instead of keeping layout heuristics in `app.rs`;
+  - moved `app.rs` to typed service-driven state for compositor refresh results and Wi-Fi flow snapshots instead of ad-hoc local orchestration fields.
+- Extended service configuration with backend skeletons:
+  - `compositor.backend = "hyprland" | "niri"`
+  - `network.backend = "iwd" | "networkmanager"`
+- Added graceful backend fallback semantics for not-yet-implemented backends:
+  - `niri` currently reports configured `Niri` but runs on `Hyprland`,
+  - `networkmanager` currently reports configured `NetworkManager` but runs on `Iwd`.
+- Exposed service backend information in debug/system info so runtime state shows configured versus active backend.
+
+### Quality
+- Added regression tests for:
+  - Wi-Fi flow state transitions and command emission,
+  - popup anchor planning,
+  - backend skeleton fallback behavior in compositor and network services.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.63] - 2026-03-25
 
 ### Changed

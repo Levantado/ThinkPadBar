@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub font_path: String,
     pub font_name: String,
+    pub compositor: CompositorConfig,
     pub network: NetworkConfig,
     pub appearance: AppearanceConfig,
     pub performance: PerformanceConfig,
@@ -14,7 +15,14 @@ pub struct Config {
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(default)]
+pub struct CompositorConfig {
+    pub backend: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(default)]
 pub struct NetworkConfig {
+    pub backend: String,
     pub adapter_path: String,
     pub station_path: String,
 }
@@ -26,9 +34,18 @@ pub struct AppearanceConfig {
     pub opacity: f32,
 }
 
+impl Default for CompositorConfig {
+    fn default() -> Self {
+        Self {
+            backend: "hyprland".to_string(),
+        }
+    }
+}
+
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
+            backend: "iwd".to_string(),
             adapter_path: "/net/connman/iwd/0".to_string(),
             station_path: "/net/connman/iwd/0/wlan0".to_string(),
         }
@@ -123,6 +140,7 @@ impl Default for Config {
         Self {
             font_path: "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf".to_string(),
             font_name: "JetBrainsMonoNL NFP".to_string(),
+            compositor: CompositorConfig::default(),
             network: NetworkConfig::default(),
             appearance: AppearanceConfig::default(),
             performance: PerformanceConfig::default(),
@@ -162,6 +180,7 @@ font_path = "/tmp/font.ttf"
 font_name = "Test Font"
 
 [network]
+backend = "iwd"
 adapter_path = "/net/connman/iwd/0"
 station_path = "/net/connman/iwd/0/5"
 
@@ -171,6 +190,8 @@ opacity = 0.9
 "#;
 
         let cfg: Config = toml::from_str(input).expect("config parse should succeed");
+        assert_eq!(cfg.compositor.backend, "hyprland");
+        assert_eq!(cfg.network.backend, "iwd");
         assert_eq!(cfg.performance.profile, "normal");
         assert_eq!(cfg.performance.tick_brightness_secs, 1);
         assert_eq!(cfg.performance.tick_thermal_secs, 2);
@@ -184,6 +205,7 @@ font_path = "/tmp/font.ttf"
 font_name = "Test Font"
 
 [network]
+backend = "iwd"
 adapter_path = "/net/connman/iwd/0"
 station_path = "/net/connman/iwd/0/5"
 
@@ -208,6 +230,7 @@ font_path = "/tmp/font.ttf"
 font_name = "Test Font"
 
 [network]
+backend = "iwd"
 adapter_path = "/net/connman/iwd/0"
 station_path = "/net/connman/iwd/0/5"
 
@@ -235,5 +258,25 @@ tick_slow_secs = 30
         assert_eq!(cfg.performance.profile_badge(), "HR");
         cfg.performance.cycle_profile_runtime();
         assert_eq!(cfg.performance.profile_badge(), "NRM");
+    }
+
+    #[test]
+    fn config_supports_backend_skeleton_keys() {
+        let input = r#"
+font_path = "/tmp/font.ttf"
+font_name = "Test Font"
+
+[compositor]
+backend = "niri"
+
+[network]
+backend = "networkmanager"
+adapter_path = "/net/connman/iwd/0"
+station_path = "/net/connman/iwd/0/5"
+"#;
+
+        let cfg: Config = toml::from_str(input).expect("config parse should succeed");
+        assert_eq!(cfg.compositor.backend, "niri");
+        assert_eq!(cfg.network.backend, "networkmanager");
     }
 }
