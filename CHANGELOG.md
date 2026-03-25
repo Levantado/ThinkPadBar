@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.77] - 2026-03-25
+
+### Fixed
+- Removed the last GUI side effect from the session-service unit tests:
+  - `SessionService` now owns a runner seam for launcher/session commands, so unit tests can assert the requested command without actually spawning `rofi`, `hyprlock`, or other real processes;
+  - `cargo test` no longer flashes the launcher because `launcher_returns_no_follow_up` now uses a recording runner instead of executing `rofi -replace -show drun`.
+
+### Quality
+- Added regression tests for:
+  - launcher command execution returning `None` without spawning a real process,
+  - lock command execution routing through the runner and requesting compositor refresh.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.76] - 2026-03-25
 
 ### Changed

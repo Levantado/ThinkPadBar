@@ -534,7 +534,7 @@ impl ThinkPadBar {
                 }
             }
             Message::OpenLauncher => {
-                let session_service = self.session_service;
+                let session_service = self.session_service.clone();
                 return Task::perform(
                     async move {
                         session_service
@@ -772,7 +772,7 @@ impl ThinkPadBar {
                 self.popup = Popup::None;
                 self.session_service.close_transient_ui();
                 let mut tasks = self.popup_hide_tasks();
-                let session_service = self.session_service;
+                let session_service = self.session_service.clone();
                 tasks.push(Task::perform(
                     async move { session_service.execute(command).await },
                     Message::SessionCommandCompleted,

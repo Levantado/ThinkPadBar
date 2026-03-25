@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionCommand {
     OpenLauncher,
@@ -20,14 +22,40 @@ pub struct SessionSnapshot {
     pub power_menu_open: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+trait SessionRunner: Send + Sync {
+    fn spawn(&self, bin: &str, args: &[&str]);
+}
+
+#[derive(Debug, Default)]
+struct ProcessSessionRunner;
+
+impl SessionRunner for ProcessSessionRunner {
+    fn spawn(&self, bin: &str, args: &[&str]) {
+        if let Ok(mut child) = std::process::Command::new(bin)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            std::mem::drop(std::thread::spawn(move || {
+                let _ = child.wait();
+            }));
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct SessionService {
     snapshot: SessionSnapshot,
+    runner: Arc<dyn SessionRunner>,
 }
 
 impl SessionService {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            snapshot: SessionSnapshot::default(),
+            runner: Arc::new(ProcessSessionRunner),
+        }
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
@@ -46,31 +74,31 @@ impl SessionService {
         match command {
             SessionCommand::OpenLauncher => {
                 let (bin, args) = Self::launcher_command();
-                Self::spawn_command_and_reap(bin, args);
+                self.runner.spawn(bin, args);
                 SessionFollowUp::None
             }
             SessionCommand::Lock => {
-                Self::spawn_shell_command("hyprlock");
+                self.spawn_shell_command("hyprlock");
                 SessionFollowUp::RefreshCompositor
             }
             SessionCommand::Sleep => {
-                Self::spawn_shell_command("systemctl suspend");
+                self.spawn_shell_command("systemctl suspend");
                 SessionFollowUp::RefreshCompositor
             }
             SessionCommand::Hibernate => {
-                Self::spawn_shell_command("systemctl hibernate");
+                self.spawn_shell_command("systemctl hibernate");
                 SessionFollowUp::RefreshCompositor
             }
             SessionCommand::Restart => {
-                Self::spawn_shell_command("systemctl reboot");
+                self.spawn_shell_command("systemctl reboot");
                 SessionFollowUp::RefreshCompositor
             }
             SessionCommand::Shutdown => {
-                Self::spawn_shell_command("systemctl poweroff");
+                self.spawn_shell_command("systemctl poweroff");
                 SessionFollowUp::RefreshCompositor
             }
             SessionCommand::Logout => {
-                Self::spawn_shell_command("hyprctl dispatch exit");
+                self.spawn_shell_command("hyprctl dispatch exit");
                 SessionFollowUp::RefreshCompositor
             }
         }
@@ -80,32 +108,52 @@ impl SessionService {
         ("rofi", &["-replace", "-show", "drun"])
     }
 
-    fn spawn_shell_command(raw: &str) {
+    fn spawn_shell_command(&self, raw: &str) {
         let mut args = raw.split_whitespace();
         let Some(bin) = args.next() else {
             return;
         };
         let args: Vec<&str> = args.collect();
-        Self::spawn_command_and_reap(bin, &args);
+        self.runner.spawn(bin, &args);
     }
+}
 
-    fn spawn_command_and_reap(bin: &str, args: &[&str]) {
-        if let Ok(mut child) = std::process::Command::new(bin)
-            .args(args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            std::mem::drop(std::thread::spawn(move || {
-                let _ = child.wait();
-            }));
-        }
+impl Default for SessionService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::{SessionCommand, SessionFollowUp, SessionService};
+
+    type RecordedCalls = Arc<Mutex<Vec<(String, Vec<String>)>>>;
+
+    #[derive(Default)]
+    struct RecordingRunner {
+        calls: RecordedCalls,
+    }
+
+    impl super::SessionRunner for RecordingRunner {
+        fn spawn(&self, bin: &str, args: &[&str]) {
+            self.calls.lock().unwrap().push((
+                bin.to_string(),
+                args.iter().map(|arg| (*arg).to_string()).collect(),
+            ));
+        }
+    }
+
+    impl SessionService {
+        fn with_runner(runner: Arc<dyn super::SessionRunner>) -> Self {
+            Self {
+                snapshot: super::SessionSnapshot::default(),
+                runner,
+            }
+        }
+    }
 
     #[test]
     fn launcher_command_points_to_rofi_replace_drun() {
@@ -125,11 +173,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launcher_returns_no_follow_up() {
-        let service = SessionService::new();
+    async fn launcher_returns_no_follow_up_without_spawning_real_rofi() {
+        let runner = RecordingRunner::default();
+        let calls = runner.calls.clone();
+        let service = SessionService::with_runner(Arc::new(runner));
         assert_eq!(
             service.execute(SessionCommand::OpenLauncher).await,
             SessionFollowUp::None
+        );
+        assert_eq!(
+            &*calls.lock().unwrap(),
+            &[(
+                "rofi".to_string(),
+                vec![
+                    "-replace".to_string(),
+                    "-show".to_string(),
+                    "drun".to_string()
+                ],
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_command_uses_runner_and_requests_refresh() {
+        let runner = RecordingRunner::default();
+        let calls = runner.calls.clone();
+        let service = SessionService::with_runner(Arc::new(runner));
+
+        assert_eq!(
+            service.execute(SessionCommand::Lock).await,
+            SessionFollowUp::RefreshCompositor
+        );
+        assert_eq!(
+            &*calls.lock().unwrap(),
+            &[("hyprlock".to_string(), Vec::<String>::new())]
         );
     }
 }
