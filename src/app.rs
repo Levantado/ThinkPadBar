@@ -53,6 +53,9 @@ pub struct ThinkPadBar {
     controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer<
         crate::services::controls::ControlsRefreshKind,
     >,
+    slow_tick_coalescing: crate::services::coalescing::ValueCoalescer<()>,
+    background_request_coalescing:
+        crate::services::coalescing::RequestCoalescer<BackgroundRequestKind>,
     perf: PerfCounters,
     show_debug_overlay: bool,
     debug_ui_enabled: bool,
@@ -90,6 +93,7 @@ pub enum Message {
     ),
     ControlsEvent(crate::services::controls::ControlsEvent),
     ControlsCommandCompleted(crate::services::controls::ControlsFollowUp),
+    BackgroundWifiInfoSynced(crate::services::network::WifiInfo),
     RefreshCompositor,
     CompositorEvent(crate::services::compositor::CompositorEvent),
     CompositorRefreshed(crate::services::compositor::RefreshResult),
@@ -100,6 +104,7 @@ pub enum Message {
     SetFanLevel(String),
     SetBrightness(u32),
     FlushCoalescedControl(CoalescedControlKind, u64),
+    FlushSlowTick(u64),
     SetPowerProfile(String),
     CyclePerformanceProfile,
     NetworkCommand(crate::services::network::NetworkCommand),
@@ -132,6 +137,12 @@ pub enum CoalescedControlKind {
     Volume,
     MicVolume,
     Brightness,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BackgroundRequestKind {
+    DbusConnect,
+    WifiInfo,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -174,6 +185,7 @@ impl ControlsCoalescing {
 
 impl ThinkPadBar {
     const CONTROL_COALESCE_DELAY_MS: u64 = 75;
+    const SLOW_TICK_COALESCE_DELAY_MS: u64 = 75;
 
     fn debug_ui_enabled_from_rust_log(raw: Option<&str>) -> bool {
         let Some(raw) = raw else {
@@ -389,6 +401,16 @@ impl ThinkPadBar {
         )
     }
 
+    fn schedule_slow_tick_flush(generation: u64) -> Task<Message> {
+        Task::perform(
+            async move {
+                tokio::time::sleep(Duration::from_millis(Self::SLOW_TICK_COALESCE_DELAY_MS)).await;
+                generation
+            },
+            Message::FlushSlowTick,
+        )
+    }
+
     fn request_compositor_refresh(&mut self) -> Task<Message> {
         self.perf.workspace_refresh_requested =
             self.perf.workspace_refresh_requested.saturating_add(1);
@@ -402,6 +424,60 @@ impl ThinkPadBar {
             async move { compositor_service.refresh().await },
             Message::CompositorRefreshed,
         )
+    }
+
+    fn spawn_dbus_connect() -> Task<Message> {
+        Task::perform(
+            async { zbus::Connection::system().await.ok() },
+            Message::DBusConnectAttempted,
+        )
+    }
+
+    fn request_dbus_connect(&mut self) -> Task<Message> {
+        if !self
+            .background_request_coalescing
+            .request(BackgroundRequestKind::DbusConnect)
+        {
+            return Task::none();
+        }
+
+        Self::spawn_dbus_connect()
+    }
+
+    fn spawn_wifi_info_sync(&self, conn: zbus::Connection) -> Task<Message> {
+        let network_service = self.network_service.clone();
+        Task::perform(
+            async move { network_service.get_wifi_info(&conn).await },
+            Message::BackgroundWifiInfoSynced,
+        )
+    }
+
+    fn request_wifi_info_sync(&mut self) -> Task<Message> {
+        let Some(conn) = self.dbus_conn.clone() else {
+            return self.request_dbus_connect();
+        };
+
+        if !self
+            .background_request_coalescing
+            .request(BackgroundRequestKind::WifiInfo)
+        {
+            return Task::none();
+        }
+
+        self.spawn_wifi_info_sync(conn)
+    }
+
+    fn perform_slow_tick(&mut self) -> Task<Message> {
+        self.system_info_service
+            .refresh(crate::services::system_info::SystemInfoRefreshKind::Thermal);
+        self.system_info_service
+            .refresh(crate::services::system_info::SystemInfoRefreshKind::Slow);
+
+        Task::batch(vec![
+            self.request_controls_refresh(crate::services::controls::ControlsRefreshKind::Fan),
+            self.request_controls_refresh(crate::services::controls::ControlsRefreshKind::Slow),
+            self.request_wifi_info_sync(),
+        ])
     }
 
     pub fn new(config: crate::config::Config) -> impl FnOnce() -> (Self, Task<Message>) {
@@ -494,6 +570,9 @@ impl ThinkPadBar {
                 controls_coalescing: ControlsCoalescing::default(),
                 controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(
                 ),
+                slow_tick_coalescing: crate::services::coalescing::ValueCoalescer::default(),
+                background_request_coalescing:
+                    crate::services::coalescing::RequestCoalescer::default(),
                 perf: PerfCounters::default(),
                 show_debug_overlay: false,
                 debug_ui_enabled: Self::debug_ui_enabled(),
@@ -559,45 +638,24 @@ impl ThinkPadBar {
                 return self.request_compositor_refresh();
             }
             Message::TickSlow(_now) => {
-                self.system_info_service
-                    .refresh(crate::services::system_info::SystemInfoRefreshKind::Thermal);
-                self.system_info_service
-                    .refresh(crate::services::system_info::SystemInfoRefreshKind::Slow);
-
-                let mut tasks = vec![
-                    self.request_controls_refresh(
-                        crate::services::controls::ControlsRefreshKind::Fan,
-                    ),
-                    self.request_controls_refresh(
-                        crate::services::controls::ControlsRefreshKind::Slow,
-                    ),
-                ];
-
-                if let Some(conn) = &self.dbus_conn {
-                    let conn = conn.clone();
-                    let network_service = self.network_service.clone();
-                    tasks.push(Task::perform(
-                        async move { network_service.get_wifi_info(&conn).await },
-                        |info| {
-                            Message::NetworkEvent(
-                                crate::services::network::NetworkEvent::WifiInfoSynced(info),
-                            )
-                        },
-                    ));
-                } else {
-                    tasks.push(Task::perform(
-                        async { zbus::Connection::system().await.ok() },
-                        Message::DBusConnectAttempted,
-                    ));
-                }
-
-                return Task::batch(tasks);
+                let generation = self.slow_tick_coalescing.push(());
+                return Self::schedule_slow_tick_flush(generation);
             }
             Message::DBusConnectAttempted(conn) => {
                 self.perf.dbus_connect_attempts = self.perf.dbus_connect_attempts.saturating_add(1);
                 if let Some(conn) = conn {
+                    self.background_request_coalescing
+                        .clear(&BackgroundRequestKind::DbusConnect);
                     return Task::perform(async move { conn }, Message::DBusConnected);
                 }
+
+                if self
+                    .background_request_coalescing
+                    .complete(&BackgroundRequestKind::DbusConnect)
+                {
+                    return Self::spawn_dbus_connect();
+                }
+
                 self.perf.dbus_connect_failures = self.perf.dbus_connect_failures.saturating_add(1);
             }
             Message::DBusConnected(conn) => {
@@ -606,6 +664,16 @@ impl ThinkPadBar {
                     self.perf.dbus_connect_successes.saturating_add(1);
                 self.dbus_conn = Some(conn);
                 return Task::perform(async { chrono::Local::now() }, Message::TickSlow);
+            }
+            Message::BackgroundWifiInfoSynced(info) => {
+                self.network_service
+                    .handle_event(crate::services::network::NetworkEvent::WifiInfoSynced(info));
+                if self
+                    .background_request_coalescing
+                    .complete(&BackgroundRequestKind::WifiInfo)
+                {
+                    return self.request_wifi_info_sync();
+                }
             }
             Message::PopupWindowUnfocused(window_id) => {
                 if Self::should_close_popup_on_unfocus(self.popup_window_id, &self.popup, window_id)
@@ -760,6 +828,15 @@ impl ThinkPadBar {
                     .take_command_if_current(kind, generation)
                 {
                     return self.execute_controls_command(command);
+                }
+            }
+            Message::FlushSlowTick(generation) => {
+                if self
+                    .slow_tick_coalescing
+                    .take_if_current(generation)
+                    .is_some()
+                {
+                    return self.perform_slow_tick();
                 }
             }
             Message::SetFanLevel(level) => {
@@ -2737,8 +2814,50 @@ impl ThinkPadBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoalescedControlKind, ControlsCoalescing, Popup, ThinkPadBar};
+    use super::{
+        BackgroundRequestKind, CoalescedControlKind, ControlsCoalescing, Popup, ThinkPadBar,
+    };
     use iced::window::Id;
+
+    fn hermetic_bar() -> ThinkPadBar {
+        ThinkPadBar {
+            config: crate::config::Config::default(),
+            dbus_conn: None,
+            clock: String::new(),
+            controls: crate::services::controls::ControlsSnapshot::default(),
+            network_service: crate::services::network::NetworkService::new(
+                &crate::config::NetworkConfig::default(),
+            ),
+            idle_inhibitor_service:
+                crate::services::idle_inhibitor::IdleInhibitorService::unavailable_for_tests(),
+            popup: Popup::None,
+            battery_str: String::new(),
+            audio_str: String::new(),
+            main_window_id: None,
+            popup_window_id: None,
+            calendar_offset: 0,
+            compositor_service: crate::services::compositor::CompositorService::hermetic_for_tests(
+                crate::services::compositor::CompositorBackendKind::Hyprland,
+                crate::services::compositor::CompositorBackendKind::Hyprland,
+            ),
+            controls_service: crate::services::controls::ControlsService::with_snapshot_for_tests(
+                crate::services::controls::ControlsSnapshot::default(),
+            ),
+            popup_anchor_service: crate::services::popup_anchor::PopupAnchorService::new(24),
+            session_service: crate::services::session::SessionService::default(),
+            system_info_service: crate::services::system_info::SystemInfoService::with_snapshot(
+                crate::modules::system::SysData::default(),
+            ),
+            tray_ui_service: crate::services::tray_ui::TrayUiService::new(),
+            controls_coalescing: ControlsCoalescing::default(),
+            controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(),
+            slow_tick_coalescing: crate::services::coalescing::ValueCoalescer::default(),
+            background_request_coalescing: crate::services::coalescing::RequestCoalescer::default(),
+            perf: super::PerfCounters::default(),
+            show_debug_overlay: false,
+            debug_ui_enabled: false,
+        }
+    }
 
     #[test]
     fn popup_closes_when_popup_window_unfocused() {
@@ -2808,41 +2927,7 @@ mod tests {
 
     #[test]
     fn workspace_refresh_coalesces_while_inflight() {
-        let mut bar = ThinkPadBar {
-            config: crate::config::Config::default(),
-            dbus_conn: None,
-            clock: String::new(),
-            controls: crate::services::controls::ControlsSnapshot::default(),
-            network_service: crate::services::network::NetworkService::new(
-                &crate::config::NetworkConfig::default(),
-            ),
-            idle_inhibitor_service:
-                crate::services::idle_inhibitor::IdleInhibitorService::unavailable_for_tests(),
-            popup: Popup::None,
-            battery_str: String::new(),
-            audio_str: String::new(),
-            main_window_id: None,
-            popup_window_id: None,
-            calendar_offset: 0,
-            compositor_service: crate::services::compositor::CompositorService::hermetic_for_tests(
-                crate::services::compositor::CompositorBackendKind::Hyprland,
-                crate::services::compositor::CompositorBackendKind::Hyprland,
-            ),
-            controls_service: crate::services::controls::ControlsService::with_snapshot_for_tests(
-                crate::services::controls::ControlsSnapshot::default(),
-            ),
-            popup_anchor_service: crate::services::popup_anchor::PopupAnchorService::new(24),
-            session_service: crate::services::session::SessionService::default(),
-            system_info_service: crate::services::system_info::SystemInfoService::with_snapshot(
-                crate::modules::system::SysData::default(),
-            ),
-            tray_ui_service: crate::services::tray_ui::TrayUiService::new(),
-            controls_coalescing: ControlsCoalescing::default(),
-            controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(),
-            perf: super::PerfCounters::default(),
-            show_debug_overlay: false,
-            debug_ui_enabled: false,
-        };
+        let mut bar = hermetic_bar();
 
         assert!(bar.compositor_service.request_refresh());
         assert!(!bar.compositor_service.request_refresh());
@@ -2907,41 +2992,7 @@ mod tests {
     #[test]
     fn controls_refresh_coalesces_same_kind_until_completion() {
         let kind = crate::services::controls::ControlsRefreshKind::Brightness;
-        let mut bar = ThinkPadBar {
-            config: crate::config::Config::default(),
-            dbus_conn: None,
-            clock: String::new(),
-            controls: crate::services::controls::ControlsSnapshot::default(),
-            network_service: crate::services::network::NetworkService::new(
-                &crate::config::NetworkConfig::default(),
-            ),
-            idle_inhibitor_service:
-                crate::services::idle_inhibitor::IdleInhibitorService::unavailable_for_tests(),
-            popup: Popup::None,
-            battery_str: String::new(),
-            audio_str: String::new(),
-            main_window_id: None,
-            popup_window_id: None,
-            calendar_offset: 0,
-            compositor_service: crate::services::compositor::CompositorService::hermetic_for_tests(
-                crate::services::compositor::CompositorBackendKind::Hyprland,
-                crate::services::compositor::CompositorBackendKind::Hyprland,
-            ),
-            controls_service: crate::services::controls::ControlsService::with_snapshot_for_tests(
-                crate::services::controls::ControlsSnapshot::default(),
-            ),
-            popup_anchor_service: crate::services::popup_anchor::PopupAnchorService::new(24),
-            session_service: crate::services::session::SessionService::default(),
-            system_info_service: crate::services::system_info::SystemInfoService::with_snapshot(
-                crate::modules::system::SysData::default(),
-            ),
-            tray_ui_service: crate::services::tray_ui::TrayUiService::new(),
-            controls_coalescing: ControlsCoalescing::default(),
-            controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(),
-            perf: super::PerfCounters::default(),
-            show_debug_overlay: false,
-            debug_ui_enabled: false,
-        };
+        let mut bar = hermetic_bar();
 
         let _ = bar.update(super::Message::RefreshControls(kind));
         assert!(bar.controls_refresh_coalescing.is_inflight(&kind));
@@ -2969,41 +3020,7 @@ mod tests {
     #[test]
     fn controls_follow_up_refresh_queues_when_kind_is_inflight() {
         let kind = crate::services::controls::ControlsRefreshKind::Brightness;
-        let mut bar = ThinkPadBar {
-            config: crate::config::Config::default(),
-            dbus_conn: None,
-            clock: String::new(),
-            controls: crate::services::controls::ControlsSnapshot::default(),
-            network_service: crate::services::network::NetworkService::new(
-                &crate::config::NetworkConfig::default(),
-            ),
-            idle_inhibitor_service:
-                crate::services::idle_inhibitor::IdleInhibitorService::unavailable_for_tests(),
-            popup: Popup::None,
-            battery_str: String::new(),
-            audio_str: String::new(),
-            main_window_id: None,
-            popup_window_id: None,
-            calendar_offset: 0,
-            compositor_service: crate::services::compositor::CompositorService::hermetic_for_tests(
-                crate::services::compositor::CompositorBackendKind::Hyprland,
-                crate::services::compositor::CompositorBackendKind::Hyprland,
-            ),
-            controls_service: crate::services::controls::ControlsService::with_snapshot_for_tests(
-                crate::services::controls::ControlsSnapshot::default(),
-            ),
-            popup_anchor_service: crate::services::popup_anchor::PopupAnchorService::new(24),
-            session_service: crate::services::session::SessionService::default(),
-            system_info_service: crate::services::system_info::SystemInfoService::with_snapshot(
-                crate::modules::system::SysData::default(),
-            ),
-            tray_ui_service: crate::services::tray_ui::TrayUiService::new(),
-            controls_coalescing: ControlsCoalescing::default(),
-            controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(),
-            perf: super::PerfCounters::default(),
-            show_debug_overlay: false,
-            debug_ui_enabled: false,
-        };
+        let mut bar = hermetic_bar();
 
         let _ = bar.update(super::Message::RefreshControls(kind));
         let _ = bar.update(super::Message::ControlsCommandCompleted(
@@ -3012,5 +3029,60 @@ mod tests {
 
         assert!(bar.controls_refresh_coalescing.is_inflight(&kind));
         assert!(bar.controls_refresh_coalescing.is_queued(&kind));
+    }
+
+    #[test]
+    fn dbus_connect_requests_coalesce_until_failure_completion() {
+        let mut bar = hermetic_bar();
+
+        let _ = bar.request_dbus_connect();
+        assert!(bar
+            .background_request_coalescing
+            .is_inflight(&BackgroundRequestKind::DbusConnect));
+        assert!(!bar
+            .background_request_coalescing
+            .is_queued(&BackgroundRequestKind::DbusConnect));
+
+        let _ = bar.request_dbus_connect();
+        assert!(bar
+            .background_request_coalescing
+            .is_queued(&BackgroundRequestKind::DbusConnect));
+
+        let _ = bar.update(super::Message::DBusConnectAttempted(None));
+        assert!(bar
+            .background_request_coalescing
+            .is_inflight(&BackgroundRequestKind::DbusConnect));
+        assert!(!bar
+            .background_request_coalescing
+            .is_queued(&BackgroundRequestKind::DbusConnect));
+
+        let _ = bar.update(super::Message::DBusConnectAttempted(None));
+        assert!(!bar
+            .background_request_coalescing
+            .is_inflight(&BackgroundRequestKind::DbusConnect));
+        assert!(!bar
+            .background_request_coalescing
+            .is_queued(&BackgroundRequestKind::DbusConnect));
+    }
+
+    #[test]
+    fn slow_tick_reuses_single_background_connect_request_without_bus() {
+        let mut bar = hermetic_bar();
+
+        let _ = bar.perform_slow_tick();
+        assert!(bar
+            .background_request_coalescing
+            .is_inflight(&BackgroundRequestKind::DbusConnect));
+        assert!(!bar
+            .background_request_coalescing
+            .is_queued(&BackgroundRequestKind::DbusConnect));
+
+        let _ = bar.perform_slow_tick();
+        assert!(bar
+            .background_request_coalescing
+            .is_inflight(&BackgroundRequestKind::DbusConnect));
+        assert!(bar
+            .background_request_coalescing
+            .is_queued(&BackgroundRequestKind::DbusConnect));
     }
 }

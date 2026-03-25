@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.81] - 2026-03-26
+
+### Changed
+- Completed the remaining `P2 Coalescing Foundation` slow/background slice:
+  - added a `clear(...)` path to `RequestCoalescer<K>` so successful background requests can explicitly discard queued duplicates instead of keeping stale inflight state;
+  - coalesced `TickSlow` behind a short delayed flush, so repeated slow ticks now collapse to the latest pending generation before running thermal/slow system-info refreshes;
+  - coalesced background D-Bus reconnect attempts and background Wi-Fi info sync requests, so the bar no longer spawns parallel duplicate slow-path tasks when system bus availability or periodic network syncs flap.
+
+### Quality
+- Added regression tests for:
+  - request-coalescer state clearing,
+  - coalesced D-Bus reconnect retries after failure,
+  - slow-tick reuse of a single background connect request when system bus is unavailable.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.80] - 2026-03-26
 
 ### Changed

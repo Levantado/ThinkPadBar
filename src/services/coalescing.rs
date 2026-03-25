@@ -86,6 +86,10 @@ where
         false
     }
 
+    pub fn clear(&mut self, key: &K) {
+        self.states.remove(key);
+    }
+
     #[cfg(test)]
     pub fn is_inflight(&self, key: &K) -> bool {
         self.states.get(key).is_some_and(|state| state.inflight)
@@ -152,5 +156,18 @@ mod tests {
         assert!(coalescer.is_queued(&"brightness"));
         assert!(coalescer.is_inflight(&"fan"));
         assert!(!coalescer.is_queued(&"fan"));
+    }
+
+    #[test]
+    fn request_coalescer_clear_drops_inflight_and_queued_state() {
+        let mut coalescer = RequestCoalescer::default();
+
+        assert!(coalescer.request("dbus"));
+        assert!(!coalescer.request("dbus"));
+        coalescer.clear(&"dbus");
+
+        assert!(!coalescer.is_inflight(&"dbus"));
+        assert!(!coalescer.is_queued(&"dbus"));
+        assert!(coalescer.request("dbus"));
     }
 }
