@@ -1,5 +1,4 @@
 pub mod compositor;
-pub mod connectivity;
 pub mod controls;
 pub mod idle_inhibitor;
 pub mod network;
@@ -9,4 +8,3 @@ pub mod system_info;
 pub mod tray;
 pub mod tray_menu;
 pub mod tray_ui;
-pub mod wifi_flow;

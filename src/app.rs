@@ -35,7 +35,7 @@ pub struct ThinkPadBar {
     compositor: crate::services::compositor::CompositorSnapshot,
     clock: String,
     controls: crate::services::controls::ControlsSnapshot,
-    connectivity_service: crate::services::connectivity::ConnectivityService,
+    network_service: crate::services::network::NetworkService,
     idle_inhibitor_service: crate::services::idle_inhibitor::IdleInhibitorService,
     popup: Popup,
     battery_str: String,
@@ -94,14 +94,8 @@ pub enum Message {
     SetBrightness(u32),
     SetPowerProfile(String),
     CyclePerformanceProfile,
-    ToggleWifiMenu,
-    NetworksScanned(Vec<crate::services::connectivity::WifiNetwork>),
-    SelectWifiNetwork(String, String),
-    WifiPasswordChanged(String),
-    SubmitWifiPassword,
-    CancelWifiPassword,
-    WifiConnectResult(bool),
-    ToggleWifi(bool),
+    NetworkCommand(crate::services::network::NetworkCommand),
+    NetworkEvent(crate::services::network::NetworkEvent),
     ToggleBluetooth(bool),
     ToggleIdleInhibitor,
     NextKeyboardLayout,
@@ -116,7 +110,6 @@ pub enum Message {
     TrayItemRightClicked(String),
     TrayItemClickResolved(String, bool),
     TrayMenuItemSelected(String, i32),
-    WifiUpdated(crate::services::connectivity::WifiInfo),
     OpenOverskride,
     SessionCommandCompleted(crate::services::session::SessionFollowUp),
     DBusConnected(zbus::Connection),
@@ -366,8 +359,7 @@ impl ThinkPadBar {
             let compositor_snapshot = compositor_service.snapshot();
             let controls_service = crate::services::controls::ControlsService::new();
             let controls_snapshot = controls_service.snapshot().clone();
-            let connectivity_service =
-                crate::services::connectivity::ConnectivityService::new(&cfg.network);
+            let network_service = crate::services::network::NetworkService::new(&cfg.network);
             let idle_inhibitor_service =
                 crate::services::idle_inhibitor::IdleInhibitorService::new();
             let popup_anchor_service =
@@ -387,7 +379,7 @@ impl ThinkPadBar {
                 compositor: compositor_snapshot,
                 clock: Local::now().format("%a %d %b %H:%M").to_string(),
                 controls: controls_snapshot,
-                connectivity_service,
+                network_service,
                 idle_inhibitor_service,
                 popup: Popup::None,
                 battery_str: String::new(),
@@ -479,10 +471,14 @@ impl ThinkPadBar {
 
                 if let Some(conn) = &self.dbus_conn {
                     let conn = conn.clone();
-                    let connectivity_service = self.connectivity_service.clone();
+                    let network_service = self.network_service.clone();
                     tasks.push(Task::perform(
-                        async move { connectivity_service.get_wifi_info(&conn).await },
-                        Message::WifiUpdated,
+                        async move { network_service.get_wifi_info(&conn).await },
+                        |info| {
+                            Message::NetworkEvent(
+                                crate::services::network::NetworkEvent::WifiInfoSynced(info),
+                            )
+                        },
                     ));
                 } else {
                     tasks.push(Task::perform(
@@ -513,7 +509,7 @@ impl ThinkPadBar {
                     self.popup = Popup::None;
                     self.tray_ui_service.clear_menu_cursor();
                     self.session_service.close_transient_ui();
-                    self.connectivity_service.close_transient_ui();
+                    self.network_service.close_transient_ui();
                     self.calendar_offset = 0;
                     return Task::batch(self.popup_hide_tasks());
                 }
@@ -558,7 +554,7 @@ impl ThinkPadBar {
                     self.popup = Popup::None;
                     self.tray_ui_service.clear_menu_cursor();
                     self.session_service.close_transient_ui();
-                    self.connectivity_service.close_transient_ui();
+                    self.network_service.close_transient_ui();
                     self.calendar_offset = 0;
                     let mut tasks = self.popup_hide_tasks();
                     if self.compositor_service.complete_refresh() {
@@ -592,7 +588,7 @@ impl ThinkPadBar {
                     self.popup = Popup::None;
                     self.tray_ui_service.clear_menu_cursor();
                     self.session_service.close_transient_ui();
-                    self.connectivity_service.close_transient_ui();
+                    self.network_service.close_transient_ui();
                     if target == Popup::Calendar {
                         self.calendar_offset = 0;
                     }
@@ -651,111 +647,69 @@ impl ThinkPadBar {
             Message::CyclePerformanceProfile => {
                 self.config.performance.cycle_profile_runtime();
             }
-            Message::ToggleWifiMenu => {
+            Message::NetworkCommand(command) => {
                 match self
-                    .connectivity_service
-                    .toggle_menu(self.dbus_conn.is_some())
+                    .network_service
+                    .handle_command(command, self.dbus_conn.is_some())
                 {
-                    crate::services::connectivity::ConnectivityRequest::Scan => {
+                    crate::services::network::NetworkFollowUp::Scan => {
                         if let Some(conn) = &self.dbus_conn {
                             let conn = conn.clone();
-                            let connectivity_service = self.connectivity_service.clone();
+                            let network_service = self.network_service.clone();
                             return Task::perform(
-                                async move { connectivity_service.scan_networks(&conn).await },
-                                Message::NetworksScanned,
+                                async move { network_service.scan_networks(&conn).await },
+                                |networks| {
+                                    Message::NetworkEvent(
+                                        crate::services::network::NetworkEvent::ScanCompleted(
+                                            networks,
+                                        ),
+                                    )
+                                },
                             );
                         }
                     }
-                    crate::services::connectivity::ConnectivityRequest::None
-                    | crate::services::connectivity::ConnectivityRequest::Connect { .. }
-                    | crate::services::connectivity::ConnectivityRequest::TogglePower(_) => {}
-                }
-            }
-            Message::NetworksScanned(networks) => {
-                self.connectivity_service.apply_scan_results(networks);
-            }
-            Message::SelectWifiNetwork(ssid, sec) => {
-                match self
-                    .connectivity_service
-                    .select_network(ssid, sec, self.dbus_conn.is_some())
-                {
-                    crate::services::connectivity::ConnectivityRequest::Connect {
-                        ssid,
-                        passphrase,
-                    } => {
+                    crate::services::network::NetworkFollowUp::Connect { ssid, passphrase } => {
                         if let Some(conn) = &self.dbus_conn {
                             let conn = conn.clone();
-                            let connectivity_service = self.connectivity_service.clone();
+                            let network_service = self.network_service.clone();
                             return Task::perform(
                                 async move {
-                                    connectivity_service
-                                        .connect_network(&conn, ssid, passphrase)
-                                        .await
+                                    let success = network_service
+                                        .connect_network(&conn, ssid.clone(), passphrase)
+                                        .await;
+                                    crate::services::network::NetworkEvent::ConnectCompleted {
+                                        ssid,
+                                        success,
+                                    }
                                 },
-                                Message::WifiConnectResult,
+                                Message::NetworkEvent,
                             );
                         }
                     }
-                    crate::services::connectivity::ConnectivityRequest::None
-                    | crate::services::connectivity::ConnectivityRequest::Scan
-                    | crate::services::connectivity::ConnectivityRequest::TogglePower(_) => {}
-                }
-            }
-            Message::WifiPasswordChanged(val) => {
-                self.connectivity_service.update_password(val);
-            }
-            Message::SubmitWifiPassword => {
-                match self
-                    .connectivity_service
-                    .submit_password(self.dbus_conn.is_some())
-                {
-                    crate::services::connectivity::ConnectivityRequest::Connect {
-                        ssid,
-                        passphrase,
-                    } => {
+                    crate::services::network::NetworkFollowUp::TogglePower(enable) => {
                         if let Some(conn) = &self.dbus_conn {
                             let conn = conn.clone();
-                            let connectivity_service = self.connectivity_service.clone();
+                            let network_service = self.network_service.clone();
                             return Task::perform(
                                 async move {
-                                    connectivity_service
-                                        .connect_network(&conn, ssid, passphrase)
-                                        .await
+                                    network_service.toggle_wifi(&conn, enable).await;
+                                    network_service.get_wifi_info(&conn).await
                                 },
-                                Message::WifiConnectResult,
+                                |info| {
+                                    Message::NetworkEvent(
+                                        crate::services::network::NetworkEvent::WifiInfoSynced(
+                                            info,
+                                        ),
+                                    )
+                                },
                             );
                         }
                     }
-                    crate::services::connectivity::ConnectivityRequest::None
-                    | crate::services::connectivity::ConnectivityRequest::Scan
-                    | crate::services::connectivity::ConnectivityRequest::TogglePower(_) => {}
+                    crate::services::network::NetworkFollowUp::None => {}
                 }
             }
-            Message::CancelWifiPassword => {
-                self.connectivity_service.cancel_password();
-            }
-            Message::WifiConnectResult(success) => {
-                self.connectivity_service.apply_connect_result(success);
-            }
-            Message::ToggleWifi(enable) => {
-                match self
-                    .connectivity_service
-                    .toggle_power(enable, self.dbus_conn.is_some())
-                {
-                    crate::services::connectivity::ConnectivityRequest::TogglePower(enable) => {
-                        if let Some(conn) = &self.dbus_conn {
-                            let conn = conn.clone();
-                            let connectivity_service = self.connectivity_service.clone();
-                            return Task::perform(
-                                async move { connectivity_service.toggle_wifi(&conn, enable).await },
-                                |_| Message::TickSlow(chrono::Local::now()),
-                            );
-                        }
-                    }
-                    crate::services::connectivity::ConnectivityRequest::None
-                    | crate::services::connectivity::ConnectivityRequest::Scan
-                    | crate::services::connectivity::ConnectivityRequest::Connect { .. } => {}
-                }
+            Message::NetworkEvent(event) => {
+                self.network_service.handle_event(event);
             }
             Message::ToggleBluetooth(enable) => {
                 let command = crate::services::controls::ControlsCommand::ToggleBluetooth(enable);
@@ -879,9 +833,6 @@ impl ThinkPadBar {
                         return Task::batch(self.popup_hide_tasks());
                     }
                 }
-            }
-            Message::WifiUpdated(info) => {
-                self.connectivity_service.sync_wifi_info(info);
             }
         }
         Task::none()
@@ -1122,7 +1073,7 @@ impl ThinkPadBar {
         } else {
             ""
         };
-        let wifi_icon = if self.connectivity_service.snapshot().wifi.enabled {
+        let wifi_icon = if self.network_service.snapshot().wifi.enabled {
             "󰖩"
         } else {
             "󰖪"
@@ -1699,8 +1650,8 @@ impl ThinkPadBar {
                             "cmp {:?}->{:?} net {:?}->{:?}",
                             self.compositor.configured_backend,
                             self.compositor.active_backend,
-                            self.connectivity_service.configured_backend(),
-                            self.connectivity_service.active_backend()
+                            self.network_service.configured_backend(),
+                            self.network_service.active_backend()
                         ),
                     ));
             }
@@ -2078,7 +2029,7 @@ impl ThinkPadBar {
             prof_row = prof_row.push(btn);
         }
 
-        let wifi_snapshot = self.connectivity_service.snapshot();
+        let wifi_snapshot = self.network_service.snapshot();
         let wifi_is_active = wifi_snapshot.wifi.enabled;
         let ssid = wifi_snapshot.wifi.ssid.trim();
         let has_real_ssid =
@@ -2105,7 +2056,9 @@ impl ThinkPadBar {
         )
         .width(Length::FillPortion(1))
         .padding(Padding::from([12, 12]))
-        .on_press(Message::ToggleWifiMenu)
+        .on_press(Message::NetworkCommand(
+            crate::services::network::NetworkCommand::ToggleMenu,
+        ))
         .style(move |_, _| {
             if wifi_is_active {
                 iced::widget::button::Style {
@@ -2427,13 +2380,12 @@ impl ThinkPadBar {
 
         if wifi_snapshot.menu_open {
             let mut inner_col = Column::new().spacing(8);
-            if !wifi_snapshot.status_message.is_empty() {
-                inner_col =
-                    inner_col.push(text(wifi_snapshot.status_message.as_str()).size(12).style(
-                        |_| iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
-                        },
-                    ));
+            if let Some(status_message) = wifi_snapshot.status_message() {
+                inner_col = inner_col.push(text(status_message).size(12).style(|_| {
+                    iced::widget::text::Style {
+                        color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                    }
+                }));
             }
             let toggle_power_btn = button(
                 text(if wifi_is_active {
@@ -2443,7 +2395,9 @@ impl ThinkPadBar {
                 })
                 .size(14),
             )
-            .on_press(Message::ToggleWifi(!wifi_is_active))
+            .on_press(Message::NetworkCommand(
+                crate::services::network::NetworkCommand::ToggleWifi(!wifi_is_active),
+            ))
             .width(Length::Fill)
             .padding(8)
             .style(|_, _| iced::widget::button::Style {
@@ -2457,22 +2411,32 @@ impl ThinkPadBar {
             });
             inner_col = inner_col.push(toggle_power_btn);
 
-            if let Some(ref ssid) = wifi_snapshot.selected_ssid {
+            if let Some(ssid) = wifi_snapshot.awaiting_password_ssid() {
                 let input = text_input("Enter password...", &wifi_snapshot.password_input)
-                    .on_input(Message::WifiPasswordChanged)
-                    .on_submit(Message::SubmitWifiPassword)
+                    .on_input(|value| {
+                        Message::NetworkCommand(
+                            crate::services::network::NetworkCommand::UpdatePassword(value),
+                        )
+                    })
+                    .on_submit(Message::NetworkCommand(
+                        crate::services::network::NetworkCommand::SubmitPassword,
+                    ))
                     .secure(true)
                     .padding(10);
                 let actions = Row::new()
                     .spacing(8)
                     .push(
                         button(text("Connect"))
-                            .on_press(Message::SubmitWifiPassword)
+                            .on_press(Message::NetworkCommand(
+                                crate::services::network::NetworkCommand::SubmitPassword,
+                            ))
                             .padding(8),
                     )
                     .push(
                         button(text("Cancel"))
-                            .on_press(Message::CancelWifiPassword)
+                            .on_press(Message::NetworkCommand(
+                                crate::services::network::NetworkCommand::CancelPassword,
+                            ))
                             .padding(8),
                     );
                 inner_col = inner_col
@@ -2485,9 +2449,11 @@ impl ThinkPadBar {
                     net_list = net_list.push(
                         button(text(net.ssid.clone()))
                             .width(Length::Fill)
-                            .on_press(Message::SelectWifiNetwork(
-                                net.ssid.clone(),
-                                net.security.clone(),
+                            .on_press(Message::NetworkCommand(
+                                crate::services::network::NetworkCommand::SelectNetwork {
+                                    ssid: net.ssid.clone(),
+                                    security: net.security.clone(),
+                                },
                             ))
                             .style(|_, _| iced::widget::button::Style {
                                 background: Some(iced::Background::Color(Color::TRANSPARENT)),
@@ -2662,7 +2628,7 @@ mod tests {
             },
             clock: String::new(),
             controls: crate::services::controls::ControlsSnapshot::default(),
-            connectivity_service: crate::services::connectivity::ConnectivityService::new(
+            network_service: crate::services::network::NetworkService::new(
                 &crate::config::NetworkConfig::default(),
             ),
             idle_inhibitor_service: crate::services::idle_inhibitor::IdleInhibitorService::new(),

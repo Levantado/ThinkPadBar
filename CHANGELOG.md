@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.70] - 2026-03-25
+
+### Changed
+- Started `M1 Network Runtime` in the new simplified migration form:
+  - removed the split `ConnectivityService` + `WifiFlowService` path and merged Wi-Fi state ownership into a single `NetworkService`;
+  - introduced typed network-domain types in `services/network/types.rs` (`NetworkSnapshot`, `NetworkStatus`, `NetworkCommand`, `NetworkEvent`, `NetworkFollowUp`);
+  - added a real `IwdBackend` in `services/network/iwd.rs` as the first and only runtime backend for this milestone;
+  - kept `networkmanager` as a config-level compatibility marker that still falls back to the IWD runtime instead of pretending to provide full parity.
+- Moved app-level Wi-Fi orchestration onto the typed network domain:
+  - `app.rs` now drives Wi-Fi popup actions through `Message::NetworkCommand(...)` and async results through `Message::NetworkEvent(...)`,
+  - periodic D-Bus Wi-Fi refresh now feeds `NetworkEvent::WifiInfoSynced(...)` instead of mutating a separate flow service.
+- Reduced architectural duplication:
+  - deleted legacy `src/services/connectivity.rs`,
+  - deleted legacy `src/services/wifi_flow.rs`,
+  - moved `WifiInfo` and `WifiNetwork` into the network service layer and made `modules/wifi.rs` use the service-owned types.
+
+### Quality
+- Added regression tests for:
+  - secure-network password gating,
+  - submit-password connect follow-up,
+  - successful connect result status,
+  - transient `Connecting(...)` status surviving background Wi-Fi sync,
+  - backend fallback behavior for `networkmanager` configuration.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.69] - 2026-03-25
 
 ### Changed

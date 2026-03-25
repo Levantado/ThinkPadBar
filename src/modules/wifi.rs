@@ -4,17 +4,7 @@ use std::{collections::HashSet, process::Command};
 
 use zbus::{proxy, Connection};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WifiInfo {
-    pub enabled: bool,
-    pub ssid: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WifiNetwork {
-    pub ssid: String,
-    pub security: String,
-}
+use crate::services::network::{WifiInfo, WifiNetwork};
 
 #[proxy(
     interface = "net.connman.iwd.Station",
