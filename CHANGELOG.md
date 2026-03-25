@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.75] - 2026-03-25
+
+### Changed
+- Completed `M4 Controls Backend Split`:
+  - introduced explicit control backend seams in `services/controls_backends/` for `audio`, `brightness`, `bluetooth`, and `power`;
+  - `ControlsService` now owns backend instances and routes refresh/command execution through service-owned backend traits instead of directly calling `modules/{audio,brightness,bluetooth,power}.rs`;
+  - moved audio sink/source runtime access into a single `WpctlAudioBackend`, including the `pactl subscribe` event subscription path used by the control-center refresh flow;
+  - removed legacy compiled control modules for `audio`, `brightness`, `bluetooth`, and `power`, leaving the lower-level system access split under the service layer;
+  - kept ThinkPad-specific `fan`, `battery`, and `mic LED` flows pragmatic and focused, instead of over-generalizing them prematurely.
+
+### Quality
+- Added regression tests for:
+  - backend-specific parsing in audio, brightness, bluetooth, and power backends,
+  - `ControlsService` refresh delegation through migrated backends,
+  - `ControlsService` command execution delegation through migrated backends.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.74] - 2026-03-25
 
 ### Changed

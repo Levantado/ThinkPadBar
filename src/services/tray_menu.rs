@@ -74,8 +74,7 @@ impl OwnedTrayMenu {
             let mut prefetch_path = ancestors.to_vec();
             prefetch_path.push(item.id);
             let activatable = item.enabled
-                && (item.submenu.is_empty()
-                    || item.children_display.as_deref() != Some("submenu"));
+                && (item.submenu.is_empty() || item.children_display.as_deref() != Some("submenu"));
 
             let action = OwnedTrayMenuAction {
                 id: item.id,

@@ -1,11 +1,7 @@
-pub mod audio;
 pub mod battery;
-pub mod bluetooth;
-pub mod brightness;
 pub mod capabilities;
 pub mod clock;
 pub mod fan;
 pub mod mic;
-pub mod power;
 pub mod runtime;
 pub mod system;

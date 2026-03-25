@@ -2557,7 +2557,9 @@ impl ThinkPadBar {
                 .subscription()
                 .map(Message::CompositorEvent),
             crate::services::tray_ui::TrayUiService::subscription().map(Message::TrayEvent),
-            crate::services::controls::ControlsService::subscription().map(Message::ControlsEvent),
+            self.controls_service
+                .subscription()
+                .map(Message::ControlsEvent),
             iced::event::listen_with(|event, _status, window| match event {
                 iced::Event::Window(iced::window::Event::Unfocused) => {
                     Some(Message::PopupWindowUnfocused(window))

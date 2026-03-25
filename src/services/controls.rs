@@ -1,7 +1,14 @@
-pub use crate::modules::audio::AudioInfo;
+use std::sync::Arc;
+
 pub use crate::modules::battery::BatteryInfo;
 pub use crate::modules::fan::FanInfo;
 pub use crate::modules::mic::MicInfo;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioInfo {
+    pub volume: u32,
+    pub muted: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrightnessSnapshot {
@@ -24,6 +31,7 @@ impl BrightnessSnapshot {
         }
     }
 
+    #[cfg(test)]
     pub fn from_label(label: String) -> Self {
         let percent = label.trim_end_matches('%').parse::<u32>().unwrap_or(0);
         Self::from_percent(percent)
@@ -113,25 +121,45 @@ pub enum ControlsFollowUp {
     RefreshCompositor,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone)]
 pub struct ControlsService {
     snapshot: ControlsSnapshot,
+    audio_backend: Arc<dyn crate::services::controls_backends::AudioBackend>,
+    brightness_backend: Arc<dyn crate::services::controls_backends::BrightnessBackend>,
+    bluetooth_backend: Arc<dyn crate::services::controls_backends::BluetoothBackend>,
+    power_backend: Arc<dyn crate::services::controls_backends::PowerBackend>,
 }
 
 impl ControlsService {
     pub fn new() -> Self {
+        Self::with_backends(
+            Arc::new(crate::services::controls_backends::audio::WpctlAudioBackend),
+            Arc::new(crate::services::controls_backends::brightness::SysfsBrightnessBackend),
+            Arc::new(crate::services::controls_backends::bluetooth::BluetoothCtlBackend),
+            Arc::new(crate::services::controls_backends::power::PlatformProfilePowerBackend),
+        )
+    }
+
+    fn with_backends(
+        audio_backend: Arc<dyn crate::services::controls_backends::AudioBackend>,
+        brightness_backend: Arc<dyn crate::services::controls_backends::BrightnessBackend>,
+        bluetooth_backend: Arc<dyn crate::services::controls_backends::BluetoothBackend>,
+        power_backend: Arc<dyn crate::services::controls_backends::PowerBackend>,
+    ) -> Self {
         Self {
             snapshot: ControlsSnapshot {
-                brightness: BrightnessSnapshot::from_label(
-                    crate::modules::brightness::get_brightness(),
-                ),
-                audio: crate::modules::audio::get_info(),
-                mic: crate::modules::mic::get_info(),
+                brightness: brightness_backend.snapshot(),
+                audio: audio_backend.audio_info(),
+                mic: audio_backend.mic_info(),
                 fan: crate::modules::fan::get_fan_info(),
                 battery: crate::modules::battery::get_battery_info(),
-                power_profile: crate::modules::power::get_profile(),
-                bluetooth_enabled: crate::modules::bluetooth::get_bluetooth_info(),
+                power_profile: power_backend.profile(),
+                bluetooth_enabled: bluetooth_backend.enabled(),
             },
+            audio_backend,
+            brightness_backend,
+            bluetooth_backend,
+            power_backend,
         }
     }
 
@@ -193,14 +221,12 @@ impl ControlsService {
     pub async fn refresh(&self, kind: ControlsRefreshKind) -> ControlsRefresh {
         match kind {
             ControlsRefreshKind::AudioMic => ControlsRefresh {
-                audio: Some(crate::modules::audio::get_info()),
-                mic: Some(crate::modules::mic::get_info()),
+                audio: Some(self.audio_backend.audio_info()),
+                mic: Some(self.audio_backend.mic_info()),
                 ..ControlsRefresh::default()
             },
             ControlsRefreshKind::Brightness => ControlsRefresh {
-                brightness: Some(BrightnessSnapshot::from_label(
-                    crate::modules::brightness::get_brightness(),
-                )),
+                brightness: Some(self.brightness_backend.snapshot()),
                 ..ControlsRefresh::default()
             },
             ControlsRefreshKind::Fan => ControlsRefresh {
@@ -208,20 +234,18 @@ impl ControlsService {
                 ..ControlsRefresh::default()
             },
             ControlsRefreshKind::Power => ControlsRefresh {
-                power_profile: Some(crate::modules::power::get_profile()),
+                power_profile: Some(self.power_backend.profile()),
                 ..ControlsRefresh::default()
             },
             ControlsRefreshKind::Bluetooth => ControlsRefresh {
-                bluetooth_enabled: Some(crate::modules::bluetooth::get_bluetooth_info()),
+                bluetooth_enabled: Some(self.bluetooth_backend.enabled()),
                 ..ControlsRefresh::default()
             },
             ControlsRefreshKind::Slow => ControlsRefresh {
-                brightness: Some(BrightnessSnapshot::from_label(
-                    crate::modules::brightness::get_brightness(),
-                )),
+                brightness: Some(self.brightness_backend.snapshot()),
                 battery: Some(crate::modules::battery::get_battery_info()),
-                power_profile: Some(crate::modules::power::get_profile()),
-                bluetooth_enabled: Some(crate::modules::bluetooth::get_bluetooth_info()),
+                power_profile: Some(self.power_backend.profile()),
+                bluetooth_enabled: Some(self.bluetooth_backend.enabled()),
                 ..ControlsRefresh::default()
             },
         }
@@ -230,23 +254,23 @@ impl ControlsService {
     pub async fn execute(&self, command: ControlsCommand) -> ControlsFollowUp {
         match command {
             ControlsCommand::SetVolume(volume) => {
-                crate::modules::audio::set_volume(volume).await;
+                self.audio_backend.set_volume(volume).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
             ControlsCommand::ToggleAudioMute => {
-                crate::modules::audio::toggle_mute().await;
+                self.audio_backend.toggle_audio_mute().await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
             ControlsCommand::SetMicVolume(volume) => {
-                crate::modules::mic::set_volume(volume).await;
+                self.audio_backend.set_mic_volume(volume).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
             ControlsCommand::ToggleMicMute => {
-                crate::modules::mic::toggle_mute().await;
+                self.audio_backend.toggle_mic_mute().await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
             ControlsCommand::SetBrightness(percent) => {
-                crate::modules::brightness::set_brightness(percent);
+                self.brightness_backend.set_brightness(percent);
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Brightness)
             }
             ControlsCommand::SetFanLevel(level) => {
@@ -254,32 +278,217 @@ impl ControlsService {
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Fan)
             }
             ControlsCommand::SetPowerProfile(profile) => {
-                crate::modules::power::set_profile(&profile).await;
+                self.power_backend.set_profile(profile).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Power)
             }
             ControlsCommand::ToggleBluetooth(enabled) => {
-                let _ = crate::modules::bluetooth::toggle_bluetooth(enabled);
+                let _ = self.bluetooth_backend.toggle(enabled);
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
             }
             ControlsCommand::OpenOverskride => {
-                let _ = crate::modules::bluetooth::open_overskride();
+                let _ = self.bluetooth_backend.open_overskride();
                 ControlsFollowUp::RefreshCompositor
             }
         }
     }
 
-    pub fn subscription() -> iced::Subscription<ControlsEvent> {
-        crate::modules::audio::subscription()
+    pub fn subscription(&self) -> iced::Subscription<ControlsEvent> {
+        self.audio_backend.subscription()
+    }
+}
+
+impl Default for ControlsService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BrightnessSnapshot, ControlsCommand, ControlsRefresh, ControlsService, ControlsSnapshot,
+        AudioInfo, BrightnessSnapshot, ControlsCommand, ControlsRefresh, ControlsRefreshKind,
+        ControlsService, ControlsSnapshot,
     };
-    use crate::modules::audio::AudioInfo;
     use crate::modules::mic::MicInfo;
+    use std::sync::{Arc, Mutex};
+
+    type SharedStringCalls = Arc<Mutex<Vec<String>>>;
+    type SharedU32Calls = Arc<Mutex<Vec<u32>>>;
+    type SharedBoolCalls = Arc<Mutex<Vec<bool>>>;
+    type SharedCount = Arc<Mutex<u32>>;
+
+    #[derive(Clone)]
+    struct MockAudioBackend {
+        audio: AudioInfo,
+        mic: MicInfo,
+        calls: SharedStringCalls,
+    }
+
+    impl crate::services::controls_backends::AudioBackend for MockAudioBackend {
+        fn audio_info(&self) -> AudioInfo {
+            self.audio.clone()
+        }
+
+        fn mic_info(&self) -> MicInfo {
+            self.mic.clone()
+        }
+
+        fn set_volume(
+            &self,
+            percent: u32,
+        ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls.lock().unwrap().push(format!("set_volume:{percent}"));
+            })
+        }
+
+        fn toggle_audio_mute(&self) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls.lock().unwrap().push("toggle_audio_mute".to_string());
+            })
+        }
+
+        fn set_mic_volume(
+            &self,
+            percent: u32,
+        ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("set_mic_volume:{percent}"));
+            })
+        }
+
+        fn toggle_mic_mute(&self) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls.lock().unwrap().push("toggle_mic_mute".to_string());
+            })
+        }
+
+        fn subscription(&self) -> iced::Subscription<super::ControlsEvent> {
+            iced::Subscription::none()
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockBrightnessBackend {
+        snapshot: BrightnessSnapshot,
+        calls: SharedU32Calls,
+    }
+
+    impl crate::services::controls_backends::BrightnessBackend for MockBrightnessBackend {
+        fn snapshot(&self) -> BrightnessSnapshot {
+            self.snapshot.clone()
+        }
+
+        fn set_brightness(&self, percent: u32) {
+            self.calls.lock().unwrap().push(percent);
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockBluetoothBackend {
+        enabled: bool,
+        toggle_calls: SharedBoolCalls,
+        overskride_calls: SharedCount,
+    }
+
+    impl crate::services::controls_backends::BluetoothBackend for MockBluetoothBackend {
+        fn enabled(&self) -> bool {
+            self.enabled
+        }
+
+        fn toggle(&self, enable: bool) -> bool {
+            self.toggle_calls.lock().unwrap().push(enable);
+            true
+        }
+
+        fn open_overskride(&self) -> bool {
+            let mut calls = self.overskride_calls.lock().unwrap();
+            *calls += 1;
+            true
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockPowerBackend {
+        profile: String,
+        calls: SharedStringCalls,
+    }
+
+    impl crate::services::controls_backends::PowerBackend for MockPowerBackend {
+        fn profile(&self) -> String {
+            self.profile.clone()
+        }
+
+        fn set_profile(
+            &self,
+            profile: String,
+        ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls.lock().unwrap().push(profile);
+            })
+        }
+    }
+
+    type TestServiceParts = (
+        ControlsService,
+        SharedStringCalls,
+        SharedU32Calls,
+        SharedBoolCalls,
+        SharedCount,
+        SharedStringCalls,
+    );
+
+    fn test_service() -> TestServiceParts {
+        let audio_calls = Arc::new(Mutex::new(Vec::new()));
+        let brightness_calls = Arc::new(Mutex::new(Vec::new()));
+        let bluetooth_calls = Arc::new(Mutex::new(Vec::new()));
+        let overskride_calls = Arc::new(Mutex::new(0));
+        let power_calls = Arc::new(Mutex::new(Vec::new()));
+
+        let service = ControlsService::with_backends(
+            Arc::new(MockAudioBackend {
+                audio: AudioInfo {
+                    volume: 55,
+                    muted: true,
+                },
+                mic: MicInfo {
+                    volume: 12,
+                    muted: false,
+                },
+                calls: audio_calls.clone(),
+            }),
+            Arc::new(MockBrightnessBackend {
+                snapshot: BrightnessSnapshot::from_percent(64),
+                calls: brightness_calls.clone(),
+            }),
+            Arc::new(MockBluetoothBackend {
+                enabled: true,
+                toggle_calls: bluetooth_calls.clone(),
+                overskride_calls: overskride_calls.clone(),
+            }),
+            Arc::new(MockPowerBackend {
+                profile: "performance".to_string(),
+                calls: power_calls.clone(),
+            }),
+        );
+
+        (
+            service,
+            audio_calls,
+            brightness_calls,
+            bluetooth_calls,
+            overskride_calls,
+            power_calls,
+        )
+    }
 
     #[test]
     fn brightness_snapshot_parses_label_to_percent() {
@@ -292,6 +501,30 @@ mod tests {
     fn preview_command_updates_local_snapshot() {
         let mut service = ControlsService {
             snapshot: ControlsSnapshot::default(),
+            audio_backend: Arc::new(MockAudioBackend {
+                audio: AudioInfo {
+                    volume: 0,
+                    muted: false,
+                },
+                mic: MicInfo {
+                    volume: 0,
+                    muted: false,
+                },
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            brightness_backend: Arc::new(MockBrightnessBackend {
+                snapshot: BrightnessSnapshot::default(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            bluetooth_backend: Arc::new(MockBluetoothBackend {
+                enabled: false,
+                toggle_calls: Arc::new(Mutex::new(Vec::new())),
+                overskride_calls: Arc::new(Mutex::new(0)),
+            }),
+            power_backend: Arc::new(MockPowerBackend {
+                profile: "balanced".to_string(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
         };
         service.preview_command(&ControlsCommand::SetVolume(73));
         service.preview_command(&ControlsCommand::SetBrightness(64));
@@ -306,6 +539,30 @@ mod tests {
     fn apply_refresh_replaces_audio_and_mic_state() {
         let mut service = ControlsService {
             snapshot: ControlsSnapshot::default(),
+            audio_backend: Arc::new(MockAudioBackend {
+                audio: AudioInfo {
+                    volume: 0,
+                    muted: false,
+                },
+                mic: MicInfo {
+                    volume: 0,
+                    muted: false,
+                },
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            brightness_backend: Arc::new(MockBrightnessBackend {
+                snapshot: BrightnessSnapshot::default(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            bluetooth_backend: Arc::new(MockBluetoothBackend {
+                enabled: false,
+                toggle_calls: Arc::new(Mutex::new(Vec::new())),
+                overskride_calls: Arc::new(Mutex::new(0)),
+            }),
+            power_backend: Arc::new(MockPowerBackend {
+                profile: "balanced".to_string(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
         };
         service.apply_refresh(ControlsRefresh {
             audio: Some(AudioInfo {
@@ -320,7 +577,67 @@ mod tests {
         });
 
         assert_eq!(service.snapshot().audio.volume, 55);
-        assert!(service.snapshot().mic.muted);
         assert_eq!(service.snapshot().mic.volume, 12);
+        assert!(service.snapshot().mic.muted);
+    }
+
+    #[tokio::test]
+    async fn refresh_uses_backend_snapshots_for_migrated_domains() {
+        let (service, ..) = test_service();
+
+        let audio_refresh = service.refresh(ControlsRefreshKind::AudioMic).await;
+        let brightness_refresh = service.refresh(ControlsRefreshKind::Brightness).await;
+        let power_refresh = service.refresh(ControlsRefreshKind::Power).await;
+        let bluetooth_refresh = service.refresh(ControlsRefreshKind::Bluetooth).await;
+
+        assert_eq!(audio_refresh.audio.unwrap().volume, 55);
+        assert_eq!(audio_refresh.mic.unwrap().volume, 12);
+        assert_eq!(brightness_refresh.brightness.unwrap().percent, 64);
+        assert_eq!(power_refresh.power_profile.unwrap(), "performance");
+        assert!(bluetooth_refresh.bluetooth_enabled.unwrap());
+    }
+
+    #[tokio::test]
+    async fn execute_routes_commands_to_backends() {
+        let (
+            service,
+            audio_calls,
+            brightness_calls,
+            bluetooth_calls,
+            overskride_calls,
+            power_calls,
+        ) = test_service();
+
+        let follow_up = service.execute(ControlsCommand::SetVolume(77)).await;
+        assert_eq!(
+            follow_up,
+            super::ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
+        );
+        let _ = service.execute(ControlsCommand::ToggleAudioMute).await;
+        let _ = service.execute(ControlsCommand::SetMicVolume(22)).await;
+        let _ = service.execute(ControlsCommand::ToggleMicMute).await;
+        let _ = service.execute(ControlsCommand::SetBrightness(31)).await;
+        let _ = service
+            .execute(ControlsCommand::SetPowerProfile("balanced".to_string()))
+            .await;
+        let _ = service
+            .execute(ControlsCommand::ToggleBluetooth(false))
+            .await;
+        let follow_up = service.execute(ControlsCommand::OpenOverskride).await;
+
+        assert_eq!(
+            audio_calls.lock().unwrap().as_slice(),
+            [
+                "set_volume:77",
+                "toggle_audio_mute",
+                "set_mic_volume:22",
+                "toggle_mic_mute",
+            ]
+        );
+        assert_eq!(brightness_calls.lock().unwrap().as_slice(), [31]);
+        assert_eq!(power_calls.lock().unwrap().as_slice(), ["balanced"]);
+        assert_eq!(bluetooth_calls.lock().unwrap().as_slice(), [false]);
+        assert_eq!(*overskride_calls.lock().unwrap(), 1);
+        assert_eq!(follow_up, super::ControlsFollowUp::RefreshCompositor);
     }
 }
