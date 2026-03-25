@@ -297,7 +297,7 @@ impl ThinkPadBar {
                 self.perf.workspace_refresh_coalesced.saturating_add(1);
             return Task::none();
         }
-        let compositor_service = self.compositor_service;
+        let compositor_service = self.compositor_service.clone();
         Task::perform(
             async move { compositor_service.refresh().await },
             Message::CompositorRefreshed,
@@ -568,7 +568,7 @@ impl ThinkPadBar {
                 }
             }
             Message::SwitchWorkspace(w_id, ws_name) => {
-                let compositor_service = self.compositor_service;
+                let compositor_service = self.compositor_service.clone();
                 return Task::perform(
                     async move { compositor_service.switch_workspace(w_id, &ws_name) },
                     |_| Message::RefreshCompositor,
@@ -726,7 +726,7 @@ impl ThinkPadBar {
                 );
             }
             Message::NextKeyboardLayout => {
-                let compositor_service = self.compositor_service;
+                let compositor_service = self.compositor_service.clone();
                 return Task::perform(
                     async move { compositor_service.next_keyboard_layout() },
                     |_| Message::RefreshCompositor,
@@ -777,7 +777,7 @@ impl ThinkPadBar {
                 }) = self.tray_ui_service.handle_primary_click(&id)
                 {
                     let id_for_result = id.clone();
-                    let compositor_service = self.compositor_service;
+                    let compositor_service = self.compositor_service.clone();
                     return Task::perform(
                         async move {
                             for c in candidates {

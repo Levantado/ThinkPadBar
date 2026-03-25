@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.71] - 2026-03-25
+
+### Changed
+- Completed the practical `M1 Network Runtime` cut:
+  - `services/network/iwd.rs` now owns IWD path discovery, runtime path caching, D-Bus proxy calls, scan/connect/toggle operations, and CLI fallbacks instead of delegating those flows back into `modules/wifi.rs`;
+  - `modules/wifi.rs` has been removed from the compiled module graph, so the Wi-Fi domain no longer hides a second runtime owner outside `NetworkService`;
+  - preserved regression coverage for object-path validation, IWD path-shape parsing, ANSI-stripped `iwctl` network parsing, SSID fallback parsing, and `iwctl` passphrase argument handling.
+- Started and completed the practical `M2 Compositor Runtime` first slice in the same release:
+  - introduced `services/compositor/types.rs` and `services/compositor/hyprland.rs`, moving Hyprland IPC, event subscription, workspace queries, active-window lookup, keyboard-layout handling, cursor lookup, and app-location switching into the compositor service layer;
+  - `CompositorService` is now backed by a real `HyprlandBackend` runtime owner instead of delegating into `modules/workspaces.rs` and `modules/keyboard.rs`;
+  - removed `modules/workspaces.rs` and `modules/keyboard.rs` from the compiled module graph, keeping the app on a service-owned compositor boundary.
+
+### Quality
+- Added or preserved regression tests for:
+  - Hyprland workspace dispatch rules, special-workspace visibility parsing, cursor-position parsing, client matching, layout-label normalization, and keyboard dispatch success detection;
+  - IWD runtime parsing and fallback argument generation after the service-layer migration.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` (`86` tests passed).
+
 ## [0.6.70] - 2026-03-25
 
 ### Changed
