@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.63] - 2026-03-25
+
+### Changed
+- Continued architecture work for plan items 3/4 (stateful services + app decoupling):
+  - `services/compositor` is now stateful via `CompositorService`:
+    - owns backend access plus deterministic `WorkspaceRefreshCoalescer`,
+    - exposes typed snapshots (`CompositorSnapshot`, `RefreshResult`) and refresh flow.
+  - `services/network` is now stateful via `NetworkService`:
+    - owns network paths/config state and backend kind (`Iwd`),
+    - app Wi-Fi flows now call service instance methods (`get_wifi_info`, `scan_networks`, `connect_network`, `toggle_wifi`).
+- `app.rs` orchestration was reduced:
+  - workspace refresh coalescing moved from app-local flags to `CompositorService`,
+  - compositor and network interactions now go through owned service instances in app state.
+
+### Quality
+- Added regression tests for compositor coalescer/service snapshot and network service config ownership.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.62] - 2026-03-25
 
 ### Fixed

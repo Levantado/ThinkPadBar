@@ -1,8 +1,53 @@
 use iced::Subscription;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Instant;
 
 pub use crate::modules::workspaces::WorkspaceInfo;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositorSnapshot {
+    pub workspaces: Vec<WorkspaceInfo>,
+    pub active_window: String,
+    pub special_workspace_visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshResult {
+    pub snapshot: CompositorSnapshot,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorkspaceRefreshCoalescer {
+    inflight: bool,
+    queued: bool,
+}
+
+impl WorkspaceRefreshCoalescer {
+    pub fn request(&mut self) -> bool {
+        if self.inflight {
+            self.queued = true;
+            return false;
+        }
+        self.inflight = true;
+        true
+    }
+
+    pub fn complete(&mut self) -> bool {
+        self.inflight = false;
+        if self.queued {
+            self.queued = false;
+            return true;
+        }
+        false
+    }
+
+    #[cfg(test)]
+    fn state(&self) -> (bool, bool) {
+        (self.inflight, self.queued)
+    }
+}
 
 pub trait CompositorBackend {
     fn get_workspaces(&self) -> Vec<WorkspaceInfo>;
@@ -57,46 +102,88 @@ impl CompositorBackend for HyprlandBackend {
     }
 }
 
-fn active_backend() -> HyprlandBackend {
-    HyprlandBackend
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CompositorService {
+    backend: HyprlandBackend,
+    refresh: WorkspaceRefreshCoalescer,
 }
 
-pub fn get_workspaces() -> Vec<WorkspaceInfo> {
-    active_backend().get_workspaces()
-}
+impl CompositorService {
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-pub fn is_special_workspace_visible() -> bool {
-    active_backend().is_special_workspace_visible()
-}
+    pub fn snapshot(&self) -> CompositorSnapshot {
+        CompositorSnapshot {
+            workspaces: self.backend.get_workspaces(),
+            active_window: self.backend.get_active_window_title(),
+            special_workspace_visible: self.backend.is_special_workspace_visible(),
+        }
+    }
 
-pub fn get_active_window_title() -> String {
-    active_backend().get_active_window_title()
-}
+    pub async fn refresh(&self) -> RefreshResult {
+        let started = Instant::now();
+        RefreshResult {
+            snapshot: self.snapshot(),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        }
+    }
 
-pub fn switch_workspace(id: i32, name: &str) {
-    active_backend().switch_workspace(id, name);
-}
+    pub fn request_refresh(&mut self) -> bool {
+        self.refresh.request()
+    }
 
-pub fn subscription() -> Subscription<crate::app::Message> {
-    active_backend().subscription()
+    pub fn complete_refresh(&mut self) -> bool {
+        self.refresh.complete()
+    }
+
+    pub fn switch_workspace(&self, id: i32, name: &str) {
+        self.backend.switch_workspace(id, name);
+    }
+
+    pub fn subscription(&self) -> Subscription<crate::app::Message> {
+        self.backend.subscription()
+    }
+
+    pub fn cursor_position(&self) -> Option<(i32, i32)> {
+        self.backend.cursor_position()
+    }
+
+    pub async fn find_and_switch_to_app(&self, name: String) -> bool {
+        self.backend.find_and_switch_to_app(name).await
+    }
 }
 
 pub fn cursor_position() -> Option<(i32, i32)> {
-    active_backend().cursor_position()
-}
-
-pub async fn find_and_switch_to_app(name: String) -> bool {
-    active_backend().find_and_switch_to_app(name).await
+    CompositorService::new().cursor_position()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cursor_position, HyprlandBackend};
+    use super::{CompositorService, WorkspaceRefreshCoalescer};
 
     #[test]
     fn cursor_position_absent_without_runtime_env() {
-        // In unit-test environment Hyprland runtime is typically absent.
-        let _ = cursor_position();
-        let _ = HyprlandBackend;
+        let _ = CompositorService::new().cursor_position();
+    }
+
+    #[test]
+    fn refresh_coalescer_behaves_deterministically() {
+        let mut coalescer = WorkspaceRefreshCoalescer::default();
+        assert_eq!(coalescer.state(), (false, false));
+        assert!(coalescer.request());
+        assert_eq!(coalescer.state(), (true, false));
+        assert!(!coalescer.request());
+        assert_eq!(coalescer.state(), (true, true));
+        assert!(coalescer.complete());
+        assert_eq!(coalescer.state(), (false, false));
+        assert!(!coalescer.complete());
+        assert_eq!(coalescer.state(), (false, false));
+    }
+
+    #[test]
+    fn service_snapshot_call_is_available() {
+        let service = CompositorService::new();
+        let _ = service.snapshot();
     }
 }

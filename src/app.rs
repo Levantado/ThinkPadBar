@@ -8,7 +8,6 @@ use iced::{
     Alignment, Color, Element, Length, Padding, Task, Theme,
 };
 use std::fmt::Write as _;
-use std::time::Instant;
 use tracing::info;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,8 +64,8 @@ pub struct ThinkPadBar {
     sys_data: crate::modules::system::SysData,
     calendar_offset: i32,
     tray: crate::modules::tray::Tray,
-    workspace_refresh_inflight: bool,
-    workspace_refresh_queued: bool,
+    compositor_service: crate::services::compositor::CompositorService,
+    network_service: crate::services::network::NetworkService,
     perf: PerfCounters,
     show_debug_overlay: bool,
     debug_ui_enabled: bool,
@@ -324,28 +323,6 @@ impl ThinkPadBar {
         let _ = write!(&mut self.audio_str, "{}%", self.audio.volume);
     }
 
-    fn request_workspace_refresh(&mut self) -> bool {
-        self.perf.workspace_refresh_requested =
-            self.perf.workspace_refresh_requested.saturating_add(1);
-        if self.workspace_refresh_inflight {
-            self.perf.workspace_refresh_coalesced =
-                self.perf.workspace_refresh_coalesced.saturating_add(1);
-            self.workspace_refresh_queued = true;
-            return false;
-        }
-        self.workspace_refresh_inflight = true;
-        true
-    }
-
-    fn complete_workspace_refresh(&mut self) -> bool {
-        self.workspace_refresh_inflight = false;
-        if self.workspace_refresh_queued {
-            self.workspace_refresh_queued = false;
-            return true;
-        }
-        false
-    }
-
     fn spawn_command_and_reap(bin: &str, args: &[&str]) {
         if let Ok(mut child) = std::process::Command::new(bin)
             .args(args)
@@ -468,6 +445,9 @@ impl ThinkPadBar {
 
             let mut monitor = crate::modules::system::SysMonitor::new();
             let initial_sys_data = monitor.update(false);
+            let compositor_service = crate::services::compositor::CompositorService::new();
+            let compositor_snapshot = compositor_service.snapshot();
+            let network_service = crate::services::network::NetworkService::new(&cfg.network);
 
             // Try to connect to D-Bus synchronously for initialization if possible,
             // or just let it be None and connect later.
@@ -479,10 +459,9 @@ impl ThinkPadBar {
                     config: cfg,
                     dbus_conn: None, // Will be initialized on first tick or via Task
                     clock: Local::now().format("%a %d %b %H:%M").to_string(),
-                    workspaces: crate::services::compositor::get_workspaces(),
-                    special_workspace_visible:
-                        crate::services::compositor::is_special_workspace_visible(),
-                    active_window: crate::services::compositor::get_active_window_title(),
+                    workspaces: compositor_snapshot.workspaces,
+                    special_workspace_visible: compositor_snapshot.special_workspace_visible,
+                    active_window: compositor_snapshot.active_window,
                     brightness: crate::modules::brightness::get_brightness(),
                     audio: crate::modules::audio::get_info(),
                     mic: crate::modules::mic::get_info(),
@@ -514,8 +493,8 @@ impl ThinkPadBar {
                     sys_data: initial_sys_data,
                     calendar_offset: 0,
                     tray: crate::modules::tray::Tray::new(),
-                    workspace_refresh_inflight: false,
-                    workspace_refresh_queued: false,
+                    compositor_service,
+                    network_service,
                     perf: PerfCounters::default(),
                     show_debug_overlay: false,
                     debug_ui_enabled: Self::debug_ui_enabled(),
@@ -597,12 +576,9 @@ impl ThinkPadBar {
 
                 if let Some(conn) = &self.dbus_conn {
                     let conn = conn.clone();
-                    let a_path = self.config.network.adapter_path.clone();
-                    let s_path = self.config.network.station_path.clone();
+                    let network_service = self.network_service.clone();
                     tasks.push(Task::perform(
-                        async move {
-                            crate::services::network::get_wifi_info(&conn, &a_path, &s_path).await
-                        },
+                        async move { network_service.get_wifi_info(&conn).await },
                         Message::WifiUpdated,
                     ));
                 } else {
@@ -652,23 +628,24 @@ impl ThinkPadBar {
                 }
             }
             Message::UpdateWorkspaces => {
-                if !self.request_workspace_refresh() {
+                self.perf.workspace_refresh_requested =
+                    self.perf.workspace_refresh_requested.saturating_add(1);
+                if !self.compositor_service.request_refresh() {
+                    self.perf.workspace_refresh_coalesced =
+                        self.perf.workspace_refresh_coalesced.saturating_add(1);
                     return Task::none();
                 }
+                let compositor_service = self.compositor_service;
                 return Task::perform(
-                    async {
-                        let started = Instant::now();
-                        let ws = crate::services::compositor::get_workspaces();
-                        let special_visible =
-                            crate::services::compositor::is_special_workspace_visible();
-                        let title = crate::services::compositor::get_active_window_title();
+                    async move {
+                        let refreshed = compositor_service.refresh().await;
                         let layout = crate::modules::keyboard::get_layout();
                         (
-                            ws,
-                            title,
+                            refreshed.snapshot.workspaces,
+                            refreshed.snapshot.active_window,
                             layout,
-                            special_visible,
-                            started.elapsed().as_millis() as u64,
+                            refreshed.snapshot.special_workspace_visible,
+                            refreshed.elapsed_ms,
                         )
                     },
                     |(ws, title, layout, special_visible, elapsed_ms)| {
@@ -707,19 +684,20 @@ impl ThinkPadBar {
                     self.wifi_selected_ssid = None;
                     self.calendar_offset = 0;
                     let mut tasks = self.popup_hide_tasks();
-                    if self.complete_workspace_refresh() {
+                    if self.compositor_service.complete_refresh() {
                         tasks.push(Task::perform(async {}, |_| Message::UpdateWorkspaces));
                     }
                     return Task::batch(tasks);
                 }
 
-                if self.complete_workspace_refresh() {
+                if self.compositor_service.complete_refresh() {
                     return Task::perform(async {}, |_| Message::UpdateWorkspaces);
                 }
             }
             Message::SwitchWorkspace(w_id, ws_name) => {
+                let compositor_service = self.compositor_service;
                 return Task::perform(
-                    async move { crate::services::compositor::switch_workspace(w_id, &ws_name) },
+                    async move { compositor_service.switch_workspace(w_id, &ws_name) },
                     |_| Message::UpdateWorkspaces,
                 );
             }
@@ -813,9 +791,9 @@ impl ThinkPadBar {
                         self.wifi_status_message = "Сканирование сетей...".to_string();
                         self.available_networks.clear();
                         let conn = conn.clone();
-                        let s_path = self.config.network.station_path.clone();
+                        let network_service = self.network_service.clone();
                         return Task::perform(
-                            async move { crate::services::network::scan_networks(&conn, &s_path).await },
+                            async move { network_service.scan_networks(&conn).await },
                             Message::NetworksScanned,
                         );
                     }
@@ -839,14 +817,9 @@ impl ThinkPadBar {
                         self.wifi_connecting_ssid = Some(ssid.clone());
                         self.wifi_status_message = format!("Подключение к {}...", ssid);
                         let conn = conn.clone();
-                        let s_path = self.config.network.station_path.clone();
+                        let network_service = self.network_service.clone();
                         return Task::perform(
-                            async move {
-                                crate::services::network::connect_network(
-                                    &conn, &s_path, ssid, None,
-                                )
-                                .await
-                            },
+                            async move { network_service.connect_network(&conn, ssid, None).await },
                             Message::WifiConnectResult,
                         );
                     }
@@ -870,16 +843,12 @@ impl ThinkPadBar {
                     let pass = self.wifi_password_input.clone();
                     self.wifi_selected_ssid = None;
                     self.show_wifi_menu = false;
-                    let s_path = self.config.network.station_path.clone();
+                    let network_service = self.network_service.clone();
                     return Task::perform(
                         async move {
-                            crate::services::network::connect_network(
-                                &conn,
-                                &s_path,
-                                ssid,
-                                Some(pass),
-                            )
-                            .await
+                            network_service
+                                .connect_network(&conn, ssid, Some(pass))
+                                .await
                         },
                         Message::WifiConnectResult,
                     );
@@ -904,8 +873,7 @@ impl ThinkPadBar {
             Message::ToggleWifi(enable) => {
                 if let Some(conn) = &self.dbus_conn {
                     let conn = conn.clone();
-                    let a_path = self.config.network.adapter_path.clone();
-                    let s_path = self.config.network.station_path.clone();
+                    let network_service = self.network_service.clone();
                     self.wifi_status_message = if enable {
                         "Включение Wi-Fi...".to_string()
                     } else {
@@ -913,10 +881,7 @@ impl ThinkPadBar {
                     };
                     self.wifi.enabled = enable;
                     return Task::perform(
-                        async move {
-                            crate::services::network::toggle_wifi(&conn, &a_path, &s_path, enable)
-                                .await
-                        },
+                        async move { network_service.toggle_wifi(&conn, enable).await },
                         |_| Message::TickSlow(chrono::Local::now()),
                     );
                 }
@@ -991,10 +956,11 @@ impl ThinkPadBar {
                 if let Some(item) = self.tray.items.get(&id) {
                     let candidates = Self::tray_search_candidates(item, &id);
                     let id_for_result = id.clone();
+                    let compositor_service = self.compositor_service;
                     return Task::perform(
                         async move {
                             for c in candidates {
-                                if crate::services::compositor::find_and_switch_to_app(c).await {
+                                if compositor_service.find_and_switch_to_app(c).await {
                                     return true;
                                 }
                             }
@@ -1006,7 +972,7 @@ impl ThinkPadBar {
             }
             Message::TrayItemRightClicked(id) => {
                 if self.tray.has_menu_entries(&id) {
-                    self.tray_menu_cursor = crate::services::compositor::cursor_position();
+                    self.tray_menu_cursor = self.compositor_service.cursor_position();
                     if self.popup == Popup::TrayMenu(id.clone()) {
                         self.popup = Popup::None;
                         self.tray_menu_cursor = None;
@@ -2707,7 +2673,7 @@ impl ThinkPadBar {
                 .map(|_| Message::TickThermal(chrono::Local::now())),
             iced::time::every(std::time::Duration::from_secs(slow_secs))
                 .map(|_| Message::TickSlow(chrono::Local::now())),
-            crate::services::compositor::subscription(),
+            self.compositor_service.subscription(),
             crate::services::tray::subscription().map(Message::TrayMessage),
             crate::modules::audio::subscription(),
             iced::event::listen_with(|event, _status, window| match event {
@@ -2839,24 +2805,20 @@ mod tests {
             sys_data: crate::modules::system::SysData::default(),
             calendar_offset: 0,
             tray: crate::modules::tray::Tray::new(),
-            workspace_refresh_inflight: false,
-            workspace_refresh_queued: false,
+            compositor_service: crate::services::compositor::CompositorService::new(),
+            network_service: crate::services::network::NetworkService::new(
+                &crate::config::NetworkConfig::default(),
+            ),
             perf: super::PerfCounters::default(),
             show_debug_overlay: false,
             debug_ui_enabled: false,
             tray_menu_cursor: None,
         };
 
-        assert!(bar.request_workspace_refresh());
-        assert!(!bar.request_workspace_refresh());
-        assert!(bar.workspace_refresh_inflight);
-        assert!(bar.workspace_refresh_queued);
-
-        assert!(bar.complete_workspace_refresh());
-        assert!(!bar.workspace_refresh_inflight);
-        assert!(!bar.workspace_refresh_queued);
-
-        assert!(!bar.complete_workspace_refresh());
+        assert!(bar.compositor_service.request_refresh());
+        assert!(!bar.compositor_service.request_refresh());
+        assert!(bar.compositor_service.complete_refresh());
+        assert!(!bar.compositor_service.complete_refresh());
     }
 
     #[test]
