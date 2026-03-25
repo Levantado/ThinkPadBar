@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.55] - 2026-03-25
+
+### Changed
+- Debug UI controls are now shown only in debug mode:
+  - `DBG` pill in the main bar is hidden unless `RUST_LOG` enables `debug`/`trace` for `thinkpadbar`,
+  - `Observability` and `Runtime Contract` sections in `System Info` are hidden in non-debug runs.
+- `ToggleDebugOverlay` now has a guard: in non-debug mode it does not enable overlay state.
+
+### Quality
+- Added regression test for `RUST_LOG` parsing used by debug-UI gating.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.54] - 2026-03-25
 
 ### Fixed

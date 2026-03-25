@@ -68,6 +68,7 @@ pub struct ThinkPadBar {
     workspace_refresh_queued: bool,
     perf: PerfCounters,
     show_debug_overlay: bool,
+    debug_ui_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -151,6 +152,38 @@ pub enum Message {
 }
 
 impl ThinkPadBar {
+    fn debug_ui_enabled_from_rust_log(raw: Option<&str>) -> bool {
+        let Some(raw) = raw else {
+            return false;
+        };
+        for directive in raw.split(',').map(str::trim).filter(|d| !d.is_empty()) {
+            if let Some((target, level)) = directive.split_once('=') {
+                let level = level.trim().to_ascii_lowercase();
+                let is_debug_level = level == "debug" || level == "trace";
+                if !is_debug_level {
+                    continue;
+                }
+                let target = target.trim();
+                if target.is_empty()
+                    || target == "thinkpadbar"
+                    || target.starts_with("thinkpadbar::")
+                {
+                    return true;
+                }
+            } else {
+                let level = directive.to_ascii_lowercase();
+                if level == "debug" || level == "trace" {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn debug_ui_enabled() -> bool {
+        Self::debug_ui_enabled_from_rust_log(std::env::var("RUST_LOG").ok().as_deref())
+    }
+
     fn trunc_with_ellipsis(input: &str, max_chars: usize) -> String {
         let count = input.chars().count();
         if count <= max_chars {
@@ -440,6 +473,7 @@ impl ThinkPadBar {
                     workspace_refresh_queued: false,
                     perf: PerfCounters::default(),
                     show_debug_overlay: false,
+                    debug_ui_enabled: Self::debug_ui_enabled(),
                 },
                 Task::batch(vec![main_task, popup_task]),
             )
@@ -564,7 +598,11 @@ impl ThinkPadBar {
                 Self::spawn_command_and_reap(bin, args);
             }
             Message::ToggleDebugOverlay => {
-                self.show_debug_overlay = !self.show_debug_overlay;
+                if self.debug_ui_enabled {
+                    self.show_debug_overlay = !self.show_debug_overlay;
+                } else {
+                    self.show_debug_overlay = false;
+                }
             }
             Message::UpdateWorkspaces => {
                 if !self.request_workspace_refresh() {
@@ -1334,34 +1372,35 @@ impl ThinkPadBar {
                 ..Default::default()
             });
 
-        // 6. Debug toggle pill
-        let dbg_pill = container(text("DBG").size(12))
-            .padding(Padding::from([4, 10]))
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(pill_bg)),
-                text_color: Some(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
-                border: iced::Border {
-                    radius: pill_border_radius.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
+        let mut right_row = Row::new()
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .push(tray_row)
+            .push(mouse_area(sys_pill).on_press(Message::TogglePopup(Popup::SystemMonitor)))
+            .push(mouse_area(hw_pill).on_press(Message::TogglePopup(Popup::ControlCenter)))
+            .push(mouse_area(combined_pill).on_press(Message::TogglePopup(Popup::ControlCenter)))
+            .push(mouse_area(kbd_pill).on_press(Message::NextKeyboardLayout));
 
-        let right = container(
-            Row::new()
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .push(tray_row)
-                .push(mouse_area(sys_pill).on_press(Message::TogglePopup(Popup::SystemMonitor)))
-                .push(mouse_area(hw_pill).on_press(Message::TogglePopup(Popup::ControlCenter)))
-                .push(
-                    mouse_area(combined_pill).on_press(Message::TogglePopup(Popup::ControlCenter)),
-                )
-                .push(mouse_area(kbd_pill).on_press(Message::NextKeyboardLayout))
-                .push(mouse_area(dbg_pill).on_press(Message::ToggleDebugOverlay))
-                .push(mouse_area(clock_pill).on_press(Message::TogglePopup(Popup::Calendar))),
-        )
-        .width(Length::Shrink);
+        if self.debug_ui_enabled {
+            // Debug toggle pill (shown only in debug mode).
+            let dbg_pill = container(text("DBG").size(12))
+                .padding(Padding::from([4, 10]))
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(pill_bg)),
+                    text_color: Some(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                    border: iced::Border {
+                        radius: pill_border_radius.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            right_row = right_row.push(mouse_area(dbg_pill).on_press(Message::ToggleDebugOverlay));
+        }
+
+        right_row =
+            right_row.push(mouse_area(clock_pill).on_press(Message::TogglePopup(Popup::Calendar)));
+
+        let right = container(right_row).width(Length::Shrink);
 
         let center_overlay = container(center)
             .width(Length::Fixed(340.0))
@@ -1387,7 +1426,7 @@ impl ThinkPadBar {
                 .align_y(iced::alignment::Vertical::Center)
                 .into(),
         );
-        if self.show_debug_overlay {
+        if self.debug_ui_enabled && self.show_debug_overlay {
             let overlay = container(
                 container(
                     text(format!(
@@ -1609,47 +1648,49 @@ impl ThinkPadBar {
                     .into()
             };
 
-            let col =
-                Column::new()
-                    .spacing(12)
-                    .push(
-                        Row::new()
-                            .align_y(Alignment::Center)
-                            .push(text("System Info").size(18).style(move |_| {
-                                iced::widget::text::Style {
-                                    color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                                }
-                            }))
-                            .push(Space::with_width(Length::Fill))
-                            .push(
-                                text(concat!("ver ", env!("CARGO_PKG_VERSION")))
-                                    .size(10)
-                                    .style(move |_| iced::widget::text::Style {
-                                        color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
-                                    }),
-                            ),
-                    )
-                    .push(item("", "CPU Usage", self.sys_data.cpu_str.clone()))
-                    .push(item("󰍛", "Memory Usage", self.sys_data.mem_str.clone()))
-                    .push(item("󰍛", "Swap Usage", self.sys_data.swap_str.clone()))
-                    .push(item("", "Temperature", self.sys_data.temp_str.clone()))
-                    .push(item(
-                        "💿",
-                        "Disk Usage /",
-                        self.sys_data.disk_root_str.clone(),
-                    ))
-                    .push(item(
-                        "💿",
-                        "Disk Usage /boot",
-                        self.sys_data.disk_boot_str.clone(),
-                    ))
-                    .push(item("🌐", "IP Address", self.sys_data.ip_address.clone()))
-                    .push(item(
-                        "⬇",
-                        "Download Speed",
-                        self.sys_data.net_down_str.clone(),
-                    ))
-                    .push(item("⬆", "Upload Speed", self.sys_data.net_up_str.clone()))
+            let mut col =
+                Column::new().spacing(12).push(
+                    Row::new()
+                        .align_y(Alignment::Center)
+                        .push(text("System Info").size(18).style(move |_| {
+                            iced::widget::text::Style {
+                                color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                            }
+                        }))
+                        .push(Space::with_width(Length::Fill))
+                        .push(
+                            text(concat!("ver ", env!("CARGO_PKG_VERSION")))
+                                .size(10)
+                                .style(move |_| iced::widget::text::Style {
+                                    color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
+                                }),
+                        ),
+                );
+            col = col
+                .push(item("", "CPU Usage", self.sys_data.cpu_str.clone()))
+                .push(item("󰍛", "Memory Usage", self.sys_data.mem_str.clone()))
+                .push(item("󰍛", "Swap Usage", self.sys_data.swap_str.clone()))
+                .push(item("", "Temperature", self.sys_data.temp_str.clone()))
+                .push(item(
+                    "💿",
+                    "Disk Usage /",
+                    self.sys_data.disk_root_str.clone(),
+                ))
+                .push(item(
+                    "💿",
+                    "Disk Usage /boot",
+                    self.sys_data.disk_boot_str.clone(),
+                ))
+                .push(item("🌐", "IP Address", self.sys_data.ip_address.clone()))
+                .push(item(
+                    "⬇",
+                    "Download Speed",
+                    self.sys_data.net_down_str.clone(),
+                ))
+                .push(item("⬆", "Upload Speed", self.sys_data.net_up_str.clone()));
+
+            if self.debug_ui_enabled {
+                col = col
                     .push(Space::with_height(Length::Fixed(8.0)))
                     .push(text("Observability").size(14).style(move |_| {
                         iced::widget::text::Style {
@@ -1704,6 +1745,7 @@ impl ThinkPadBar {
                             crate::modules::runtime::noop_runtime_descriptor_name()
                         ),
                     ));
+            }
 
             return container(
                 container(col)
@@ -2647,6 +2689,7 @@ mod tests {
             workspace_refresh_queued: false,
             perf: super::PerfCounters::default(),
             show_debug_overlay: false,
+            debug_ui_enabled: false,
         };
 
         assert!(bar.request_workspace_refresh());
@@ -2659,5 +2702,25 @@ mod tests {
         assert!(!bar.workspace_refresh_queued);
 
         assert!(!bar.complete_workspace_refresh());
+    }
+
+    #[test]
+    fn debug_ui_enabled_detects_only_debug_or_trace_levels() {
+        assert!(!ThinkPadBar::debug_ui_enabled_from_rust_log(None));
+        assert!(!ThinkPadBar::debug_ui_enabled_from_rust_log(Some("info")));
+        assert!(!ThinkPadBar::debug_ui_enabled_from_rust_log(Some(
+            "thinkpadbar=info"
+        )));
+        assert!(ThinkPadBar::debug_ui_enabled_from_rust_log(Some("debug")));
+        assert!(ThinkPadBar::debug_ui_enabled_from_rust_log(Some("trace")));
+        assert!(ThinkPadBar::debug_ui_enabled_from_rust_log(Some(
+            "thinkpadbar=debug"
+        )));
+        assert!(ThinkPadBar::debug_ui_enabled_from_rust_log(Some(
+            "thinkpadbar::modules::tray=trace"
+        )));
+        assert!(!ThinkPadBar::debug_ui_enabled_from_rust_log(Some(
+            "hyper=debug,thinkpadbar=info"
+        )));
     }
 }
