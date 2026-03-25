@@ -119,7 +119,6 @@ pub enum Message {
     WifiUpdated(crate::services::connectivity::WifiInfo),
     OpenOverskride,
     SessionCommandCompleted(crate::services::session::SessionFollowUp),
-    IdleInhibitorSurface(crate::services::idle_inhibitor::IdleInhibitorSurfaceEvent),
     DBusConnected(zbus::Connection),
     DBusConnectAttempted(Option<zbus::Connection>),
     PopupWindowUnfocused(Id),
@@ -883,10 +882,6 @@ impl ThinkPadBar {
             }
             Message::WifiUpdated(info) => {
                 self.connectivity_service.sync_wifi_info(info);
-            }
-            Message::IdleInhibitorSurface(event) => {
-                self.idle_inhibitor_service
-                    .observe_surface(self.main_window_id, event);
             }
         }
         Task::none()
@@ -2606,14 +2601,6 @@ impl ThinkPadBar {
                 iced::Event::Window(iced::window::Event::Unfocused) => {
                     Some(Message::PopupWindowUnfocused(window))
                 }
-                iced::Event::PlatformSpecific(iced::event::PlatformSpecific::Wayland(
-                    iced::event::wayland::Event::Layer(_, surface, window_id),
-                )) => Some(Message::IdleInhibitorSurface(
-                    crate::services::idle_inhibitor::IdleInhibitorSurfaceEvent {
-                        window_id,
-                        surface,
-                    },
-                )),
                 _ => None,
             }),
         ])

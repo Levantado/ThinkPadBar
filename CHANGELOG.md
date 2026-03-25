@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.69] - 2026-03-25
+
+### Changed
+- Reworked native Wayland idle inhibition to follow the `ashell` service pattern instead of relying on `iced` layer-surface startup events:
+  - `services/idle_inhibitor.rs` now opens its own Wayland connection, binds `wl_compositor` and `zwp_idle_inhibit_manager_v1`, and creates a dedicated `wl_surface` for inhibition;
+  - this removes the fragile dependency on `iced::event::wayland::Event::Layer(...)`, which did not provide a reliable startup bind path for the main bar surface and left the toggle stuck at `N/A`.
+- Simplified app integration:
+  - removed the `IdleInhibitorSurface` message path and the related Wayland event listener from `app.rs`,
+  - the idle-inhibitor toggle is now fully service-owned and available as soon as the compositor exposes the protocol.
+
+### Quality
+- Added regression tests for:
+  - available backend snapshot starting in `Off`,
+  - successful enable transition on an available backend,
+  - no-backend toggle behavior remaining inactive.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.68] - 2026-03-25
 
 ### Changed
