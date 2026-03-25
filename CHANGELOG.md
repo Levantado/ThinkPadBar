@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.53] - 2026-03-25
+
+### Fixed
+- Closed `TD-TRAY-001`: tray right-click strategy is now deterministic per item.
+- Secondary click route now uses adaptive per-item pinning:
+  - initial route is capability-based (`item_is_menu`/`menu`),
+  - after first successful click, the successful action is pinned for that item and reused on next clicks,
+  - only one bounded fallback is allowed per click path (no fallback cycles).
+- Extended tray diagnostics for every secondary click:
+  - selected primary/fallback route,
+  - previously pinned action,
+  - cursor coordinates,
+  - activation result and latency.
+
+### Quality
+- Added regression tests for:
+  - preferred-action route selection,
+  - single-fallback execution behavior,
+  - successful-action pinning and failure cleanup in per-item cache,
+  - mock/stub integration-style click execution path.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.52] - 2026-03-25
 
 ### Added

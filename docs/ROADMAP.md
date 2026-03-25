@@ -10,7 +10,7 @@ This roadmap defines the next evolution steps from a reliable single-product bar
 ## Baseline (as of 2026-03-25)
 - Current release line: `0.6.x`
 - Validation gate: `fmt/check/clippy(-D warnings)/test` is mandatory
-- Open high-priority tech debt: `TD-TRAY-001` (tray right-click stability)
+- High-priority tray tech debt `TD-TRAY-001` closed in `0.6.53` (deterministic right-click routing)
 
 ## Milestone v0.7.0 — Product Hardening
 Goal: improve product maturity and observability without architecture bloat.
@@ -108,7 +108,6 @@ Goal: abstract compositor-specific behavior while keeping performance predictabl
 4. Version bump + changelog update required for release-level changes.
 
 ## Suggested Execution Order (short-term)
-1. Close `TD-TRAY-001` using new observability hooks.
-2. Implement module capability schema draft.
-3. Introduce declarative theme tokens and map current style to them.
-4. Add perf counters and expose a minimal debug panel.
+1. Validate `TD-TRAY-001` closure on production trays with 30+ click series per target app set.
+2. Introduce declarative theme tokens and map current style to them.
+3. Add popup open/close p95 latency counters to observability block.
