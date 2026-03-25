@@ -46,9 +46,13 @@ pub struct IconResolverDiagnostics {
     pub negative_entries: usize,
     pub cache_hits: u64,
     pub cache_misses: u64,
+    pub desktop_entries: usize,
+    pub desktop_aliases: usize,
+    pub desktop_alias_hits: u64,
     pub last_hit: Option<String>,
     pub last_miss: Option<String>,
     pub last_resolved_path: Option<String>,
+    pub last_desktop_alias: Option<String>,
 }
 
 impl IconResolverDiagnostics {
@@ -59,27 +63,49 @@ impl IconResolverDiagnostics {
             .or(self.last_hit.as_deref())
             .unwrap_or("-");
         format!(
-            "cache {} neg {} h/m {}/{} last {}",
-            self.cache_entries, self.negative_entries, self.cache_hits, self.cache_misses, last
+            "cache {} neg {} h/m {}/{} alias {} last {}",
+            self.cache_entries,
+            self.negative_entries,
+            self.cache_hits,
+            self.cache_misses,
+            self.desktop_alias_hits,
+            last
         )
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct DesktopAliasIndex {
+    aliases: HashMap<String, String>,
+    entries: usize,
 }
 
 #[derive(Default)]
 pub struct IconResolver {
     cache: HashMap<IconLookupKey, Option<Handle>>,
     diagnostics: IconResolverDiagnostics,
+    desktop_alias_index: Option<DesktopAliasIndex>,
+    env: IconSearchEnv,
 }
 
 impl IconResolver {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            cache: HashMap::new(),
+            diagnostics: IconResolverDiagnostics::default(),
+            desktop_alias_index: None,
+            env: IconSearchEnv::from_process(),
+        }
     }
 
     pub fn diagnostics(&self) -> IconResolverDiagnostics {
         let mut diagnostics = self.diagnostics.clone();
         diagnostics.cache_entries = self.cache.len();
         diagnostics.negative_entries = self.cache.values().filter(|value| value.is_none()).count();
+        if let Some(index) = &self.desktop_alias_index {
+            diagnostics.desktop_entries = index.entries;
+            diagnostics.desktop_aliases = index.aliases.len();
+        }
         diagnostics
     }
 
@@ -94,8 +120,7 @@ impl IconResolver {
             return cached;
         }
 
-        let env = IconSearchEnv::from_process();
-        let resolved_path = resolve_icon_path(raw, theme_hint, &env);
+        let resolved_path = self.resolve_path(raw, theme_hint);
         let resolved = resolved_path
             .as_ref()
             .map(|path| Handle::from_path(path.to_string_lossy().into_owned()));
@@ -112,15 +137,66 @@ impl IconResolver {
         self.cache.insert(key, resolved.clone());
         resolved
     }
-}
 
-fn resolve_icon_path(raw: &str, theme_hint: Option<&str>, env: &IconSearchEnv) -> Option<PathBuf> {
-    for candidate in icon_name_candidates(raw) {
-        if let Some(path) = resolve_candidate_path(&candidate, theme_hint, env) {
-            return Some(path);
+    #[cfg(test)]
+    fn with_env_for_tests(env: IconSearchEnv) -> Self {
+        Self {
+            cache: HashMap::new(),
+            diagnostics: IconResolverDiagnostics::default(),
+            desktop_alias_index: None,
+            env,
         }
     }
-    None
+
+    #[cfg(test)]
+    pub(crate) fn with_data_home_for_tests(data_home: PathBuf) -> Self {
+        Self::with_env_for_tests(IconSearchEnv {
+            home_dir: None,
+            xdg_data_home: Some(data_home),
+            xdg_data_dirs: Vec::new(),
+        })
+    }
+
+    fn resolve_path(&mut self, raw: &str, theme_hint: Option<&str>) -> Option<PathBuf> {
+        for candidate in icon_name_candidates(raw) {
+            if let Some(path) = resolve_candidate_path(&candidate, theme_hint, &self.env) {
+                return Some(path);
+            }
+            if let Some(path) = self.resolve_via_desktop_alias(&candidate, theme_hint) {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    fn resolve_via_desktop_alias(
+        &mut self,
+        candidate: &str,
+        theme_hint: Option<&str>,
+    ) -> Option<PathBuf> {
+        let alias_keys = desktop_alias_candidates(candidate);
+        let icon_name = {
+            let index = self.ensure_desktop_alias_index();
+            alias_keys
+                .iter()
+                .find_map(|alias| index.aliases.get(alias).map(|value| (alias, value)))
+                .map(|(alias, value)| (alias.clone(), value.clone()))
+        }?;
+
+        if icon_name.1 == candidate {
+            return None;
+        }
+
+        let resolved = resolve_candidate_path(&icon_name.1, theme_hint, &self.env)?;
+        self.diagnostics.desktop_alias_hits = self.diagnostics.desktop_alias_hits.saturating_add(1);
+        self.diagnostics.last_desktop_alias = Some(format!("{}->{}", icon_name.0, icon_name.1));
+        Some(resolved)
+    }
+
+    fn ensure_desktop_alias_index(&mut self) -> &DesktopAliasIndex {
+        self.desktop_alias_index
+            .get_or_insert_with(|| load_desktop_alias_index(&self.env))
+    }
 }
 
 fn resolve_candidate_path(
@@ -274,6 +350,33 @@ fn theme_roots_for_name(name: &str, theme_dirs: &[PathBuf]) -> Vec<PathBuf> {
     theme_dirs.iter().map(|root| root.join(name)).collect()
 }
 
+fn application_dirs(env: &IconSearchEnv) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut push = |path: PathBuf| {
+        if seen.insert(path.clone()) {
+            out.push(path);
+        }
+    };
+
+    if let Some(home) = &env.home_dir {
+        push(home.join(".local/share/applications"));
+        push(home.join(".local/share/flatpak/exports/share/applications"));
+    }
+
+    if let Some(data_home) = &env.xdg_data_home {
+        push(data_home.join("applications"));
+    }
+
+    for data_dir in &env.xdg_data_dirs {
+        push(data_dir.join("applications"));
+    }
+
+    push(PathBuf::from("/var/lib/flatpak/exports/share/applications"));
+    out
+}
+
 fn inherited_theme_roots(root: &Path, theme_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let inherits = parse_theme_inherits(root);
     if inherits.is_empty() {
@@ -412,20 +515,170 @@ fn pixmap_paths(name: &str, env: &IconSearchEnv) -> Vec<PathBuf> {
     out
 }
 
+fn load_desktop_alias_index(env: &IconSearchEnv) -> DesktopAliasIndex {
+    let mut index = DesktopAliasIndex::default();
+
+    for applications_dir in application_dirs(env) {
+        let Ok(entries) = std::fs::read_dir(applications_dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("desktop") {
+                continue;
+            }
+
+            let Some(parsed) = parse_desktop_entry(&path) else {
+                continue;
+            };
+
+            index.entries = index.entries.saturating_add(1);
+            for alias in parsed.aliases {
+                index
+                    .aliases
+                    .entry(alias)
+                    .or_insert_with(|| parsed.icon.clone());
+            }
+        }
+    }
+
+    index
+}
+
+#[derive(Debug, Clone)]
+struct DesktopEntry {
+    icon: String,
+    aliases: Vec<String>,
+}
+
+fn parse_desktop_entry(path: &Path) -> Option<DesktopEntry> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut in_desktop_entry = false;
+    let mut icon = None::<String>;
+    let mut name = None::<String>;
+    let mut startup_wm_class = None::<String>;
+    let mut exec = None::<String>;
+
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_desktop_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_desktop_entry {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+
+        match key.trim() {
+            "Icon" => icon = Some(value.to_string()),
+            "Name" => name = Some(value.to_string()),
+            "StartupWMClass" => startup_wm_class = Some(value.to_string()),
+            "Exec" => exec = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    let icon = icon?;
+    let mut aliases = Vec::new();
+    if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+        aliases.extend(desktop_alias_candidates(stem));
+    }
+    if let Some(name) = name {
+        aliases.extend(desktop_alias_candidates(&name));
+    }
+    if let Some(startup_wm_class) = startup_wm_class {
+        aliases.extend(desktop_alias_candidates(&startup_wm_class));
+    }
+    if let Some(exec) = exec {
+        aliases.extend(exec_alias_candidates(&exec));
+    }
+    aliases.sort();
+    aliases.dedup();
+
+    if aliases.is_empty() {
+        return None;
+    }
+
+    Some(DesktopEntry { icon, aliases })
+}
+
+fn exec_alias_candidates(exec: &str) -> Vec<String> {
+    let command = exec
+        .split_whitespace()
+        .next()
+        .unwrap_or(exec)
+        .trim_matches('"');
+    let base = Path::new(command)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(command);
+    desktop_alias_candidates(base)
+}
+
+fn desktop_alias_candidates(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return out;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    out.push(lower.clone());
+
+    let stem = lower.strip_suffix(".desktop").unwrap_or(&lower);
+    if stem != lower {
+        out.push(stem.to_string());
+    }
+
+    let basename = stem.rsplit('/').next().unwrap_or(stem);
+    if basename != stem {
+        out.push(basename.to_string());
+    }
+
+    if let Some(last_segment) = basename.rsplit('.').next() {
+        if !last_segment.is_empty() && last_segment != basename {
+            out.push(last_segment.to_string());
+        }
+    }
+
+    for token in basename.split(|ch: char| !ch.is_alphanumeric()) {
+        if token.len() >= 2 {
+            out.push(token.to_string());
+        }
+    }
+
+    let mut seen = HashSet::new();
+    out.into_iter()
+        .filter(|alias| seen.insert(alias.clone()))
+        .collect()
+}
+
 #[cfg(test)]
 fn resolve_icon_path_for_tests(
     raw: &str,
     theme_hint: Option<&str>,
     env: &IconSearchEnv,
 ) -> Option<PathBuf> {
-    resolve_icon_path(raw, theme_hint, env)
+    let mut resolver = IconResolver::with_env_for_tests(env.clone());
+    resolver.resolve_path(raw, theme_hint)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        icon_name_candidates, resolve_icon_path_for_tests, theme_search_roots, themed_icon_paths,
-        IconResolver, IconSearchEnv,
+        desktop_alias_candidates, icon_name_candidates, resolve_icon_path_for_tests,
+        theme_search_roots, themed_icon_paths, IconResolver, IconSearchEnv,
     };
     use std::path::{Path, PathBuf};
 
@@ -538,11 +791,81 @@ mod tests {
         assert_eq!(diagnostics.cache_entries, 2);
         assert_eq!(diagnostics.negative_entries, 1);
         assert_eq!(diagnostics.cache_misses, 2);
+        assert_eq!(diagnostics.desktop_alias_hits, 0);
         assert_eq!(
             diagnostics.last_miss.as_deref(),
             Some("definitely-missing-icon")
         );
         assert!(diagnostics.summary().contains("cache 2 neg 1"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn desktop_alias_candidates_strip_desktop_suffix_and_keep_specific_tokens() {
+        let aliases = desktop_alias_candidates("org.telegram.desktop");
+        assert!(aliases.iter().any(|alias| alias == "org.telegram.desktop"));
+        assert!(aliases.iter().any(|alias| alias == "org.telegram"));
+        assert!(aliases.iter().any(|alias| alias == "telegram"));
+        assert!(!aliases.iter().any(|alias| alias == "desktop"));
+    }
+
+    #[test]
+    fn resolver_supports_desktop_alias_lookup_by_app_id_and_exec_name() {
+        let temp = unique_temp_dir("thinkpadbar-icon-desktop-alias");
+        let data_home = temp.join("share");
+        let applications = data_home.join("applications");
+        let icons = data_home.join("icons/hicolor/48x48/apps");
+        std::fs::create_dir_all(&applications).expect("applications dir");
+        std::fs::create_dir_all(&icons).expect("icons dir");
+        std::fs::write(
+            applications.join("org.telegram.desktop.desktop"),
+            "[Desktop Entry]\nName=Telegram Desktop\nIcon=telegram-desktop\nExec=/usr/bin/telegram-desktop --start-minimized\nStartupWMClass=org.telegram.desktop\n",
+        )
+        .expect("desktop entry");
+        std::fs::write(icons.join("telegram-desktop.png"), b"png").expect("icon");
+
+        let env = IconSearchEnv {
+            home_dir: None,
+            xdg_data_home: Some(data_home),
+            xdg_data_dirs: Vec::new(),
+        };
+        let mut resolver = IconResolver::with_env_for_tests(env);
+
+        assert!(resolver.resolve("org.telegram.desktop", None).is_some());
+        let diagnostics = resolver.diagnostics();
+        assert_eq!(diagnostics.desktop_alias_hits, 1);
+        assert_eq!(
+            diagnostics.last_desktop_alias.as_deref(),
+            Some("org.telegram.desktop->telegram-desktop")
+        );
+        assert!(resolver.resolve("telegram-desktop", None).is_some());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn resolver_supports_desktop_alias_lookup_by_title_name() {
+        let temp = unique_temp_dir("thinkpadbar-icon-desktop-title");
+        let data_home = temp.join("share");
+        let applications = data_home.join("applications");
+        let icons = data_home.join("icons/hicolor/48x48/apps");
+        std::fs::create_dir_all(&applications).expect("applications dir");
+        std::fs::create_dir_all(&icons).expect("icons dir");
+        std::fs::write(
+            applications.join("vesktop.desktop"),
+            "[Desktop Entry]\nName=Vesktop\nIcon=vesktop\nExec=/usr/bin/vesktop\n",
+        )
+        .expect("desktop entry");
+        std::fs::write(icons.join("vesktop.png"), b"png").expect("icon");
+
+        let env = IconSearchEnv {
+            home_dir: None,
+            xdg_data_home: Some(data_home),
+            xdg_data_dirs: Vec::new(),
+        };
+        let resolved = resolve_icon_path_for_tests("vesktop", None, &env);
+        assert_eq!(resolved, Some(icons.join("vesktop.png")));
 
         let _ = std::fs::remove_dir_all(temp);
     }

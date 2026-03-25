@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.84] - 2026-03-26
+
+### Changed
+- Extended `P3 Icon Resolver` with `.desktop` metadata and app-id alias lookup:
+  - `IconResolver` now builds a lazy alias index from XDG and Flatpak `applications/` directories and can resolve icons through `.desktop` `Icon=`, `Name=`, `StartupWMClass`, desktop filename, and `Exec` basename aliases;
+  - tray icon resolution now falls back to desktop/title aliases when a tray item has no usable `icon_name`, which improves hit rate for items that only expose a title or WM/app id;
+  - icon-resolver diagnostics now track desktop entry count, desktop alias count, alias-hit count, and the last alias mapping used during icon resolution.
+
+### Quality
+- Added regression tests for:
+  - desktop alias candidate generation priority,
+  - `.desktop` alias lookup by app id and exec name,
+  - `.desktop` alias lookup by title name,
+  - tray runtime resolving an icon from title when `icon_name` is missing.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.83] - 2026-03-26
 
 ### Changed

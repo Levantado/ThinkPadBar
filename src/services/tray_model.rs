@@ -100,8 +100,26 @@ impl Tray {
         }
     }
 
-    fn resolve_icon_cached(&mut self, name: &str, theme_path: Option<&str>) -> Option<Handle> {
-        self.icon_resolver.resolve(name, theme_path)
+    #[cfg(test)]
+    fn with_icon_resolver_for_tests(
+        icon_resolver: crate::services::icon_resolver::IconResolver,
+    ) -> Self {
+        Self {
+            items: HashMap::new(),
+            activate_tx: None,
+            icon_resolver,
+        }
+    }
+
+    fn resolve_item_icon(
+        &mut self,
+        icon_name: Option<&str>,
+        title: Option<&str>,
+        theme_path: Option<&str>,
+    ) -> Option<Handle> {
+        icon_name
+            .and_then(|name| self.icon_resolver.resolve(name, theme_path))
+            .or_else(|| title.and_then(|title| self.icon_resolver.resolve(title, theme_path)))
     }
 
     fn rebuild_owned_menu(item: &mut TrayItem) {
@@ -116,10 +134,11 @@ impl Tray {
             TrayMessage::ItemAdded(id, item) => {
                 let mut icon_handle = get_icon_handle(&item);
                 if icon_handle.is_none() {
-                    if let Some(ref name) = item.icon_name {
-                        icon_handle =
-                            self.resolve_icon_cached(name, item.icon_theme_path.as_deref());
-                    }
+                    icon_handle = self.resolve_item_icon(
+                        item.icon_name.as_deref(),
+                        item.title.as_deref(),
+                        item.icon_theme_path.as_deref(),
+                    );
                 }
                 self.items.insert(
                     id.clone(),
@@ -137,9 +156,15 @@ impl Tray {
             }
             TrayMessage::ItemUpdated(id, event) => {
                 let mut cache_lookup_name: Option<String> = None;
+                let mut cache_lookup_title: Option<String> = None;
                 if let Some(item) = self.items.get_mut(&id) {
                     match event {
-                        UpdateEvent::Title(title) => item.title = title,
+                        UpdateEvent::Title(title) => {
+                            item.title = title.clone();
+                            if item.icon_handle.is_none() && item.icon_name.is_none() {
+                                cache_lookup_title = title;
+                            }
+                        }
                         UpdateEvent::Icon {
                             icon_name,
                             icon_pixmap,
@@ -171,7 +196,14 @@ impl Tray {
                     }
                 }
                 if let Some(name) = cache_lookup_name {
-                    let resolved = self.resolve_icon_cached(&name, None);
+                    let resolved = self.resolve_item_icon(Some(&name), None, None);
+                    if let Some(item) = self.items.get_mut(&id) {
+                        if item.icon_handle.is_none() {
+                            item.icon_handle = resolved;
+                        }
+                    }
+                } else if let Some(title) = cache_lookup_title {
+                    let resolved = self.resolve_item_icon(None, Some(&title), None);
                     if let Some(item) = self.items.get_mut(&id) {
                         if item.icon_handle.is_none() {
                             item.icon_handle = resolved;
@@ -936,6 +968,55 @@ mod tests {
             Some("Fallback")
         );
         assert!(diagnostics.summary().contains("1/2 resolved"));
+    }
+
+    #[test]
+    fn tray_item_update_resolves_icon_from_title_when_icon_name_missing() {
+        let temp = std::env::temp_dir().join(format!(
+            "thinkpadbar-tray-title-icon-{}",
+            std::process::id()
+        ));
+        let data_home = temp.join("share");
+        let applications = data_home.join("applications");
+        let icons = data_home.join("icons/hicolor/48x48/apps");
+        std::fs::create_dir_all(&applications).expect("applications dir");
+        std::fs::create_dir_all(&icons).expect("icons dir");
+        std::fs::write(
+            applications.join("vesktop.desktop"),
+            "[Desktop Entry]\nName=Vesktop\nIcon=vesktop\nExec=/usr/bin/vesktop\n",
+        )
+        .expect("desktop entry");
+        std::fs::write(icons.join("vesktop.png"), b"png").expect("icon");
+
+        let resolver =
+            crate::services::icon_resolver::IconResolver::with_data_home_for_tests(data_home);
+        let mut tray = Tray::with_icon_resolver_for_tests(resolver);
+        tray.items.insert(
+            "item".to_string(),
+            TrayItem {
+                _id: "item".to_string(),
+                title: None,
+                icon_name: None,
+                icon_handle: None,
+                item_is_menu: false,
+                menu_path: None,
+                menu_layout: None,
+                owned_menu: None,
+            },
+        );
+
+        tray.update(TrayMessage::ItemUpdated(
+            "item".to_string(),
+            UpdateEvent::Title(Some("Vesktop".to_string())),
+        ));
+
+        assert!(tray
+            .items
+            .get("item")
+            .and_then(|item| item.icon_handle.as_ref())
+            .is_some());
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
