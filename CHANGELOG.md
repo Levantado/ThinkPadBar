@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.74] - 2026-03-25
+
+### Changed
+- Closed `TD-TRAY-002` on the post-`M3` service-owned tray architecture:
+  - `OwnedTrayMenu` now keeps per-action prefetch ancestry, so nested `DBusMenu` activations prefetch `root -> submenu ancestors -> selected item` instead of blindly dispatching `root + selected`;
+  - submenu container items (`children-display=submenu`) are now treated as non-activatable in the local flattened tray menu, which prevents dead local clicks on branch nodes that only exist to reveal children;
+  - tray popup sizing is now menu-aware instead of using a fixed `420px` height, which keeps the local tray menu anchored closer to the click target for short and medium menus.
+
+### Quality
+- Added regression tests for:
+  - nested tray-menu selection preserving submenu ancestry in the dispatch prefetch path,
+  - submenu-header selections closing the popup without dispatching a dead action,
+  - ancestor-aware tray prefetch sequencing without duplicates,
+  - menu-aware tray popup height planning.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.73] - 2026-03-25
 
 ### Changed

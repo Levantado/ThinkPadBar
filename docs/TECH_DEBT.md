@@ -35,9 +35,9 @@
 
 ## TD-TRAY-002: Локальное tray-меню не выполняет действия и плохо якорится
 
-- Статус: `open` (mitigation in `0.6.61`, ожидается runtime-подтверждение)
+- Статус: `closed` (2026-03-25, release `0.6.74`)
 - Приоритет: `high`
-- Область: `src/app.rs`, `src/modules/tray.rs`, `src/services/tray.rs`
+- Область: `src/app.rs`, `src/services/tray.rs`, `src/services/tray_ui.rs`, `src/services/tray_menu.rs`
 - Симптомы:
   - локальное меню трея открывается стабильно, но пункты меню не всегда вызывают реальное действие в приложении-источнике;
   - popup меню отображается далеко от курсора/иконки трея (ошибка якорения позиции).
@@ -53,6 +53,12 @@
 ### Что дополнительно сделано в `0.6.62`
 - Обработан `UpdateEvent::MenuDiff`: инкрементальные обновления меню теперь применяются к `menu_layout`, после чего owned-модель меню пересобирается.
 - На reconnect tray-клиента сбрасывается runtime cache активации (resolved address cache, preferred secondary actions, контекстное DBus-соединение), чтобы не переиспользовать устаревший state.
+
+### Что окончательно сделано в `0.6.74`
+- Owned tray menu теперь хранит ancestry-путь для каждого action (`submenu ancestors + selected id`), и runtime dispatch префетчит полный `about_to_show` sequence вместо `root + selected` без контекста.
+- Submenu-контейнеры (`children-display=submenu`) в локальном flat-menu больше не dispatch'ят “мертвый” click: они показываются как неактивируемые branch items, а реальные дочерние actions остаются кликабельными.
+- Popup tray-меню теперь получает menu-aware height hint, поэтому short/medium menus открываются рядом с триггером без тяжелого фиксированного `420px` surface.
+- Добавлены регрессионные тесты на ancestry-aware dispatch path, non-activatable submenu headers и popup height planning.
 
 ### Критерии готовности
 - Нажатие на `enabled` пункт локального tray-меню детерминированно вызывает действие в 100% кликов на целевых приложениях.

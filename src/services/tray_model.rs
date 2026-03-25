@@ -27,7 +27,7 @@ pub enum TrayMessage {
     EventBatch(Vec<Event>),
     ActivateItem(String),
     ActivateItemSecondary(String),
-    ActivateMenuItem(String, i32),
+    ActivateMenuItem(String, i32, Vec<i32>),
     Initialize(tokio::sync::mpsc::UnboundedSender<TrayCommand>),
 }
 
@@ -35,7 +35,11 @@ pub enum TrayMessage {
 pub enum TrayCommand {
     Default(String),
     Secondary(String),
-    MenuItem { id: String, menu_item_id: i32 },
+    MenuItem {
+        id: String,
+        menu_item_id: i32,
+        prefetch_path: Vec<i32>,
+    },
 }
 
 pub struct Tray {
@@ -165,9 +169,13 @@ impl Tray {
                     let _ = tx.send(TrayCommand::Secondary(id));
                 }
             }
-            TrayMessage::ActivateMenuItem(id, menu_item_id) => {
+            TrayMessage::ActivateMenuItem(id, menu_item_id, prefetch_path) => {
                 if let Some(tx) = &self.activate_tx {
-                    let _ = tx.send(TrayCommand::MenuItem { id, menu_item_id });
+                    let _ = tx.send(TrayCommand::MenuItem {
+                        id,
+                        menu_item_id,
+                        prefetch_path,
+                    });
                 }
             }
             TrayMessage::Initialize(tx) => {

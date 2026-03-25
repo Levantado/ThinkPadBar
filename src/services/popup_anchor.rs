@@ -33,6 +33,7 @@ impl PopupAnchorService {
         &self,
         kind: PopupSurfaceKind,
         tray_cursor: Option<(i32, i32)>,
+        tray_menu_height: Option<u32>,
     ) -> PopupSurfacePlan {
         match kind {
             PopupSurfaceKind::Hidden => PopupSurfacePlan {
@@ -60,6 +61,7 @@ impl PopupAnchorService {
                 margin: (self.bar_height, 8, 0, 0),
             },
             PopupSurfaceKind::TrayMenu => {
+                let height = tray_menu_height.unwrap_or(240).clamp(140, 420);
                 let margin = if let Some((cursor_x, cursor_y)) = tray_cursor {
                     (
                         (cursor_y + 8).max(self.bar_height + 4),
@@ -72,7 +74,7 @@ impl PopupAnchorService {
                 };
                 PopupSurfacePlan {
                     width: 320,
-                    height: 420,
+                    height,
                     anchor: Anchor::TOP | Anchor::LEFT,
                     margin,
                 }
@@ -89,7 +91,7 @@ mod tests {
     #[test]
     fn hidden_plan_uses_minimal_surface() {
         let service = PopupAnchorService::new(24);
-        let plan = service.plan(PopupSurfaceKind::Hidden, None);
+        let plan = service.plan(PopupSurfaceKind::Hidden, None, None);
         assert_eq!(plan.width, 1);
         assert_eq!(plan.height, 1);
         assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
@@ -98,8 +100,9 @@ mod tests {
     #[test]
     fn tray_menu_plan_uses_cursor_when_available() {
         let service = PopupAnchorService::new(40);
-        let plan = service.plan(PopupSurfaceKind::TrayMenu, Some((1200, 20)));
+        let plan = service.plan(PopupSurfaceKind::TrayMenu, Some((1200, 20)), Some(188));
         assert_eq!(plan.anchor, Anchor::TOP | Anchor::LEFT);
+        assert_eq!(plan.height, 188);
         assert_eq!(plan.margin, (44, 0, 0, 1208));
     }
 }

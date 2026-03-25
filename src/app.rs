@@ -184,6 +184,7 @@ impl ThinkPadBar {
         let plan = self.popup_anchor_service.plan(
             crate::services::popup_anchor::PopupSurfaceKind::Hidden,
             None,
+            None,
         );
         if let Some(pid) = self.popup_window_id {
             tasks.push(set_exclusive_zone(pid, 0));
@@ -209,9 +210,14 @@ impl ThinkPadBar {
         };
 
         let mut tasks = Vec::new();
+        let tray_menu_height = self
+            .tray_ui_service
+            .open_menu()
+            .map(crate::services::tray_menu::OwnedTrayMenu::popup_height);
         let plan = self.popup_anchor_service.plan(
             Self::popup_surface_kind(&popup),
             self.tray_ui_service.menu_cursor(),
+            tray_menu_height,
         );
         if let Some(pid) = self.popup_window_id {
             tasks.push(set_exclusive_zone(pid, 0));
@@ -1328,11 +1334,14 @@ impl ThinkPadBar {
                                 label.push_str("  ");
                             }
                             label.push_str(&action.label);
+                            if !action.activatable {
+                                label.push_str("  ›");
+                            }
 
                             let mut btn = button(text(label).size(13))
                                 .width(Length::Fill)
                                 .padding(Padding::from([4, 8]));
-                            if action.enabled {
+                            if action.enabled && action.activatable {
                                 btn = btn.on_press(Message::TrayMenuItemSelected(action.id));
                             }
                             content = content.push(btn);

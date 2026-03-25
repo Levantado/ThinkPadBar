@@ -15,7 +15,10 @@ pub enum TrayUiSecondaryAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayUiSelectionAction {
-    ActivateMenuItem { menu_item_id: i32 },
+    ActivateMenuItem {
+        menu_item_id: i32,
+        prefetch_path: Vec<i32>,
+    },
     CloseMenu,
 }
 
@@ -114,20 +117,27 @@ impl TrayUiService {
             self.close_transient_ui();
             return TrayUiSelectionAction::CloseMenu;
         };
-        let is_valid = self
+        let action = self
             .tray
             .owned_menu_for(&id)
-            .is_some_and(|menu| menu.contains_action_id(menu_item_id));
+            .and_then(|menu| menu.action(menu_item_id).cloned());
         self.close_transient_ui();
-        if !is_valid {
+        let Some(action) = action else {
+            return TrayUiSelectionAction::CloseMenu;
+        };
+        if !action.enabled || !action.activatable {
             return TrayUiSelectionAction::CloseMenu;
         }
         self.tray
             .update(crate::services::tray_model::TrayMessage::ActivateMenuItem(
                 id.clone(),
                 menu_item_id,
+                action.prefetch_path.clone(),
             ));
-        TrayUiSelectionAction::ActivateMenuItem { menu_item_id }
+        TrayUiSelectionAction::ActivateMenuItem {
+            menu_item_id,
+            prefetch_path: action.prefetch_path,
+        }
     }
 
     fn search_candidates(item: &crate::services::tray_model::TrayItem, id: &str) -> Vec<String> {
@@ -318,6 +328,21 @@ mod tests {
     #[test]
     fn menu_selection_uses_current_open_menu_id() {
         let mut service = TrayUiService::new();
+        let mut parent = system_tray::menu::MenuItem {
+            id: 5,
+            label: Some("Parent".to_string()),
+            visible: true,
+            enabled: true,
+            children_display: Some("submenu".to_string()),
+            ..Default::default()
+        };
+        parent.submenu = vec![system_tray::menu::MenuItem {
+            id: 7,
+            label: Some("Open".to_string()),
+            visible: true,
+            enabled: true,
+            ..Default::default()
+        }];
         service.tray.items.insert(
             "item".to_string(),
             TrayItem {
@@ -329,24 +354,12 @@ mod tests {
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {
                     id: 1,
-                    submenus: vec![system_tray::menu::MenuItem {
-                        id: 7,
-                        label: Some("Open".to_string()),
-                        visible: true,
-                        enabled: true,
-                        ..Default::default()
-                    }],
+                    submenus: vec![parent.clone()],
                 }),
                 owned_menu: Some(crate::services::tray_menu::OwnedTrayMenu::from_layout(
                     &TrayMenu {
                         id: 1,
-                        submenus: vec![system_tray::menu::MenuItem {
-                            id: 7,
-                            label: Some("Open".to_string()),
-                            visible: true,
-                            enabled: true,
-                            ..Default::default()
-                        }],
+                        submenus: vec![parent],
                     },
                 )),
             },
@@ -356,8 +369,60 @@ mod tests {
         let action = service.handle_menu_selection(7);
         assert_eq!(
             action,
-            TrayUiSelectionAction::ActivateMenuItem { menu_item_id: 7 }
+            TrayUiSelectionAction::ActivateMenuItem {
+                menu_item_id: 7,
+                prefetch_path: vec![5, 7]
+            }
         );
+        assert_eq!(service.open_menu_id, None);
+        assert_eq!(service.menu_cursor(), None);
+    }
+
+    #[test]
+    fn submenu_header_selection_closes_menu_without_dispatch() {
+        let mut service = TrayUiService::new();
+        let mut parent = system_tray::menu::MenuItem {
+            id: 41,
+            label: Some("Parent".to_string()),
+            visible: true,
+            enabled: true,
+            children_display: Some("submenu".to_string()),
+            ..Default::default()
+        };
+        parent.submenu = vec![system_tray::menu::MenuItem {
+            id: 42,
+            label: Some("Child".to_string()),
+            visible: true,
+            enabled: true,
+            ..Default::default()
+        }];
+
+        service.tray.items.insert(
+            "item".to_string(),
+            TrayItem {
+                _id: "item".to_string(),
+                title: Some("Item".to_string()),
+                icon_name: None,
+                icon_handle: None,
+                item_is_menu: false,
+                menu_path: Some("/menu".to_string()),
+                menu_layout: Some(TrayMenu {
+                    id: 1,
+                    submenus: vec![parent.clone()],
+                }),
+                owned_menu: Some(crate::services::tray_menu::OwnedTrayMenu::from_layout(
+                    &TrayMenu {
+                        id: 1,
+                        submenus: vec![parent],
+                    },
+                )),
+            },
+        );
+        let _ = service.handle_secondary_click("item".to_string(), Some((1, 2)));
+
+        let action = service.handle_menu_selection(41);
+
+        assert_eq!(action, TrayUiSelectionAction::CloseMenu);
         assert_eq!(service.open_menu_id, None);
         assert_eq!(service.menu_cursor(), None);
     }

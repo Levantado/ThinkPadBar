@@ -8,12 +8,14 @@ use system_tray::client::{Client, Event};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
-pub(crate) fn menu_prefetch_sequence(menu_item_id: i32) -> Vec<i32> {
-    if menu_item_id == 0 {
-        vec![0]
-    } else {
-        vec![0, menu_item_id]
+pub(crate) fn menu_prefetch_sequence(prefetch_path: &[i32]) -> Vec<i32> {
+    let mut sequence = vec![0];
+    for id in prefetch_path {
+        if *id >= 0 && !sequence.iter().any(|existing| existing == id) {
+            sequence.push(*id);
+        }
     }
+    sequence
 }
 
 fn reset_runtime_activation_state(
@@ -164,7 +166,11 @@ pub fn subscription() -> iced::Subscription<TrayMessage> {
                                         warn!("tray secondary activation failed for {}", id);
                                     }
                                 }
-                                TrayCommand::MenuItem { id, menu_item_id } => {
+                                TrayCommand::MenuItem {
+                                    id,
+                                    menu_item_id,
+                                    prefetch_path,
+                                } => {
                                     let resolved_address = resolve_item_address(
                                         &mut context_connection,
                                         &mut resolved_item_addresses,
@@ -173,7 +179,7 @@ pub fn subscription() -> iced::Subscription<TrayMessage> {
                                     .await;
                                     let (_, _, menu_path) = get_secondary_capabilities(&client, &id);
                                     if let Some(menu_path) = menu_path {
-                                        for prefetch_id in menu_prefetch_sequence(menu_item_id) {
+                                        for prefetch_id in menu_prefetch_sequence(&prefetch_path) {
                                             let _ = client
                                                 .about_to_show_menuitem(
                                                     resolved_address.clone(),
@@ -216,12 +222,17 @@ mod tests {
 
     #[test]
     fn menu_prefetch_sequence_includes_root_and_selected_item() {
-        assert_eq!(menu_prefetch_sequence(42), vec![0, 42]);
+        assert_eq!(menu_prefetch_sequence(&[42]), vec![0, 42]);
     }
 
     #[test]
     fn menu_prefetch_sequence_root_only_for_root_selection() {
-        assert_eq!(menu_prefetch_sequence(0), vec![0]);
+        assert_eq!(menu_prefetch_sequence(&[0]), vec![0]);
+    }
+
+    #[test]
+    fn menu_prefetch_sequence_keeps_ancestor_path_without_duplicates() {
+        assert_eq!(menu_prefetch_sequence(&[10, 42, 42]), vec![0, 10, 42]);
     }
 
     #[test]
