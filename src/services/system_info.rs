@@ -29,10 +29,10 @@ impl SystemInfoService {
                 self.snapshot = self.monitor.update(true);
             }
             SystemInfoRefreshKind::Thermal => {
-                if let Some(temp) = crate::modules::system::read_temperature_celsius() {
-                    self.snapshot.temp = temp;
-                    self.snapshot.temp_str = format!("{}°C", temp.round() as u64);
-                }
+                Self::apply_thermal_reading(
+                    &mut self.snapshot,
+                    crate::modules::system::read_temperature_celsius(),
+                );
             }
             SystemInfoRefreshKind::Slow => {
                 self.snapshot = self.monitor.update(false);
@@ -40,24 +40,65 @@ impl SystemInfoService {
         }
         &self.snapshot
     }
+
+    fn apply_thermal_reading(snapshot: &mut SysData, temp: Option<f32>) {
+        if let Some(temp) = temp {
+            snapshot.temp = temp;
+            snapshot.temp_str = format!("{}°C", temp.round() as u64);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_snapshot(snapshot: SysData) -> Self {
+        Self {
+            monitor: crate::modules::system::SysMonitor::new(),
+            snapshot,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn refresh_thermal_for_tests(&mut self, temp: Option<f32>) -> &SysData {
+        Self::apply_thermal_reading(&mut self.snapshot, temp);
+        &self.snapshot
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SystemInfoRefreshKind, SystemInfoService};
+    use super::SystemInfoService;
 
     #[test]
     fn service_exposes_initial_snapshot() {
-        let service = SystemInfoService::new();
+        let service = SystemInfoService::with_snapshot(crate::modules::system::SysData {
+            cpu_str: "15%".to_string(),
+            temp_str: "48°C".to_string(),
+            ..crate::modules::system::SysData::default()
+        });
         let snapshot = service.snapshot();
-        assert!(!snapshot.cpu_str.is_empty() || snapshot.cpu_usage >= 0.0);
+        assert_eq!(snapshot.cpu_str, "15%");
+        assert_eq!(snapshot.temp_str, "48°C");
     }
 
     #[test]
     fn thermal_refresh_preserves_existing_strings_when_sensor_missing() {
-        let mut service = SystemInfoService::new();
+        let mut service = SystemInfoService::with_snapshot(crate::modules::system::SysData {
+            temp: 48.0,
+            temp_str: "48°C".to_string(),
+            ..crate::modules::system::SysData::default()
+        });
         let before = service.snapshot().temp_str.clone();
-        let _ = service.refresh(SystemInfoRefreshKind::Thermal);
-        assert!(!service.snapshot().temp_str.is_empty() || !before.is_empty());
+        let _ = service.refresh_thermal_for_tests(None);
+        assert_eq!(service.snapshot().temp_str, before);
+    }
+
+    #[test]
+    fn thermal_refresh_updates_snapshot_from_provided_reading() {
+        let mut service = SystemInfoService::with_snapshot(crate::modules::system::SysData {
+            temp_str: "48°C".to_string(),
+            ..crate::modules::system::SysData::default()
+        });
+        let _ = service.refresh_thermal_for_tests(Some(52.4));
+        assert_eq!(service.snapshot().temp, 52.4);
+        assert_eq!(service.snapshot().temp_str, "52°C");
     }
 }

@@ -307,6 +307,15 @@ impl IdleInhibitorService {
         self.snapshot
     }
 
+    #[cfg(test)]
+    pub fn unavailable_for_tests() -> Self {
+        Self {
+            snapshot: IdleInhibitorSnapshot::default(),
+            requested_enabled: false,
+            backend: None,
+        }
+    }
+
     pub fn toggle(&mut self) {
         self.requested_enabled = !self.requested_enabled;
         self.apply_requested_state();

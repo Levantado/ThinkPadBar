@@ -180,6 +180,17 @@ impl ControlsService {
         }
     }
 
+    #[cfg(test)]
+    pub fn with_snapshot_for_tests(snapshot: ControlsSnapshot) -> Self {
+        Self {
+            snapshot,
+            audio_backend: Arc::new(NoopAudioBackend),
+            brightness_backend: Arc::new(NoopBrightnessBackend),
+            bluetooth_backend: Arc::new(NoopBluetoothBackend),
+            power_backend: Arc::new(NoopPowerBackend),
+        }
+    }
+
     pub fn snapshot(&self) -> &ControlsSnapshot {
         &self.snapshot
     }
@@ -326,6 +337,119 @@ impl ControlsService {
 impl Default for ControlsService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct NoopAudioBackend;
+
+#[cfg(test)]
+impl crate::services::controls_backends::AudioBackend for NoopAudioBackend {
+    fn backend_name(&self) -> &'static str {
+        "noop-audio"
+    }
+
+    fn audio_info(&self) -> AudioInfo {
+        AudioInfo {
+            volume: 0,
+            muted: false,
+        }
+    }
+
+    fn mic_info(&self) -> crate::modules::mic::MicInfo {
+        crate::modules::mic::MicInfo {
+            volume: 0,
+            muted: false,
+        }
+    }
+
+    fn set_volume(
+        &self,
+        _percent: u32,
+    ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+        Box::pin(async {})
+    }
+
+    fn toggle_audio_mute(&self) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+        Box::pin(async {})
+    }
+
+    fn set_mic_volume(
+        &self,
+        _percent: u32,
+    ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+        Box::pin(async {})
+    }
+
+    fn toggle_mic_mute(&self) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+        Box::pin(async {})
+    }
+
+    fn subscription(&self) -> iced::Subscription<ControlsEvent> {
+        iced::Subscription::none()
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct NoopBrightnessBackend;
+
+#[cfg(test)]
+impl crate::services::controls_backends::BrightnessBackend for NoopBrightnessBackend {
+    fn backend_name(&self) -> &'static str {
+        "noop-brightness"
+    }
+
+    fn snapshot(&self) -> BrightnessSnapshot {
+        BrightnessSnapshot::default()
+    }
+
+    fn set_brightness(&self, _percent: u32) {}
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct NoopBluetoothBackend;
+
+#[cfg(test)]
+impl crate::services::controls_backends::BluetoothBackend for NoopBluetoothBackend {
+    fn backend_name(&self) -> &'static str {
+        "noop-bluetooth"
+    }
+
+    fn enabled(&self) -> bool {
+        false
+    }
+
+    fn toggle(&self, _enable: bool) -> bool {
+        true
+    }
+
+    fn open_overskride(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct NoopPowerBackend;
+
+#[cfg(test)]
+impl crate::services::controls_backends::PowerBackend for NoopPowerBackend {
+    fn backend_name(&self) -> &'static str {
+        "noop-power"
+    }
+
+    fn profile(&self) -> String {
+        "balanced".to_string()
+    }
+
+    fn set_profile(
+        &self,
+        _profile: String,
+    ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+        Box::pin(async {})
     }
 }
 

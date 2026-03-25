@@ -51,12 +51,19 @@ impl Default for CompositorService {
 }
 
 impl CompositorService {
-    pub fn new(config: &crate::config::CompositorConfig) -> Self {
+    fn resolve_backend_kinds(
+        config: &crate::config::CompositorConfig,
+    ) -> (CompositorBackendKind, CompositorBackendKind) {
         let configured_backend = match config.backend.trim().to_ascii_lowercase().as_str() {
             "niri" => CompositorBackendKind::Niri,
             _ => CompositorBackendKind::Hyprland,
         };
         let active_backend = CompositorBackendKind::Hyprland;
+        (configured_backend, active_backend)
+    }
+
+    pub fn new(config: &crate::config::CompositorConfig) -> Self {
+        let (configured_backend, active_backend) = Self::resolve_backend_kinds(config);
         let backend = hyprland::HyprlandBackend::new();
         let snapshot = CompositorSnapshot {
             workspaces: backend.get_workspaces(),
@@ -127,6 +134,25 @@ impl CompositorService {
     pub async fn find_and_switch_to_app(&self, name: String) -> bool {
         self.backend.find_and_switch_to_app(name).await
     }
+
+    #[cfg(test)]
+    pub fn hermetic_for_tests(
+        configured_backend: CompositorBackendKind,
+        active_backend: CompositorBackendKind,
+    ) -> Self {
+        Self {
+            backend: hyprland::HyprlandBackend::unavailable_for_tests(),
+            snapshot: CompositorSnapshot {
+                workspaces: Vec::new(),
+                active_window: String::new(),
+                special_workspace_visible: false,
+                keyboard_layout: "N/A".to_string(),
+                configured_backend,
+                active_backend,
+            },
+            refresh: WorkspaceRefreshCoalescer::default(),
+        }
+    }
 }
 
 pub fn cursor_position() -> Option<(i32, i32)> {
@@ -139,7 +165,14 @@ mod tests {
 
     #[test]
     fn cursor_position_absent_without_runtime_env() {
-        let _ = CompositorService::default().cursor_position();
+        assert_eq!(
+            CompositorService::hermetic_for_tests(
+                CompositorBackendKind::Hyprland,
+                CompositorBackendKind::Hyprland,
+            )
+            .cursor_position(),
+            None
+        );
     }
 
     #[test]
@@ -158,19 +191,22 @@ mod tests {
 
     #[test]
     fn service_snapshot_call_is_available() {
-        let service = CompositorService::default();
+        let service = CompositorService::hermetic_for_tests(
+            CompositorBackendKind::Hyprland,
+            CompositorBackendKind::Hyprland,
+        );
         let snapshot = service.snapshot();
         assert_eq!(snapshot.configured_backend, CompositorBackendKind::Hyprland);
         assert_eq!(snapshot.active_backend, CompositorBackendKind::Hyprland);
     }
 
     #[test]
-    fn niri_config_falls_back_to_hyprland_backend() {
-        let service = CompositorService::new(&crate::config::CompositorConfig {
-            backend: "niri".to_string(),
-        });
-        let snapshot = service.snapshot();
-        assert_eq!(snapshot.configured_backend, CompositorBackendKind::Niri);
-        assert_eq!(snapshot.active_backend, CompositorBackendKind::Hyprland);
+    fn backend_kind_resolution_falls_back_from_niri_config_to_hyprland_runtime() {
+        let (configured_backend, active_backend) =
+            CompositorService::resolve_backend_kinds(&crate::config::CompositorConfig {
+                backend: "niri".to_string(),
+            });
+        assert_eq!(configured_backend, CompositorBackendKind::Niri);
+        assert_eq!(active_backend, CompositorBackendKind::Hyprland);
     }
 }

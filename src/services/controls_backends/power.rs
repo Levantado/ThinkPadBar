@@ -60,11 +60,21 @@ fn tlp_active() -> bool {
 }
 
 pub(crate) fn current_profile() -> String {
-    if tlp_active() {
+    resolve_current_profile(
+        tlp_active(),
+        fs::read_to_string("/sys/firmware/acpi/platform_profile"),
+    )
+}
+
+fn resolve_current_profile(
+    tlp_active: bool,
+    profile_result: Result<String, std::io::Error>,
+) -> String {
+    if tlp_active {
         return "auto-tlp".to_string();
     }
 
-    match fs::read_to_string("/sys/firmware/acpi/platform_profile") {
+    match profile_result {
         Ok(profile) => profile.trim().to_string(),
         Err(error) => {
             warn!(
@@ -78,11 +88,32 @@ pub(crate) fn current_profile() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::current_profile;
+    use super::resolve_current_profile;
 
     #[test]
-    fn current_profile_returns_string() {
-        let profile = current_profile();
-        assert!(!profile.is_empty());
+    fn resolve_current_profile_prefers_tlp_when_active() {
+        assert_eq!(
+            resolve_current_profile(true, Ok("performance\n".to_string())),
+            "auto-tlp"
+        );
+    }
+
+    #[test]
+    fn resolve_current_profile_trims_profile_contents() {
+        assert_eq!(
+            resolve_current_profile(false, Ok("balanced\n".to_string())),
+            "balanced"
+        );
+    }
+
+    #[test]
+    fn resolve_current_profile_falls_back_to_balanced_on_read_error() {
+        assert_eq!(
+            resolve_current_profile(
+                false,
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+            ),
+            "balanced"
+        );
     }
 }

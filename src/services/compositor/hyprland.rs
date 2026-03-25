@@ -114,6 +114,14 @@ impl HyprlandBackend {
         }
     }
 
+    #[cfg(test)]
+    pub fn unavailable_for_tests() -> Self {
+        Self {
+            command_socket_path: None,
+            event_socket_path: None,
+        }
+    }
+
     fn command(&self, cmd: &str) -> Option<String> {
         let socket_path = self.command_socket_path.as_ref()?;
         let mut stream = SyncUnixStream::connect(socket_path).ok()?;

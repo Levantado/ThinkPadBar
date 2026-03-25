@@ -2705,20 +2705,26 @@ mod tests {
             network_service: crate::services::network::NetworkService::new(
                 &crate::config::NetworkConfig::default(),
             ),
-            idle_inhibitor_service: crate::services::idle_inhibitor::IdleInhibitorService::new(),
+            idle_inhibitor_service:
+                crate::services::idle_inhibitor::IdleInhibitorService::unavailable_for_tests(),
             popup: Popup::None,
             battery_str: String::new(),
             audio_str: String::new(),
             main_window_id: None,
             popup_window_id: None,
             calendar_offset: 0,
-            compositor_service: crate::services::compositor::CompositorService::new(
-                &crate::config::CompositorConfig::default(),
+            compositor_service: crate::services::compositor::CompositorService::hermetic_for_tests(
+                crate::services::compositor::CompositorBackendKind::Hyprland,
+                crate::services::compositor::CompositorBackendKind::Hyprland,
             ),
-            controls_service: crate::services::controls::ControlsService::default(),
+            controls_service: crate::services::controls::ControlsService::with_snapshot_for_tests(
+                crate::services::controls::ControlsSnapshot::default(),
+            ),
             popup_anchor_service: crate::services::popup_anchor::PopupAnchorService::new(24),
             session_service: crate::services::session::SessionService::default(),
-            system_info_service: crate::services::system_info::SystemInfoService::new(),
+            system_info_service: crate::services::system_info::SystemInfoService::with_snapshot(
+                crate::modules::system::SysData::default(),
+            ),
             tray_ui_service: crate::services::tray_ui::TrayUiService::new(),
             perf: super::PerfCounters::default(),
             show_debug_overlay: false,

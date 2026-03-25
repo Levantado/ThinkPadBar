@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.78] - 2026-03-26
+
+### Changed
+- Started `P1 Hermetic Test Sweep` and removed the remaining real runtime probes from the most visible test paths:
+  - `app` tests now use hermetic test-only constructors for compositor, controls, idle inhibitor, and system info instead of touching live Wayland or host runtime state;
+  - `CompositorService` now has a hermetic test constructor and pure backend-kind resolution test path, so compositor tests no longer depend on Hyprland environment variables or sockets;
+  - `SystemInfoService` thermal logic now has a pure helper/test seam, and system-info tests no longer read live `/proc` or `/sys` state;
+  - `ControlsService` now has a test-only snapshot constructor with noop backends, removing host audio/brightness/bluetooth/power reads from `app` test setup;
+  - power backend tests now validate pure profile-resolution logic instead of reading the real platform-profile sysfs path.
+
+### Quality
+- Added and updated regression tests for:
+  - hermetic compositor snapshot and backend-kind resolution,
+  - hermetic system-info thermal updates,
+  - pure power-profile resolution behavior,
+  - `app` coalescing test setup without live runtime probes.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.77] - 2026-03-25
 
 ### Fixed
