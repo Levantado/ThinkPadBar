@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.85] - 2026-03-26
+
+### Changed
+- Started `P4 Audio Backend v2 (PipeWire Events)` by replacing the `pactl subscribe` text-stream listener with a native `pipewire-rs` event runtime:
+  - `WpctlAudioBackend` still uses `wpctl` for volume and mute commands, but now subscribes to PipeWire `default` metadata updates and audio device node parameter changes through a dedicated PipeWire main loop thread;
+  - the listener filters to `Audio/Sink`, `Audio/Source`, and `Audio/Duplex` nodes plus `default.audio.sink` / `default.audio.source` metadata keys, so controls refreshes stay event-driven without subscribing to unrelated graph noise;
+  - controls diagnostics now report the audio backend as `wpctl+pipewire` instead of `wpctl+pactl`.
+
+### Quality
+- Added regression tests for:
+  - audio-node class filtering,
+  - default metadata filtering,
+  - audio metadata property filtering,
+  - audio param filtering,
+  - backend naming for the new PipeWire event runtime.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.84] - 2026-03-26
 
 ### Changed
