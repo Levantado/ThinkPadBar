@@ -45,7 +45,7 @@ pub enum TrayCommand {
 pub struct Tray {
     pub items: HashMap<String, TrayItem>,
     pub activate_tx: Option<tokio::sync::mpsc::UnboundedSender<TrayCommand>>,
-    icon_cache: HashMap<String, Handle>,
+    icon_resolver: crate::services::icon_resolver::IconResolver,
 }
 
 impl Tray {
@@ -53,21 +53,12 @@ impl Tray {
         Self {
             items: HashMap::new(),
             activate_tx: None,
-            icon_cache: HashMap::new(),
+            icon_resolver: crate::services::icon_resolver::IconResolver::new(),
         }
     }
 
     fn resolve_icon_cached(&mut self, name: &str, theme_path: Option<&str>) -> Option<Handle> {
-        for candidate in icon_name_candidates(name) {
-            if let Some(icon) = self.icon_cache.get(&candidate) {
-                return Some(icon.clone());
-            }
-            if let Some(found) = find_icon(&candidate, theme_path) {
-                self.icon_cache.insert(candidate, found.clone());
-                return Some(found);
-            }
-        }
-        None
+        self.icon_resolver.resolve(name, theme_path)
     }
 
     fn rebuild_owned_menu(item: &mut TrayItem) {
@@ -288,67 +279,6 @@ fn pixmap_to_handle(pixmaps: &[system_tray::item::IconPixmap]) -> Option<Handle>
     } else {
         None
     }
-}
-
-fn find_icon(name: &str, theme_path: Option<&str>) -> Option<Handle> {
-    if std::path::Path::new(name).exists() {
-        return Some(Handle::from_path(name.to_string()));
-    }
-
-    if let Some(theme) = theme_path {
-        for p in themed_icon_paths(theme, name) {
-            if std::path::Path::new(&p).exists() {
-                return Some(Handle::from_path(p));
-            }
-        }
-    }
-
-    let home = std::env::var("HOME").unwrap_or_default();
-    let paths = vec![
-        format!(
-            "{}/.local/share/icons/hicolor/scalable/apps/{}.svg",
-            home, name
-        ),
-        format!(
-            "{}/.local/share/icons/hicolor/48x48/apps/{}.png",
-            home, name
-        ),
-        format!(
-            "{}/.local/share/icons/hicolor/32x32/apps/{}.png",
-            home, name
-        ),
-        format!("{}/.icons/hicolor/scalable/apps/{}.svg", home, name),
-        format!("{}/.icons/hicolor/48x48/apps/{}.png", home, name),
-        format!("/usr/share/icons/hicolor/scalable/apps/{}.svg", name),
-        format!("/usr/share/icons/hicolor/48x48/apps/{}.png", name),
-        format!("/usr/share/icons/hicolor/32x32/apps/{}.png", name),
-        format!("/usr/share/pixmaps/{}.png", name),
-        format!("/usr/share/pixmaps/{}.svg", name),
-        // Flatpak paths
-        format!(
-            "{}/.local/share/flatpak/exports/share/icons/hicolor/scalable/apps/{}.svg",
-            home, name
-        ),
-        format!(
-            "{}/.local/share/flatpak/exports/share/icons/hicolor/48x48/apps/{}.png",
-            home, name
-        ),
-        format!(
-            "/var/lib/flatpak/exports/share/icons/hicolor/scalable/apps/{}.svg",
-            name
-        ),
-        format!(
-            "/var/lib/flatpak/exports/share/icons/hicolor/48x48/apps/{}.png",
-            name
-        ),
-    ];
-
-    for p in paths {
-        if std::path::Path::new(&p).exists() {
-            return Some(Handle::from_path(p));
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -773,98 +703,16 @@ pub(crate) fn update_secondary_preference(
     }
 }
 
-fn icon_name_candidates(raw: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return out;
-    }
-
-    out.push(trimmed.to_string());
-
-    let no_prefix = trimmed
-        .strip_prefix("file://")
-        .unwrap_or(trimmed)
-        .trim_matches('"');
-    if no_prefix != trimmed {
-        out.push(no_prefix.to_string());
-    }
-
-    let file_name = std::path::Path::new(no_prefix)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(no_prefix);
-    if !file_name.is_empty() && file_name != no_prefix {
-        out.push(file_name.to_string());
-    }
-
-    let base = file_name
-        .strip_suffix(".svg")
-        .or_else(|| file_name.strip_suffix(".png"))
-        .or_else(|| file_name.strip_suffix(".xpm"))
-        .unwrap_or(file_name);
-    if !base.is_empty() && base != file_name {
-        out.push(base.to_string());
-    }
-    let mut no_symbolic = base;
-    if let Some(stripped) = base.strip_suffix("-symbolic") {
-        if !stripped.is_empty() {
-            out.push(stripped.to_string());
-        }
-        no_symbolic = stripped;
-    }
-    if let Some(stripped) = base.strip_suffix("-panel") {
-        if !stripped.is_empty() {
-            out.push(stripped.to_string());
-        }
-    }
-    if let Some(stripped) = no_symbolic.strip_suffix("-panel") {
-        if !stripped.is_empty() {
-            out.push(stripped.to_string());
-        }
-    }
-
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn themed_icon_paths(theme_root: &str, name: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    let sizes = [
-        "16x16", "22x22", "24x24", "32x32", "48x48", "64x64", "128x128", "256x256",
-    ];
-    let contexts = ["apps", "panel", "status"];
-    let exts = ["png", "svg", "xpm"];
-
-    for ext in exts {
-        paths.push(format!("{}/{}.{}", theme_root, name, ext));
-        for size in sizes {
-            for ctx in contexts {
-                paths.push(format!("{}/{}/{}/{}.{}", theme_root, size, ctx, name, ext));
-            }
-        }
-    }
-    paths
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_secondary_plan, destination_from_item_address, icon_name_candidates,
-        parse_cursor_pos, parse_status_notifier_address, select_registered_item_address,
-        themed_icon_paths, update_secondary_preference, ActivationResult, SecondaryAction,
-        SecondaryPlan, Tray, TrayItem, TrayMenu, TrayMessage, UpdateEvent,
+        choose_secondary_plan, destination_from_item_address, parse_cursor_pos,
+        parse_status_notifier_address, select_registered_item_address, update_secondary_preference,
+        ActivationResult, SecondaryAction, SecondaryPlan, Tray, TrayItem, TrayMenu, TrayMessage,
+        UpdateEvent,
     };
     use std::collections::HashMap;
     use system_tray::menu::{MenuDiff, MenuItemUpdate};
-
-    #[test]
-    fn icon_name_candidates_include_base_name_without_extension() {
-        let c = icon_name_candidates("sample-icon.svg");
-        assert!(c.iter().any(|v| v == "sample-icon.svg"));
-        assert!(c.iter().any(|v| v == "sample-icon"));
-    }
 
     #[test]
     fn tray_has_menu_entries_uses_visible_menu_items() {
@@ -966,35 +814,6 @@ mod tests {
             .expect("child action should exist");
         assert_eq!(child.label, "Child Disabled");
         assert!(!child.enabled);
-    }
-
-    #[test]
-    fn icon_name_candidates_handle_file_url_and_path() {
-        let c = icon_name_candidates("file:///usr/share/icons/hicolor/scalable/apps/foo-bar.svg");
-        assert!(c
-            .iter()
-            .any(|v| v == "/usr/share/icons/hicolor/scalable/apps/foo-bar.svg"));
-        assert!(c.iter().any(|v| v == "foo-bar.svg"));
-        assert!(c.iter().any(|v| v == "foo-bar"));
-    }
-
-    #[test]
-    fn icon_name_candidates_strip_common_tray_suffixes() {
-        let c = icon_name_candidates("sample-panel-symbolic");
-        assert!(c.iter().any(|v| v == "sample-panel-symbolic"));
-        assert!(c.iter().any(|v| v == "sample-panel"));
-        assert!(c.iter().any(|v| v == "sample"));
-    }
-
-    #[test]
-    fn themed_icon_paths_cover_panel_locations() {
-        let p = themed_icon_paths("/usr/share/icons/Papirus-Dark", "sample-panel");
-        assert!(p
-            .iter()
-            .any(|v| v == "/usr/share/icons/Papirus-Dark/22x22/panel/sample-panel.svg"));
-        assert!(p
-            .iter()
-            .any(|v| v == "/usr/share/icons/Papirus-Dark/24x24/status/sample-panel.png"));
     }
 
     #[test]

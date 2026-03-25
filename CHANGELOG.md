@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.82] - 2026-03-26
+
+### Changed
+- Started `P3 Icon Resolver` by extracting tray icon lookup into a dedicated service utility:
+  - added `services/icon_resolver.rs` with a small cached `IconResolver` that resolves direct file icons, theme-name hints, and absolute theme roots with inherited theme fallback;
+  - moved tray icon candidate expansion, theme search roots, themed icon paths, and pixmap fallback search out of `tray_model.rs`;
+  - switched tray runtime to use the shared resolver instead of ad-hoc per-file lookup logic, preserving the existing tray UI but making icon resolution a reusable service boundary.
+
+### Quality
+- Added regression tests for:
+  - theme-name root discovery across XDG and legacy icon locations,
+  - inherited icon lookup from an absolute theme root via `index.theme`,
+  - negative-cache stability for missing icons.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.81] - 2026-03-26
 
 ### Changed

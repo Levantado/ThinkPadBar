@@ -2,6 +2,7 @@ pub mod coalescing;
 pub mod compositor;
 pub mod controls;
 pub mod controls_backends;
+pub mod icon_resolver;
 pub mod idle_inhibitor;
 pub mod network;
 pub mod popup_anchor;
