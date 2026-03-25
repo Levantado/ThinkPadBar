@@ -32,3 +32,27 @@
   - `cargo check --workspace --all-targets`
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
   - `cargo test --workspace --all-features`
+
+## TD-TRAY-002: Локальное tray-меню не выполняет действия и плохо якорится
+
+- Статус: `open` (2026-03-25)
+- Приоритет: `high`
+- Область: `src/app.rs`, `src/modules/tray.rs`, `src/services/tray.rs`
+- Симптомы:
+  - локальное меню трея открывается стабильно, но пункты меню не всегда вызывают реальное действие в приложении-источнике;
+  - popup меню отображается далеко от курсора/иконки трея (ошибка якорения позиции).
+- Гипотезы причин:
+  - неполная синхронизация актуального `DBusMenu` layout перед dispatch (`about_to_show` / submenu state / id path);
+  - текущий popup-серфейс закреплен по `TOP|RIGHT` и не учитывает координату клика как anchor.
+
+### Критерии готовности
+- Нажатие на `enabled` пункт локального tray-меню детерминированно вызывает действие в 100% кликов на целевых приложениях.
+- Меню появляется рядом с триггером (иконка/курсор) с предсказуемым смещением, без “улета” в дальний угол.
+- Добавлены регрессионные тесты:
+  - на dispatch menu-item команды (путь/идентификатор/`about_to_show` sequencing),
+  - на расчет и применение позиции popup-якоря.
+- Полный quality gate зеленый:
+  - `cargo fmt --all -- --check`
+  - `cargo check --workspace --all-targets`
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  - `cargo test --workspace --all-features`

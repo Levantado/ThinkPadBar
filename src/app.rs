@@ -33,7 +33,7 @@ pub enum PowerAction {
 pub struct ThinkPadBar {
     config: crate::config::Config,
     dbus_conn: Option<zbus::Connection>,
-    workspaces: Vec<crate::modules::workspaces::WorkspaceInfo>,
+    workspaces: Vec<crate::services::compositor::WorkspaceInfo>,
     special_workspace_visible: bool,
     active_window: String,
     clock: String,
@@ -102,7 +102,7 @@ pub enum Message {
     RefreshAudioMic,
     UpdateWorkspaces,
     WorkspacesUpdated(
-        Vec<crate::modules::workspaces::WorkspaceInfo>,
+        Vec<crate::services::compositor::WorkspaceInfo>,
         String,
         String,
         bool,
@@ -470,10 +470,10 @@ impl ThinkPadBar {
                     config: cfg,
                     dbus_conn: None, // Will be initialized on first tick or via Task
                     clock: Local::now().format("%a %d %b %H:%M").to_string(),
-                    workspaces: crate::modules::workspaces::get_workspaces(),
+                    workspaces: crate::services::compositor::get_workspaces(),
                     special_workspace_visible:
-                        crate::modules::workspaces::is_special_workspace_visible(),
-                    active_window: crate::modules::workspaces::get_active_window_title(),
+                        crate::services::compositor::is_special_workspace_visible(),
+                    active_window: crate::services::compositor::get_active_window_title(),
                     brightness: crate::modules::brightness::get_brightness(),
                     audio: crate::modules::audio::get_info(),
                     mic: crate::modules::mic::get_info(),
@@ -647,10 +647,10 @@ impl ThinkPadBar {
                 return Task::perform(
                     async {
                         let started = Instant::now();
-                        let ws = crate::modules::workspaces::get_workspaces();
+                        let ws = crate::services::compositor::get_workspaces();
                         let special_visible =
-                            crate::modules::workspaces::is_special_workspace_visible();
-                        let title = crate::modules::workspaces::get_active_window_title();
+                            crate::services::compositor::is_special_workspace_visible();
+                        let title = crate::services::compositor::get_active_window_title();
                         let layout = crate::modules::keyboard::get_layout();
                         (
                             ws,
@@ -707,7 +707,7 @@ impl ThinkPadBar {
             }
             Message::SwitchWorkspace(w_id, ws_name) => {
                 return Task::perform(
-                    async move { crate::modules::workspaces::switch_workspace(w_id, &ws_name) },
+                    async move { crate::services::compositor::switch_workspace(w_id, &ws_name) },
                     |_| Message::UpdateWorkspaces,
                 );
             }
@@ -972,7 +972,7 @@ impl ThinkPadBar {
                     return Task::perform(
                         async move {
                             for c in candidates {
-                                if crate::modules::workspaces::find_and_switch_to_app(c).await {
+                                if crate::services::compositor::find_and_switch_to_app(c).await {
                                     return true;
                                 }
                             }
@@ -2663,7 +2663,7 @@ impl ThinkPadBar {
                 .map(|_| Message::TickThermal(chrono::Local::now())),
             iced::time::every(std::time::Duration::from_secs(slow_secs))
                 .map(|_| Message::TickSlow(chrono::Local::now())),
-            crate::modules::workspaces::subscription(),
+            crate::services::compositor::subscription(),
             crate::services::tray::subscription().map(Message::TrayMessage),
             crate::modules::audio::subscription(),
             iced::event::listen_with(|event, _status, window| match event {

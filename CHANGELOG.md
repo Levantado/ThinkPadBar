@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.60] - 2026-03-25
+
+### Changed
+- Added new high-priority tech debt item `TD-TRAY-002` for remaining tray menu production issues:
+  - local tray menu item actions do not execute reliably for all indicators,
+  - tray menu popup anchor/position can appear far from the click target.
+- Started next architecture step from roadmap: introduced `services/compositor` layer with `CompositorBackend` abstraction and `HyprlandBackend` implementation.
+- Moved app workspace/compositor interactions to service API:
+  - workspace list, active window title, special workspace visibility,
+  - workspace switch command,
+  - compositor event subscription,
+  - app-locate/switch lookup for tray click flow.
+- Tray cursor lookup now uses `services::compositor::cursor_position()` instead of direct module call.
+
+### Quality
+- Added service-level regression test for compositor cursor-position API path.
+- Validation passed: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`.
+
 ## [0.6.59] - 2026-03-25
 
 ### Changed

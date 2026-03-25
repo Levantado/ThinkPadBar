@@ -268,6 +268,7 @@ fn find_icon(name: &str, theme_path: Option<&str>) -> Option<Handle> {
     None
 }
 
+#[cfg(test)]
 fn parse_cursor_pos(raw: &str) -> Option<(i32, i32)> {
     let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
     let x = value.get("x")?.as_f64()?.round() as i32;
@@ -276,9 +277,7 @@ fn parse_cursor_pos(raw: &str) -> Option<(i32, i32)> {
 }
 
 pub(crate) fn current_cursor_pos_with_fallback(last_known: (i32, i32)) -> (i32, i32) {
-    crate::modules::workspaces::hyprland_command("j/cursorpos")
-        .and_then(|raw| parse_cursor_pos(&raw))
-        .unwrap_or(last_known)
+    crate::services::compositor::cursor_position().unwrap_or(last_known)
 }
 
 fn parse_status_notifier_address(address: &str) -> (&str, String) {
