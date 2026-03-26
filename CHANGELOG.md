@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.96] - 2026-03-27
+
+### Changed
+- Continued `P6 ThinkPad Hardware Refinement v2` with threshold-aware battery interpretation in `System Info`:
+  - added a dedicated `Charge State` row that explains whether the pack is charging, discharging, holding at the ceiling, or idling inside the configured threshold window;
+  - the new summary uses existing AC state, battery status, capacity, and charge-threshold data instead of adding more raw metrics.
+
+### Quality
+- Extended regression coverage for:
+  - threshold-aware `Charge State` interpretation,
+  - the expanded hardware row set including the new `Charge State` line.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.95] - 2026-03-27
 
 ### Changed

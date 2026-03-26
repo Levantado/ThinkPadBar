@@ -449,6 +449,37 @@ impl ThinkPadBar {
         }
     }
 
+    fn battery_charge_state_summary(battery: &crate::services::controls::BatteryInfo) -> String {
+        match battery.status.as_str() {
+            "Charging" => battery
+                .charge_end_threshold
+                .map(|end| format!("Charging toward {end}% ceiling"))
+                .unwrap_or_else(|| "Charging".to_string()),
+            "Discharging" => "Discharging".to_string(),
+            "Full" => "Full".to_string(),
+            _ => match (
+                battery.ac_online,
+                battery.charge_start_threshold,
+                battery.charge_end_threshold,
+            ) {
+                (Some(true), Some(_start), Some(end)) if battery.capacity >= end => {
+                    format!("Holding at {end}% ceiling")
+                }
+                (Some(true), Some(start), Some(end))
+                    if battery.capacity >= start && battery.capacity < end =>
+                {
+                    format!("Within {start}-{end}% hold window")
+                }
+                (Some(true), Some(start), Some(_end)) if battery.capacity < start => {
+                    format!("Waiting to resume below {start}%")
+                }
+                (Some(true), _, _) => "AC idle".to_string(),
+                (Some(false), _, _) => battery.status.clone(),
+                (None, _, _) => battery.status.clone(),
+            },
+        }
+    }
+
     fn fan_runtime_summary(fan: &crate::services::controls::FanInfo) -> String {
         format!("{} RPM ({})", fan.speed, fan.level)
     }
@@ -494,6 +525,11 @@ impl ThinkPadBar {
                 "󱞊",
                 "Charge Thresholds",
                 Self::battery_threshold_summary(battery),
+            ),
+            (
+                "󱐌",
+                "Charge State",
+                Self::battery_charge_state_summary(battery),
             ),
             (
                 "󱐋",
@@ -3188,6 +3224,70 @@ mod tests {
             ThinkPadBar::battery_threshold_summary(&battery),
             "40% -> 80%"
         );
+        assert_eq!(
+            ThinkPadBar::battery_charge_state_summary(&battery),
+            "Discharging"
+        );
+    }
+
+    #[test]
+    fn battery_charge_state_summary_interprets_threshold_policy() {
+        let holding = crate::services::controls::BatteryInfo {
+            capacity: 80,
+            status: "Not charging".to_string(),
+            time_remaining: None,
+            ac_online: Some(true),
+            health_percent: None,
+            power_rate_mw: None,
+            pack_voltage_mv: None,
+            cycle_count: None,
+            full_charge_mwh: None,
+            design_capacity_mwh: None,
+            charge_start_threshold: Some(40),
+            charge_end_threshold: Some(80),
+        };
+        assert_eq!(
+            ThinkPadBar::battery_charge_state_summary(&holding),
+            "Holding at 80% ceiling"
+        );
+
+        let window = crate::services::controls::BatteryInfo {
+            capacity: 63,
+            status: "Not charging".to_string(),
+            time_remaining: None,
+            ac_online: Some(true),
+            health_percent: None,
+            power_rate_mw: None,
+            pack_voltage_mv: None,
+            cycle_count: None,
+            full_charge_mwh: None,
+            design_capacity_mwh: None,
+            charge_start_threshold: Some(40),
+            charge_end_threshold: Some(80),
+        };
+        assert_eq!(
+            ThinkPadBar::battery_charge_state_summary(&window),
+            "Within 40-80% hold window"
+        );
+
+        let resume = crate::services::controls::BatteryInfo {
+            capacity: 35,
+            status: "Not charging".to_string(),
+            time_remaining: None,
+            ac_online: Some(true),
+            health_percent: None,
+            power_rate_mw: None,
+            pack_voltage_mv: None,
+            cycle_count: None,
+            full_charge_mwh: None,
+            design_capacity_mwh: None,
+            charge_start_threshold: Some(40),
+            charge_end_threshold: Some(80),
+        };
+        assert_eq!(
+            ThinkPadBar::battery_charge_state_summary(&resume),
+            "Waiting to resume below 40%"
+        );
     }
 
     #[test]
@@ -3255,7 +3355,7 @@ mod tests {
             },
         );
 
-        assert_eq!(rows.len(), 13);
+        assert_eq!(rows.len(), 14);
         assert_eq!(
             rows.iter().map(|(_, label, _)| *label).collect::<Vec<_>>(),
             vec![
@@ -3267,6 +3367,7 @@ mod tests {
                 "Pack Voltage",
                 "Cycle Count",
                 "Charge Thresholds",
+                "Charge State",
                 "Charge / Draw Power",
                 "Power Profile",
                 "Fan Runtime",
