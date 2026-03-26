@@ -2123,6 +2123,11 @@ impl ThinkPadBar {
                         idle_snapshot.wayland_summary(),
                     ))
                     .push(item(
+                        "🧬",
+                        "Wayland Capabilities",
+                        idle_snapshot.capability_summary(),
+                    ))
+                    .push(item(
                         "☕",
                         "Idle Inhibitor Runtime",
                         idle_snapshot.debug_summary(),
@@ -2150,6 +2155,9 @@ impl ThinkPadBar {
                     idle_snapshot.diagnostics.unavailable_reason.clone()
                 {
                     col = col.push(item("⚠", "Wayland Unavailable", unavailable_reason));
+                }
+                if let Some(missing_caps) = idle_snapshot.missing_capabilities() {
+                    col = col.push(item("⚠", "Wayland Missing Caps", missing_caps));
                 }
                 if let Some(last_failure) = tray_diagnostics.runtime.last_dispatch_failure {
                     col = col.push(item("⚠", "Tray Dispatch Failure", last_failure));

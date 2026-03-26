@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.98] - 2026-03-27
+
+### Changed
+- Continued `P7 Native Wayland Polish v2` with a clearer capability matrix in debug `System Info`:
+  - added a dedicated `Wayland Capabilities` line that reports the state of `wl_compositor`, `zwp_idle_inhibit_manager_v1`, and `wl_surface`;
+  - added an explicit `Wayland Missing Caps` warning row when one or more required protocol capabilities are absent.
+
+### Quality
+- Added regression coverage for:
+  - capability-matrix formatting,
+  - missing-capability reporting with explicit protocol names.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.97] - 2026-03-27
 
 ### Changed
