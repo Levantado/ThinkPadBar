@@ -547,6 +547,29 @@ impl ThinkPadBar {
         ]
     }
 
+    fn display_summary_rows(
+        wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
+    ) -> Vec<(&'static str, &'static str, String)> {
+        vec![
+            (
+                "🧭",
+                "Display Mode",
+                wayland_snapshot.display_mode_summary(),
+            ),
+            (
+                "🧭",
+                "Display Topology",
+                wayland_snapshot.output_topology_summary(),
+            ),
+            (
+                "🧪",
+                "Display Scale",
+                wayland_snapshot.output_scale_summary(),
+            ),
+            ("🖥", "Display Outputs", wayland_snapshot.output_summary()),
+        ]
+    }
+
     fn coalescing_diagnostics(&self) -> AppCoalescingDiagnostics {
         AppCoalescingDiagnostics {
             pending_control_flushes: self.controls_coalescing.pending_count(),
@@ -1734,6 +1757,7 @@ impl ThinkPadBar {
 
     fn view_popup(&self) -> Element<'_, Message, Theme, iced::Renderer> {
         let compositor = self.compositor_service.snapshot();
+        let wayland_snapshot = self.wayland_runtime_service.snapshot();
         if let Popup::TrayMenu = &self.popup {
             let mut content = Column::new()
                 .spacing(6)
@@ -1994,7 +2018,6 @@ impl ThinkPadBar {
             let controls_diagnostics = self.controls_service.diagnostics();
             let network_diagnostics = self.network_service.diagnostics();
             let idle_snapshot = self.idle_inhibitor_service.snapshot();
-            let wayland_snapshot = self.wayland_runtime_service.snapshot();
             let tray_diagnostics = self.tray_ui_service.diagnostics();
             let coalescing_diagnostics = self.coalescing_diagnostics();
             let hardware_rows = Self::hardware_summary_rows(
@@ -2004,6 +2027,7 @@ impl ThinkPadBar {
                 sys_data,
                 &idle_snapshot,
             );
+            let display_rows = Self::display_summary_rows(wayland_snapshot);
             col = col
                 .push(item("", "CPU Usage", sys_data.cpu_str.clone()))
                 .push(item("󰍛", "Memory Usage", sys_data.mem_str.clone()))
@@ -2016,29 +2040,18 @@ impl ThinkPadBar {
                     sys_data.disk_boot_str.clone(),
                 ))
                 .push(item("🌐", "IP Address", sys_data.ip_address.clone()))
-                .push(item(
-                    "🧭",
-                    "Display Topology",
-                    wayland_snapshot.output_topology_summary(),
-                ))
-                .push(item(
-                    "🧪",
-                    "Display Scale",
-                    wayland_snapshot.output_scale_summary(),
-                ))
-                .push(item(
-                    "🖥",
-                    "Display Outputs",
-                    wayland_snapshot.output_summary(),
-                ))
                 .push(item("⬇", "Download Speed", sys_data.net_down_str.clone()))
-                .push(item("⬆", "Upload Speed", sys_data.net_up_str.clone()))
-                .push(Space::with_height(Length::Fixed(8.0)))
-                .push(text("ThinkPad Hardware").size(14).style(move |_| {
-                    iced::widget::text::Style {
+                .push(item("⬆", "Upload Speed", sys_data.net_up_str.clone()));
+            for (icon, label, value) in display_rows {
+                col = col.push(item(icon, label, value));
+            }
+            col = col.push(Space::with_height(Length::Fixed(8.0))).push(
+                text("ThinkPad Hardware")
+                    .size(14)
+                    .style(move |_| iced::widget::text::Style {
                         color: Some(Color::from_rgb8(0x9e, 0xce, 0x6a)),
-                    }
-                }));
+                    }),
+            );
             for (icon, label, value) in hardware_rows {
                 col = col.push(item(icon, label, value));
             }
@@ -2719,6 +2732,47 @@ impl ThinkPadBar {
             }
             btn
         };
+        let display_rows = Self::display_summary_rows(wayland_snapshot);
+        let display_card = {
+            let mut display_col = Column::new().spacing(8).push(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(text("󰍹").size(16))
+                    .push(text("Displays").size(14)),
+            );
+            for (_icon, label, value) in display_rows {
+                display_col = display_col.push(
+                    Row::new()
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .push(
+                            text(label)
+                                .size(12)
+                                .width(Length::FillPortion(2))
+                                .style(|_| iced::widget::text::Style {
+                                    color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                                }),
+                        )
+                        .push(
+                            text(value)
+                                .size(12)
+                                .width(Length::FillPortion(3))
+                                .align_x(iced::alignment::Horizontal::Right),
+                        ),
+                );
+            }
+            container(display_col)
+                .padding(16)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                    border: iced::Border {
+                        radius: 12.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+        };
         let bt_app_btn = button(
             Row::new()
                 .spacing(4)
@@ -2922,6 +2976,7 @@ impl ThinkPadBar {
                     .push(bt_btn)
                     .push(idle_btn),
             )
+            .push(display_card)
             .push(Row::new().spacing(16).push(bt_app_btn));
 
         if wifi_snapshot.menu_open {
@@ -3476,6 +3531,46 @@ mod tests {
             ]
         );
         assert!(rows.iter().all(|(_, _, value)| !value.is_empty()));
+    }
+
+    #[test]
+    fn display_summary_rows_include_mode_and_hotplug_aware_state() {
+        let rows = ThinkPadBar::display_summary_rows(
+            &crate::services::wayland_runtime::WaylandRuntimeSnapshot {
+                available: true,
+                outputs: vec![
+                    crate::services::wayland_runtime::WaylandOutputInfo {
+                        global_name: 1,
+                        version: 4,
+                        name: Some("eDP-1".to_string()),
+                        scale_factor: Some(2),
+                        ..crate::services::wayland_runtime::WaylandOutputInfo::default()
+                    },
+                    crate::services::wayland_runtime::WaylandOutputInfo {
+                        global_name: 2,
+                        version: 4,
+                        name: Some("DP-2".to_string()),
+                        scale_factor: Some(1),
+                        ..crate::services::wayland_runtime::WaylandOutputInfo::default()
+                    },
+                ],
+                ..crate::services::wayland_runtime::WaylandRuntimeSnapshot::default()
+            },
+        );
+
+        assert_eq!(
+            rows.iter().map(|(_, label, _)| *label).collect::<Vec<_>>(),
+            vec![
+                "Display Mode",
+                "Display Topology",
+                "Display Scale",
+                "Display Outputs",
+            ]
+        );
+        assert_eq!(rows[0].2, "Hybrid");
+        assert_eq!(rows[1].2, "1 internal + 1 external");
+        assert_eq!(rows[2].2, "eDP-1 2x, DP-2 1x");
+        assert_eq!(rows[3].2, "2 outputs: eDP-1, DP-2");
     }
 
     #[test]

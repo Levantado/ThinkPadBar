@@ -171,6 +171,31 @@ impl WaylandRuntimeSnapshot {
         }
     }
 
+    pub fn display_mode_summary(&self) -> String {
+        if self.outputs.is_empty() {
+            return if self.available {
+                "Headless".to_string()
+            } else {
+                "Wayland unavailable".to_string()
+            };
+        }
+
+        let internal = self
+            .outputs
+            .iter()
+            .filter(|output| output.is_internal())
+            .count();
+        let external = self.outputs.len().saturating_sub(internal);
+
+        match (internal, external) {
+            (0, 0) => "Headless".to_string(),
+            (internal, 0) if internal > 0 => "Laptop".to_string(),
+            (0, external) if external > 0 => "Docked".to_string(),
+            (internal, external) if internal > 0 && external > 0 => "Hybrid".to_string(),
+            _ => "Unknown".to_string(),
+        }
+    }
+
     pub fn output_detail_summary(&self) -> String {
         if self.outputs.is_empty() {
             return if self.available {
@@ -541,6 +566,59 @@ mod tests {
             service.snapshot().output_topology_summary(),
             "1 internal + 1 external"
         );
+    }
+
+    #[test]
+    fn display_mode_summary_classifies_common_topologies() {
+        let unavailable = WaylandRuntimeService::unavailable_for_tests();
+        assert_eq!(
+            unavailable.snapshot().display_mode_summary(),
+            "Wayland unavailable"
+        );
+
+        let laptop = WaylandRuntimeService::with_snapshot_for_tests(WaylandRuntimeSnapshot {
+            available: true,
+            outputs: vec![WaylandOutputInfo {
+                global_name: 1,
+                version: 4,
+                name: Some("eDP-1".to_string()),
+                ..WaylandOutputInfo::default()
+            }],
+            ..WaylandRuntimeSnapshot::default()
+        });
+        assert_eq!(laptop.snapshot().display_mode_summary(), "Laptop");
+
+        let docked = WaylandRuntimeService::with_snapshot_for_tests(WaylandRuntimeSnapshot {
+            available: true,
+            outputs: vec![WaylandOutputInfo {
+                global_name: 2,
+                version: 4,
+                name: Some("HDMI-A-1".to_string()),
+                ..WaylandOutputInfo::default()
+            }],
+            ..WaylandRuntimeSnapshot::default()
+        });
+        assert_eq!(docked.snapshot().display_mode_summary(), "Docked");
+
+        let hybrid = WaylandRuntimeService::with_snapshot_for_tests(WaylandRuntimeSnapshot {
+            available: true,
+            outputs: vec![
+                WaylandOutputInfo {
+                    global_name: 1,
+                    version: 4,
+                    name: Some("eDP-1".to_string()),
+                    ..WaylandOutputInfo::default()
+                },
+                WaylandOutputInfo {
+                    global_name: 2,
+                    version: 4,
+                    name: Some("DP-2".to_string()),
+                    ..WaylandOutputInfo::default()
+                },
+            ],
+            ..WaylandRuntimeSnapshot::default()
+        });
+        assert_eq!(hybrid.snapshot().display_mode_summary(), "Hybrid");
     }
 
     #[test]

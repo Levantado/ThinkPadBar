@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.102] - 2026-03-27
+
+### Changed
+- Continued `P7 Native Wayland Polish v2` with a compact, hotplug-aware display surface outside of `System Info`:
+  - regular `System Info` now adds a derived `Display Mode` row (`Laptop`, `Docked`, `Hybrid`, `Headless`) on top of raw output listings;
+  - the control-center popup now renders a dedicated `Displays` card with live `Display Mode`, `Display Topology`, `Display Scale`, and `Display Outputs` summaries sourced from `WaylandRuntimeService`;
+  - display interpretation is now reused through shared app-level summary rows instead of being spread across multiple one-off render paths.
+
+### Quality
+- Added regression coverage for:
+  - derived display mode classification across common output topologies,
+  - app-level display summary row composition for hotplug-aware output state.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.101] - 2026-03-27
 
 ### Changed
