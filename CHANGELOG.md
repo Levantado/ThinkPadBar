@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.100] - 2026-03-27
+
+### Changed
+- Continued `P7 Native Wayland Polish v2` by turning raw `wl_output` discovery into richer output interpretation:
+  - `WaylandRuntimeService` now tracks current output mode and scale when `wl_output` advertises them;
+  - regular `System Info` now shows `Display Topology` in addition to `Display Outputs`;
+  - debug `System Info` now exposes `Wayland Outputs Detail` with connector/mode/scale details.
+
+### Quality
+- Added regression coverage for:
+  - internal vs external output topology summaries,
+  - detailed output formatting including mode and scale.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.99] - 2026-03-27
 
 ### Changed

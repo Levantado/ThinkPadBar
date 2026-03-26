@@ -2011,6 +2011,11 @@ impl ThinkPadBar {
                 ))
                 .push(item("🌐", "IP Address", sys_data.ip_address.clone()))
                 .push(item(
+                    "🧭",
+                    "Display Topology",
+                    wayland_snapshot.output_topology_summary(),
+                ))
+                .push(item(
                     "🖥",
                     "Display Outputs",
                     wayland_snapshot.output_summary(),
@@ -2141,6 +2146,11 @@ impl ThinkPadBar {
                         "🖵",
                         "Wayland Outputs",
                         wayland_snapshot.output_summary(),
+                    ))
+                    .push(item(
+                        "🗺",
+                        "Wayland Outputs Detail",
+                        wayland_snapshot.output_detail_summary(),
                     ))
                     .push(item(
                         "☕",

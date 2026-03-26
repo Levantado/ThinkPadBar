@@ -5,7 +5,7 @@ use wayland_client::{
         wl_registry::{self, WlRegistry},
         wl_shm::WlShm,
     },
-    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase;
 
@@ -17,6 +17,10 @@ pub struct WaylandOutputInfo {
     pub description: Option<String>,
     pub make: Option<String>,
     pub model: Option<String>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub refresh_mhz: Option<i32>,
+    pub scale_factor: Option<i32>,
 }
 
 impl WaylandOutputInfo {
@@ -41,6 +45,35 @@ impl WaylandOutputInfo {
             (None, Some(model)) => model.to_string(),
             (None, None) => format!("output-{}", self.global_name),
         }
+    }
+
+    pub fn detail_label(&self) -> String {
+        let mut parts = vec![self.label()];
+        if let (Some(width), Some(height)) = (self.width, self.height) {
+            parts.push(format!("{width}x{height}"));
+        }
+        if let Some(refresh_mhz) = self.refresh_mhz {
+            let refresh_hz = refresh_mhz as f64 / 1000.0;
+            if (refresh_hz.fract() - 0.0).abs() < f64::EPSILON {
+                parts.push(format!("{refresh_hz:.0}Hz"));
+            } else {
+                parts.push(format!("{refresh_hz:.1}Hz"));
+            }
+        }
+        if let Some(scale_factor) = self.scale_factor {
+            if scale_factor > 0 {
+                parts.push(format!("{scale_factor}x"));
+            }
+        }
+        parts.join(" ")
+    }
+
+    pub fn is_internal(&self) -> bool {
+        let Some(name) = self.name.as_deref() else {
+            return false;
+        };
+        let upper = name.to_ascii_uppercase();
+        upper.starts_with("EDP") || upper.starts_with("LVDS") || upper.starts_with("DSI")
     }
 }
 
@@ -101,6 +134,45 @@ impl WaylandRuntimeSnapshot {
             .map(WaylandOutputInfo::label)
             .collect::<Vec<_>>();
         format!("{} outputs: {}", labels.len(), labels.join(", "))
+    }
+
+    pub fn output_topology_summary(&self) -> String {
+        if self.outputs.is_empty() {
+            return if self.available {
+                "No outputs".to_string()
+            } else {
+                "Wayland unavailable".to_string()
+            };
+        }
+
+        let internal = self
+            .outputs
+            .iter()
+            .filter(|output| output.is_internal())
+            .count();
+        let external = self.outputs.len().saturating_sub(internal);
+        match (internal, external) {
+            (0, 0) => "No outputs".to_string(),
+            (0, external) => format!("{external} external"),
+            (internal, 0) => format!("{internal} internal"),
+            (internal, external) => format!("{internal} internal + {external} external"),
+        }
+    }
+
+    pub fn output_detail_summary(&self) -> String {
+        if self.outputs.is_empty() {
+            return if self.available {
+                "No outputs".to_string()
+            } else {
+                "Wayland unavailable".to_string()
+            };
+        }
+
+        self.outputs
+            .iter()
+            .map(WaylandOutputInfo::detail_label)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     pub fn missing_capabilities(&self) -> Option<String> {
@@ -282,6 +354,26 @@ impl Dispatch<WlOutput, u32> for WaylandRuntimeData {
             wl_output::Event::Description { description } => {
                 output.description = Some(description);
             }
+            wl_output::Event::Mode {
+                flags,
+                width,
+                height,
+                refresh,
+            } => {
+                let flags = match flags {
+                    WEnum::Value(flags) => flags,
+                    WEnum::Unknown(_) => return,
+                };
+
+                if flags.contains(wl_output::Mode::Current) {
+                    output.width = Some(width);
+                    output.height = Some(height);
+                    output.refresh_mhz = Some(refresh);
+                }
+            }
+            wl_output::Event::Scale { factor } => {
+                output.scale_factor = Some(factor);
+            }
             _ => {}
         }
     }
@@ -315,6 +407,56 @@ mod tests {
         assert_eq!(
             service.snapshot().output_summary(),
             "2 outputs: eDP-1, Dell U2720Q"
+        );
+    }
+
+    #[test]
+    fn output_topology_summary_counts_internal_and_external_outputs() {
+        let service = WaylandRuntimeService::with_snapshot_for_tests(WaylandRuntimeSnapshot {
+            available: true,
+            outputs: vec![
+                WaylandOutputInfo {
+                    global_name: 1,
+                    version: 4,
+                    name: Some("eDP-1".to_string()),
+                    ..WaylandOutputInfo::default()
+                },
+                WaylandOutputInfo {
+                    global_name: 2,
+                    version: 4,
+                    name: Some("HDMI-A-1".to_string()),
+                    ..WaylandOutputInfo::default()
+                },
+            ],
+            ..WaylandRuntimeSnapshot::default()
+        });
+
+        assert_eq!(
+            service.snapshot().output_topology_summary(),
+            "1 internal + 1 external"
+        );
+    }
+
+    #[test]
+    fn output_detail_summary_includes_mode_and_scale() {
+        let service = WaylandRuntimeService::with_snapshot_for_tests(WaylandRuntimeSnapshot {
+            available: true,
+            outputs: vec![WaylandOutputInfo {
+                global_name: 1,
+                version: 4,
+                name: Some("eDP-1".to_string()),
+                width: Some(1920),
+                height: Some(1200),
+                refresh_mhz: Some(60000),
+                scale_factor: Some(2),
+                ..WaylandOutputInfo::default()
+            }],
+            ..WaylandRuntimeSnapshot::default()
+        });
+
+        assert_eq!(
+            service.snapshot().output_detail_summary(),
+            "eDP-1 1920x1200 60Hz 2x"
         );
     }
 
