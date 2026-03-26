@@ -5,6 +5,7 @@ pub enum PopupSurfaceKind {
     Hidden,
     ControlCenter,
     SystemMonitor,
+    Displays,
     Calendar,
     TrayMenu,
 }
@@ -50,6 +51,12 @@ impl PopupAnchorService {
             },
             PopupSurfaceKind::SystemMonitor => PopupSurfacePlan {
                 width: 400,
+                height: 520,
+                anchor: Anchor::TOP | Anchor::RIGHT,
+                margin: (self.bar_height, 8, 0, 0),
+            },
+            PopupSurfaceKind::Displays => PopupSurfacePlan {
+                width: 460,
                 height: 520,
                 anchor: Anchor::TOP | Anchor::RIGHT,
                 margin: (self.bar_height, 8, 0, 0),
@@ -104,5 +111,14 @@ mod tests {
         assert_eq!(plan.anchor, Anchor::TOP | Anchor::LEFT);
         assert_eq!(plan.height, 188);
         assert_eq!(plan.margin, (44, 0, 0, 1208));
+    }
+
+    #[test]
+    fn displays_plan_uses_dedicated_surface_size() {
+        let service = PopupAnchorService::new(24);
+        let plan = service.plan(PopupSurfaceKind::Displays, None, None);
+        assert_eq!(plan.width, 460);
+        assert_eq!(plan.height, 520);
+        assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
     }
 }

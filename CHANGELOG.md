@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.0] - 2026-03-27
+
+### Changed
+- Declared ThinkPadBar `1.0.0` to mark the end of the foundational migration phase and the start of a stable production-focused release line for the current Hyprland/ThinkPad scope.
+- Continued `P7 Native Wayland Polish v2` with both requested next moves:
+  - added a dedicated `Displays` popup with hotplug-aware output details, capability state, and a direct `Back` path into the control center;
+  - added a new protocol-backed `Display Mode` feature that classifies current output state as `Laptop`, `Docked`, `Hybrid`, `Headless`, or `Wayland unavailable`;
+  - the control-center `Displays` card now includes an explicit `Open` action instead of only showing passive summary rows.
+
+### Quality
+- Added regression coverage for:
+  - display popup output detail formatting,
+  - dedicated display popup surface policy,
+  - display mode topology classification.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.102] - 2026-03-27
 
 ### Changed

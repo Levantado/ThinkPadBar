@@ -16,6 +16,7 @@ pub enum Popup {
     None,
     ControlCenter,
     SystemMonitor,
+    Displays,
     Calendar,
     TrayMenu,
 }
@@ -269,6 +270,7 @@ impl ThinkPadBar {
             Popup::None => crate::services::popup_anchor::PopupSurfaceKind::Hidden,
             Popup::ControlCenter => crate::services::popup_anchor::PopupSurfaceKind::ControlCenter,
             Popup::SystemMonitor => crate::services::popup_anchor::PopupSurfaceKind::SystemMonitor,
+            Popup::Displays => crate::services::popup_anchor::PopupSurfaceKind::Displays,
             Popup::Calendar => crate::services::popup_anchor::PopupSurfaceKind::Calendar,
             Popup::TrayMenu => crate::services::popup_anchor::PopupSurfaceKind::TrayMenu,
         }
@@ -568,6 +570,53 @@ impl ThinkPadBar {
             ),
             ("🖥", "Display Outputs", wayland_snapshot.output_summary()),
         ]
+    }
+
+    fn display_popup_output_rows(
+        wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
+    ) -> Vec<(String, String)> {
+        if wayland_snapshot.outputs.is_empty() {
+            return vec![(
+                if wayland_snapshot.available {
+                    "No outputs".to_string()
+                } else {
+                    "Wayland unavailable".to_string()
+                },
+                wayland_snapshot
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "No wl_output state available".to_string()),
+            )];
+        }
+
+        wayland_snapshot
+            .outputs
+            .iter()
+            .map(|output| {
+                let mut detail_parts = Vec::new();
+                if let (Some(width), Some(height)) = (output.width, output.height) {
+                    detail_parts.push(format!("{width}x{height}"));
+                }
+                if let Some(refresh_mhz) = output.refresh_mhz {
+                    let refresh_hz = refresh_mhz as f64 / 1000.0;
+                    if (refresh_hz.fract() - 0.0).abs() < f64::EPSILON {
+                        detail_parts.push(format!("{refresh_hz:.0}Hz"));
+                    } else {
+                        detail_parts.push(format!("{refresh_hz:.1}Hz"));
+                    }
+                }
+                if let Some(scale_factor) = output.scale_factor.filter(|scale| *scale > 0) {
+                    detail_parts.push(format!("{scale_factor}x scale"));
+                }
+                detail_parts.push(if output.is_internal() {
+                    "internal".to_string()
+                } else {
+                    "external".to_string()
+                });
+
+                (output.label(), detail_parts.join(" · "))
+            })
+            .collect()
     }
 
     fn coalescing_diagnostics(&self) -> AppCoalescingDiagnostics {
@@ -1817,6 +1866,101 @@ impl ThinkPadBar {
             .into();
         }
 
+        if self.popup == Popup::Displays {
+            let summary_rows = Self::display_summary_rows(wayland_snapshot);
+            let output_rows = Self::display_popup_output_rows(wayland_snapshot);
+
+            let item = |label: &str, val: String| -> Element<'_, Message, Theme, iced::Renderer> {
+                Row::new()
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .push(
+                        text(label.to_string())
+                            .size(13)
+                            .width(Length::FillPortion(2)),
+                    )
+                    .push(
+                        text(val)
+                            .size(13)
+                            .width(Length::FillPortion(3))
+                            .align_x(iced::alignment::Horizontal::Right),
+                    )
+                    .into()
+            };
+
+            let mut outputs_col = Column::new().spacing(10);
+            for (label, detail) in output_rows {
+                outputs_col = outputs_col.push(
+                    container(Column::new().spacing(4).push(text(label).size(14)).push(
+                        text(detail).size(12).style(|_| iced::widget::text::Style {
+                            color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                        }),
+                    ))
+                    .padding(12)
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb8(
+                            0x29, 0x2e, 0x42,
+                        ))),
+                        border: iced::Border {
+                            radius: 10.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                );
+            }
+
+            let mut content = Column::new().spacing(14).push(
+                Row::new()
+                    .align_y(Alignment::Center)
+                    .push(text("Displays").size(18))
+                    .push(Space::with_width(Length::Fill))
+                    .push(
+                        button(text("Back").size(12))
+                            .padding(Padding::from([6, 10]))
+                            .on_press(Message::TogglePopup(Popup::ControlCenter)),
+                    ),
+            );
+            for (_icon, label, value) in summary_rows {
+                content = content.push(item(label, value));
+            }
+            if let Some(missing_caps) = wayland_snapshot.missing_capabilities() {
+                content = content.push(item("Missing Caps", missing_caps));
+            }
+            content = content
+                .push(Space::with_height(Length::Fixed(8.0)))
+                .push(
+                    text("Output Details")
+                        .size(14)
+                        .style(|_| iced::widget::text::Style {
+                            color: Some(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                        }),
+                )
+                .push(outputs_col);
+
+            return container(
+                container(scrollable(content))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding(Padding::from([20, 24]))
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(Color {
+                            a: self.config.appearance.opacity,
+                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
+                        })),
+                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                        border: iced::Border {
+                            radius: 12.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        }
+
         if self.popup == Popup::Calendar {
             let now = chrono::Local::now();
 
@@ -2739,7 +2883,13 @@ impl ThinkPadBar {
                     .spacing(8)
                     .align_y(Alignment::Center)
                     .push(text("󰍹").size(16))
-                    .push(text("Displays").size(14)),
+                    .push(text("Displays").size(14))
+                    .push(Space::with_width(Length::Fill))
+                    .push(
+                        button(text("Open").size(11))
+                            .padding(Padding::from([4, 8]))
+                            .on_press(Message::TogglePopup(Popup::Displays)),
+                    ),
             );
             for (_icon, label, value) in display_rows {
                 display_col = display_col.push(
@@ -3571,6 +3721,43 @@ mod tests {
         assert_eq!(rows[1].2, "1 internal + 1 external");
         assert_eq!(rows[2].2, "eDP-1 2x, DP-2 1x");
         assert_eq!(rows[3].2, "2 outputs: eDP-1, DP-2");
+    }
+
+    #[test]
+    fn display_popup_output_rows_include_resolution_scale_and_classification() {
+        let rows = ThinkPadBar::display_popup_output_rows(
+            &crate::services::wayland_runtime::WaylandRuntimeSnapshot {
+                available: true,
+                outputs: vec![
+                    crate::services::wayland_runtime::WaylandOutputInfo {
+                        global_name: 1,
+                        version: 4,
+                        name: Some("eDP-1".to_string()),
+                        width: Some(1920),
+                        height: Some(1200),
+                        refresh_mhz: Some(60000),
+                        scale_factor: Some(2),
+                        ..crate::services::wayland_runtime::WaylandOutputInfo::default()
+                    },
+                    crate::services::wayland_runtime::WaylandOutputInfo {
+                        global_name: 2,
+                        version: 4,
+                        name: Some("DP-2".to_string()),
+                        width: Some(2560),
+                        height: Some(1440),
+                        refresh_mhz: Some(144000),
+                        scale_factor: Some(1),
+                        ..crate::services::wayland_runtime::WaylandOutputInfo::default()
+                    },
+                ],
+                ..crate::services::wayland_runtime::WaylandRuntimeSnapshot::default()
+            },
+        );
+
+        assert_eq!(rows[0].0, "eDP-1");
+        assert_eq!(rows[0].1, "1920x1200 · 60Hz · 2x scale · internal");
+        assert_eq!(rows[1].0, "DP-2");
+        assert_eq!(rows[1].1, "2560x1440 · 144Hz · 1x scale · external");
     }
 
     #[test]
