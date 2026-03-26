@@ -213,6 +213,7 @@ mod tests {
             title: Some("My App".to_string()),
             icon_name: Some("org.example.myapp-panel-symbolic".to_string()),
             icon_handle: None,
+            icon_signature: None,
             item_is_menu: false,
             menu_path: None,
             menu_layout: None,
@@ -245,6 +246,7 @@ mod tests {
                 title: Some("Item".to_string()),
                 icon_name: None,
                 icon_handle: None,
+                icon_signature: None,
                 item_is_menu: false,
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {
@@ -293,6 +295,7 @@ mod tests {
                 title: Some("Item".to_string()),
                 icon_name: None,
                 icon_handle: None,
+                icon_signature: None,
                 item_is_menu: true,
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {
@@ -354,6 +357,7 @@ mod tests {
                 title: Some("Item".to_string()),
                 icon_name: None,
                 icon_handle: None,
+                icon_signature: None,
                 item_is_menu: false,
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {
@@ -408,6 +412,7 @@ mod tests {
                 title: Some("Item".to_string()),
                 icon_name: None,
                 icon_handle: None,
+                icon_signature: None,
                 item_is_menu: false,
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {

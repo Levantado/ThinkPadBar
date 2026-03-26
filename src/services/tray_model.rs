@@ -1,7 +1,9 @@
 use iced::widget::image::Handle;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use system_tray::client::{ActivateRequest, Client, Event, UpdateEvent};
-use system_tray::item::StatusNotifierItem;
+use system_tray::item::{IconPixmap, StatusNotifierItem};
 pub use system_tray::menu::TrayMenu;
 use system_tray::menu::{MenuDiff, MenuItem, MenuItemUpdate};
 use tokio::time::{timeout, Duration};
@@ -13,6 +15,7 @@ pub struct TrayItem {
     pub title: Option<String>,
     pub icon_name: Option<String>,
     pub icon_handle: Option<Handle>,
+    pub icon_signature: Option<u64>,
     pub item_is_menu: bool,
     pub menu_path: Option<String>,
     pub menu_layout: Option<TrayMenu>,
@@ -170,7 +173,7 @@ impl Tray {
     pub fn update(&mut self, message: TrayMessage) {
         match message {
             TrayMessage::ItemAdded(id, item) => {
-                let mut icon_handle = get_icon_handle(&item);
+                let (mut icon_handle, icon_signature) = get_icon_handle_and_signature(&item);
                 if icon_handle.is_none() {
                     icon_handle = self.resolve_item_icon(
                         item.icon_name.as_deref(),
@@ -185,6 +188,7 @@ impl Tray {
                         title: item.title.clone(),
                         icon_name: item.icon_name.clone(),
                         icon_handle,
+                        icon_signature,
                         item_is_menu: item.item_is_menu,
                         menu_path: item.menu.clone(),
                         menu_layout: None,
@@ -207,14 +211,19 @@ impl Tray {
                             icon_name,
                             icon_pixmap,
                         } => {
+                            let mut updated_name = None;
                             if let Some(name) = icon_name {
                                 item.icon_name = Some(name.clone());
-                                if item.icon_handle.is_none() {
-                                    cache_lookup_name = Some(name);
-                                }
+                                updated_name = Some(name);
                             }
                             if let Some(pixmap) = icon_pixmap {
-                                item.icon_handle = pixmap_to_handle(&pixmap);
+                                update_item_pixmap_icon(item, &pixmap);
+                                if item.icon_handle.is_none() {
+                                    cache_lookup_name =
+                                        updated_name.or_else(|| item.icon_name.clone());
+                                }
+                            } else if item.icon_handle.is_none() {
+                                cache_lookup_name = updated_name;
                             }
                         }
                         UpdateEvent::MenuConnect(path) => {
@@ -433,20 +442,44 @@ fn apply_menu_item_remove(item: &mut MenuItem, remove: &[String]) {
     }
 }
 
-fn get_icon_handle(item: &StatusNotifierItem) -> Option<Handle> {
+fn get_icon_handle_and_signature(item: &StatusNotifierItem) -> (Option<Handle>, Option<u64>) {
     if let Some(pixmaps) = &item.icon_pixmap {
-        pixmap_to_handle(pixmaps)
+        (
+            pixmap_to_handle(pixmaps),
+            pixmap_signature_for_best_pixmap(pixmaps),
+        )
     } else {
-        None
+        (None, None)
     }
 }
 
-fn pixmap_to_handle(pixmaps: &[system_tray::item::IconPixmap]) -> Option<Handle> {
-    // Find the best pixmap size (closest to 24x24) or just the first one
+fn best_pixmap(pixmaps: &[IconPixmap]) -> Option<&IconPixmap> {
     let target_size = 24;
-    let best = pixmaps.iter().min_by_key(|p| (p.width - target_size).abs());
+    pixmaps.iter().min_by_key(|p| (p.width - target_size).abs())
+}
 
-    if let Some(best) = best {
+fn pixmap_signature_for_best_pixmap(pixmaps: &[IconPixmap]) -> Option<u64> {
+    let best = best_pixmap(pixmaps)?;
+    let mut hasher = DefaultHasher::new();
+    best.width.hash(&mut hasher);
+    best.height.hash(&mut hasher);
+    best.pixels.len().hash(&mut hasher);
+    best.pixels.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn update_item_pixmap_icon(item: &mut TrayItem, pixmaps: &[IconPixmap]) -> bool {
+    let signature = pixmap_signature_for_best_pixmap(pixmaps);
+    if signature == item.icon_signature {
+        return false;
+    }
+    item.icon_signature = signature;
+    item.icon_handle = pixmap_to_handle(pixmaps);
+    true
+}
+
+fn pixmap_to_handle(pixmaps: &[IconPixmap]) -> Option<Handle> {
+    if let Some(best) = best_pixmap(pixmaps) {
         let width = best.width as u32;
         let height = best.height as u32;
         let mut rgba_pixels = Vec::with_capacity((width * height * 4) as usize);
@@ -895,13 +928,14 @@ pub(crate) fn update_secondary_preference(
 mod tests {
     use super::{
         choose_secondary_plan, destination_from_item_address, parse_cursor_pos,
-        parse_status_notifier_address, select_registered_item_address, update_secondary_preference,
+        parse_status_notifier_address, pixmap_signature_for_best_pixmap,
+        select_registered_item_address, update_item_pixmap_icon, update_secondary_preference,
         ActivationResult, SecondaryAction, SecondaryPlan, Tray, TrayItem, TrayMenu, TrayMessage,
         TrayRuntimeUpdate, UpdateEvent,
     };
     use iced::widget::image::Handle;
     use std::collections::HashMap;
-    use system_tray::item::StatusNotifierItem;
+    use system_tray::item::{IconPixmap, StatusNotifierItem};
     use system_tray::menu::{MenuDiff, MenuItemUpdate};
 
     #[test]
@@ -914,6 +948,7 @@ mod tests {
                 title: None,
                 icon_name: None,
                 icon_handle: None,
+                icon_signature: None,
                 item_is_menu: false,
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {
@@ -950,6 +985,7 @@ mod tests {
             title: Some("My App".to_string()),
             icon_name: Some("org.example.raw-icon".to_string()),
             icon_handle: None,
+            icon_signature: None,
             item_is_menu: false,
             menu_path: None,
             menu_layout: None,
@@ -962,6 +998,7 @@ mod tests {
             title: None,
             icon_name: Some("org.example.myapp-panel-symbolic".to_string()),
             icon_handle: None,
+            icon_signature: None,
             item_is_menu: false,
             menu_path: None,
             menu_layout: None,
@@ -974,6 +1011,7 @@ mod tests {
             title: None,
             icon_name: None,
             icon_handle: None,
+            icon_signature: None,
             item_is_menu: true,
             menu_path: None,
             menu_layout: None,
@@ -992,6 +1030,7 @@ mod tests {
                 title: Some("Resolved".to_string()),
                 icon_name: Some("resolved".to_string()),
                 icon_handle: Some(Handle::from_path("/tmp/resolved.png")),
+                icon_signature: None,
                 item_is_menu: false,
                 menu_path: None,
                 menu_layout: None,
@@ -1005,6 +1044,7 @@ mod tests {
                 title: Some("Fallback".to_string()),
                 icon_name: None,
                 icon_handle: None,
+                icon_signature: None,
                 item_is_menu: false,
                 menu_path: None,
                 menu_layout: None,
@@ -1136,6 +1176,7 @@ mod tests {
                 title: None,
                 icon_name: None,
                 icon_handle: None,
+                icon_signature: None,
                 item_is_menu: false,
                 menu_path: None,
                 menu_layout: None,
@@ -1155,6 +1196,76 @@ mod tests {
             .is_some());
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn pixmap_signature_is_stable_for_identical_pixmaps() {
+        let pixmap = vec![IconPixmap {
+            width: 24,
+            height: 24,
+            pixels: vec![255; 24 * 24 * 4],
+        }];
+
+        assert_eq!(
+            pixmap_signature_for_best_pixmap(&pixmap),
+            pixmap_signature_for_best_pixmap(&pixmap)
+        );
+    }
+
+    #[test]
+    fn identical_pixmap_update_is_deduped() {
+        let pixmap = vec![IconPixmap {
+            width: 24,
+            height: 24,
+            pixels: vec![255; 24 * 24 * 4],
+        }];
+        let mut item = TrayItem {
+            _id: "item".to_string(),
+            title: None,
+            icon_name: None,
+            icon_handle: None,
+            icon_signature: None,
+            item_is_menu: false,
+            menu_path: None,
+            menu_layout: None,
+            owned_menu: None,
+        };
+
+        assert!(update_item_pixmap_icon(&mut item, &pixmap));
+        let first_signature = item.icon_signature;
+        assert!(item.icon_handle.is_some());
+        assert!(!update_item_pixmap_icon(&mut item, &pixmap));
+        assert_eq!(item.icon_signature, first_signature);
+    }
+
+    #[test]
+    fn changed_pixmap_update_replaces_signature() {
+        let first = vec![IconPixmap {
+            width: 24,
+            height: 24,
+            pixels: vec![255; 24 * 24 * 4],
+        }];
+        let second = vec![IconPixmap {
+            width: 24,
+            height: 24,
+            pixels: vec![127; 24 * 24 * 4],
+        }];
+        let mut item = TrayItem {
+            _id: "item".to_string(),
+            title: None,
+            icon_name: None,
+            icon_handle: None,
+            icon_signature: None,
+            item_is_menu: false,
+            menu_path: None,
+            menu_layout: None,
+            owned_menu: None,
+        };
+
+        assert!(update_item_pixmap_icon(&mut item, &first));
+        let first_signature = item.icon_signature;
+        assert!(update_item_pixmap_icon(&mut item, &second));
+        assert_ne!(item.icon_signature, first_signature);
     }
 
     #[test]
@@ -1186,6 +1297,7 @@ mod tests {
                 title: None,
                 icon_name: None,
                 icon_handle: None,
+                icon_signature: None,
                 item_is_menu: true,
                 menu_path: Some("/menu".to_string()),
                 owned_menu: Some(crate::services::tray_menu::OwnedTrayMenu::from_layout(

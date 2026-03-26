@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.91] - 2026-03-27
+
+### Changed
+- Hardened the remaining tray/icon memory-growth suspect without changing behavior:
+  - `TrayItem` now stores a stable signature for the currently selected tray pixmap;
+  - repeated `UpdateEvent::Icon` payloads with an identical best pixmap no longer rebuild a fresh `iced::image::Handle`;
+  - fallback name/title resolution still runs when a pixmap disappears, but identical pixmap updates are now ignored.
+
+### Quality
+- Added regression tests for:
+  - stable tray pixmap signatures,
+  - deduplication of identical pixmap updates,
+  - signature replacement when the underlying pixmap actually changes.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.90] - 2026-03-26
 
 ### Changed
