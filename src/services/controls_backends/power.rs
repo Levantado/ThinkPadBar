@@ -10,6 +10,13 @@ impl super::PowerBackend for PlatformProfilePowerBackend {
         "platform_profile+tlp"
     }
 
+    fn diagnostics_summary(&self) -> Option<String> {
+        Some(power_runtime_summary(
+            tlp_active(),
+            Path::new("/sys/firmware/acpi/platform_profile").exists(),
+        ))
+    }
+
     fn profile(&self) -> String {
         current_profile()
     }
@@ -86,9 +93,16 @@ fn resolve_current_profile(
     }
 }
 
+fn power_runtime_summary(tlp_active: bool, profile_path_exists: bool) -> String {
+    format!(
+        "tlp:{} platform_profile:{}",
+        tlp_active, profile_path_exists
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_current_profile;
+    use super::{power_runtime_summary, resolve_current_profile};
 
     #[test]
     fn resolve_current_profile_prefers_tlp_when_active() {
@@ -114,6 +128,14 @@ mod tests {
                 Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
             ),
             "balanced"
+        );
+    }
+
+    #[test]
+    fn power_runtime_summary_reports_tlp_and_profile_path_state() {
+        assert_eq!(
+            power_runtime_summary(true, false),
+            "tlp:true platform_profile:false"
         );
     }
 }

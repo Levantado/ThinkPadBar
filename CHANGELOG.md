@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.90] - 2026-03-26
+
+### Changed
+- Finished the remaining practical `P5 Observability v2` gap by adding power-path diagnostics:
+  - `PlatformProfilePowerBackend` now reports whether `tlp` is active and whether `/sys/firmware/acpi/platform_profile` is available;
+  - `ControlsDiagnostics` now exposes `power_runtime`, and debug `System Info` shows a dedicated `Power Runtime` line.
+- Started `P6 ThinkPad Hardware Refinement v2` with a richer hardware model and user-facing summaries:
+  - `BatteryInfo` now carries AC adapter state, battery health versus design capacity, and charge/discharge power rate;
+  - battery collection now resolves the first real `Battery` and `Mains` devices from `/sys/class/power_supply` instead of assuming a fixed `BAT0` path for all fields;
+  - `ThinkPad Hardware` in `System Info` now shows `AC Adapter`, `Battery Health`, `Charge / Draw Power`, and `Thermal State` in addition to the previous runtime lines.
+
+### Quality
+- Added regression tests for:
+  - battery health/runtime/power derivation and current+voltage power fallback,
+  - power runtime diagnostics summary,
+  - actionable battery detail summaries and thermal-state interpretation in the UI helpers.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.89] - 2026-03-26
 
 ### Changed

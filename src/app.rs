@@ -362,8 +362,54 @@ impl ThinkPadBar {
         }
     }
 
+    fn battery_ac_summary(battery: &crate::services::controls::BatteryInfo) -> String {
+        match battery.ac_online {
+            Some(true) => "Connected".to_string(),
+            Some(false) => "Disconnected".to_string(),
+            None => "Unknown".to_string(),
+        }
+    }
+
+    fn battery_health_summary(battery: &crate::services::controls::BatteryInfo) -> String {
+        battery
+            .health_percent
+            .map(|percent| format!("{percent}% of design"))
+            .unwrap_or_else(|| "N/A".to_string())
+    }
+
+    fn battery_power_summary(battery: &crate::services::controls::BatteryInfo) -> String {
+        let Some(power_rate_mw) = battery.power_rate_mw else {
+            return "N/A".to_string();
+        };
+
+        let label = match battery.status.as_str() {
+            "Charging" => "charging",
+            "Discharging" => "draw",
+            _ => "rate",
+        };
+        format!("{:.1} W {label}", power_rate_mw as f64 / 1000.0)
+    }
+
     fn fan_runtime_summary(fan: &crate::services::controls::FanInfo) -> String {
         format!("{} RPM ({})", fan.speed, fan.level)
+    }
+
+    fn thermal_state_summary(sys_data: &crate::modules::system::SysData) -> String {
+        let temp = sys_data.temp;
+        if temp <= 0.0 {
+            return "Sensor unavailable".to_string();
+        }
+
+        let state = if temp >= 85.0 {
+            "Critical"
+        } else if temp >= 70.0 {
+            "Hot"
+        } else if temp >= 55.0 {
+            "Warm"
+        } else {
+            "Cool"
+        };
+        format!("{state} ({})", sys_data.temp_str)
     }
 
     fn coalescing_diagnostics(&self) -> AppCoalescingDiagnostics {
@@ -1833,6 +1879,21 @@ impl ThinkPadBar {
                     Self::battery_runtime_summary(&self.controls.battery),
                 ))
                 .push(item(
+                    "󰚥",
+                    "AC Adapter",
+                    Self::battery_ac_summary(&self.controls.battery),
+                ))
+                .push(item(
+                    "",
+                    "Battery Health",
+                    Self::battery_health_summary(&self.controls.battery),
+                ))
+                .push(item(
+                    "󱐋",
+                    "Charge / Draw Power",
+                    Self::battery_power_summary(&self.controls.battery),
+                ))
+                .push(item(
                     "󰾆",
                     "Power Profile",
                     self.controls.power_profile.clone(),
@@ -1841,6 +1902,11 @@ impl ThinkPadBar {
                     "󰈐",
                     "Fan Runtime",
                     Self::fan_runtime_summary(&self.controls.fan),
+                ))
+                .push(item(
+                    "",
+                    "Thermal State",
+                    Self::thermal_state_summary(sys_data),
                 ))
                 .push(item(
                     "",
@@ -1936,6 +2002,14 @@ impl ThinkPadBar {
                         "Audio Runtime",
                         controls_diagnostics
                             .audio_runtime
+                            .clone()
+                            .unwrap_or_else(|| "n/a".to_string()),
+                    ))
+                    .push(item(
+                        "󰾆",
+                        "Power Runtime",
+                        controls_diagnostics
+                            .power_runtime
                             .clone()
                             .unwrap_or_else(|| "n/a".to_string()),
                     ))
@@ -2980,6 +3054,9 @@ mod tests {
                 capacity: 64,
                 status: "Discharging".to_string(),
                 time_remaining: Some("2h 6m remaining".to_string()),
+                ac_online: Some(false),
+                health_percent: Some(92),
+                power_rate_mw: Some(12_400),
             }),
             "64% Discharging (2h 6m remaining)"
         );
@@ -2988,9 +3065,31 @@ mod tests {
                 capacity: 100,
                 status: "Full".to_string(),
                 time_remaining: None,
+                ac_online: Some(true),
+                health_percent: Some(100),
+                power_rate_mw: None,
             }),
             "100% Full"
         );
+    }
+
+    #[test]
+    fn battery_detail_summaries_format_actionable_hardware_state() {
+        let battery = crate::services::controls::BatteryInfo {
+            capacity: 64,
+            status: "Discharging".to_string(),
+            time_remaining: Some("2h 6m remaining".to_string()),
+            ac_online: Some(false),
+            health_percent: Some(92),
+            power_rate_mw: Some(12_400),
+        };
+
+        assert_eq!(ThinkPadBar::battery_ac_summary(&battery), "Disconnected");
+        assert_eq!(
+            ThinkPadBar::battery_health_summary(&battery),
+            "92% of design"
+        );
+        assert_eq!(ThinkPadBar::battery_power_summary(&battery), "12.4 W draw");
     }
 
     #[test]
@@ -3001,6 +3100,26 @@ mod tests {
                 level: "auto".to_string(),
             }),
             "2700 RPM (auto)"
+        );
+    }
+
+    #[test]
+    fn thermal_state_summary_interprets_temperature_band() {
+        assert_eq!(
+            ThinkPadBar::thermal_state_summary(&crate::modules::system::SysData {
+                temp: 48.0,
+                temp_str: "48°C".to_string(),
+                ..crate::modules::system::SysData::default()
+            }),
+            "Cool (48°C)"
+        );
+        assert_eq!(
+            ThinkPadBar::thermal_state_summary(&crate::modules::system::SysData {
+                temp: 73.0,
+                temp_str: "73°C".to_string(),
+                ..crate::modules::system::SysData::default()
+            }),
+            "Hot (73°C)"
         );
     }
 

@@ -56,6 +56,7 @@ pub struct ControlsDiagnostics {
     pub brightness_backend: &'static str,
     pub bluetooth_backend: &'static str,
     pub power_backend: &'static str,
+    pub power_runtime: Option<String>,
 }
 
 impl ControlsDiagnostics {
@@ -87,6 +88,9 @@ impl Default for ControlsSnapshot {
                 capacity: 0,
                 status: "Unknown".to_string(),
                 time_remaining: None,
+                ac_online: None,
+                health_percent: None,
+                power_rate_mw: None,
             },
             power_profile: "balanced".to_string(),
             bluetooth_enabled: false,
@@ -203,6 +207,7 @@ impl ControlsService {
             brightness_backend: self.brightness_backend.backend_name(),
             bluetooth_backend: self.bluetooth_backend.backend_name(),
             power_backend: self.power_backend.backend_name(),
+            power_runtime: self.power_backend.diagnostics_summary(),
         }
     }
 
@@ -443,6 +448,10 @@ impl crate::services::controls_backends::PowerBackend for NoopPowerBackend {
         "noop-power"
     }
 
+    fn diagnostics_summary(&self) -> Option<String> {
+        None
+    }
+
     fn profile(&self) -> String {
         "balanced".to_string()
     }
@@ -588,6 +597,10 @@ mod tests {
     impl crate::services::controls_backends::PowerBackend for MockPowerBackend {
         fn backend_name(&self) -> &'static str {
             "mock-power"
+        }
+
+        fn diagnostics_summary(&self) -> Option<String> {
+            Some("mock-power-runtime".to_string())
         }
 
         fn profile(&self) -> String {
@@ -819,6 +832,10 @@ mod tests {
         assert_eq!(diagnostics.brightness_backend, "mock-brightness");
         assert_eq!(diagnostics.bluetooth_backend, "mock-bluetooth");
         assert_eq!(diagnostics.power_backend, "mock-power");
+        assert_eq!(
+            diagnostics.power_runtime.as_deref(),
+            Some("mock-power-runtime")
+        );
         assert!(diagnostics.summary().contains("mock-audio"));
     }
 }

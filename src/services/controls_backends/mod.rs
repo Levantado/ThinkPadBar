@@ -36,6 +36,9 @@ pub trait BluetoothBackend: Send + Sync {
 
 pub trait PowerBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
+    fn diagnostics_summary(&self) -> Option<String> {
+        None
+    }
     fn profile(&self) -> String;
     fn set_profile(&self, profile: String) -> BackendFuture<'_, ()>;
 }
