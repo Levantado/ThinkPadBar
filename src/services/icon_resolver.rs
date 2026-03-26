@@ -2,10 +2,18 @@ use iced::widget::image::Handle;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+const MAX_CACHE_ENTRIES: usize = 256;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct IconLookupKey {
     raw: String,
     theme_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CachePolicy {
+    StoreAll,
+    StoreHitsOnly,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -83,6 +91,7 @@ struct DesktopAliasIndex {
 #[derive(Default)]
 pub struct IconResolver {
     cache: HashMap<IconLookupKey, Option<Handle>>,
+    cache_order: VecDeque<IconLookupKey>,
     diagnostics: IconResolverDiagnostics,
     desktop_alias_index: Option<DesktopAliasIndex>,
     env: IconSearchEnv,
@@ -92,6 +101,7 @@ impl IconResolver {
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
+            cache_order: VecDeque::new(),
             diagnostics: IconResolverDiagnostics::default(),
             desktop_alias_index: None,
             env: IconSearchEnv::from_process(),
@@ -110,11 +120,25 @@ impl IconResolver {
     }
 
     pub fn resolve(&mut self, raw: &str, theme_hint: Option<&str>) -> Option<Handle> {
+        self.resolve_with_policy(raw, theme_hint, CachePolicy::StoreAll)
+    }
+
+    pub fn resolve_title_hint(&mut self, raw: &str, theme_hint: Option<&str>) -> Option<Handle> {
+        self.resolve_with_policy(raw, theme_hint, CachePolicy::StoreHitsOnly)
+    }
+
+    fn resolve_with_policy(
+        &mut self,
+        raw: &str,
+        theme_hint: Option<&str>,
+        cache_policy: CachePolicy,
+    ) -> Option<Handle> {
         let key = IconLookupKey {
             raw: raw.to_string(),
             theme_hint: theme_hint.map(str::to_string),
         };
         if let Some(cached) = self.cache.get(&key).cloned() {
+            self.touch_cache_key(&key);
             self.diagnostics.cache_hits = self.diagnostics.cache_hits.saturating_add(1);
             self.diagnostics.last_hit = Some(raw.to_string());
             return cached;
@@ -134,7 +158,10 @@ impl IconResolver {
         } else {
             self.diagnostics.last_miss = Some(raw.to_string());
         }
-        self.cache.insert(key, resolved.clone());
+
+        if resolved.is_some() || matches!(cache_policy, CachePolicy::StoreAll) {
+            self.insert_cache(key, resolved.clone());
+        }
         resolved
     }
 
@@ -142,6 +169,7 @@ impl IconResolver {
     fn with_env_for_tests(env: IconSearchEnv) -> Self {
         Self {
             cache: HashMap::new(),
+            cache_order: VecDeque::new(),
             diagnostics: IconResolverDiagnostics::default(),
             desktop_alias_index: None,
             env,
@@ -196,6 +224,25 @@ impl IconResolver {
     fn ensure_desktop_alias_index(&mut self) -> &DesktopAliasIndex {
         self.desktop_alias_index
             .get_or_insert_with(|| load_desktop_alias_index(&self.env))
+    }
+
+    fn touch_cache_key(&mut self, key: &IconLookupKey) {
+        if let Some(position) = self.cache_order.iter().position(|existing| existing == key) {
+            self.cache_order.remove(position);
+        }
+        self.cache_order.push_back(key.clone());
+    }
+
+    fn insert_cache(&mut self, key: IconLookupKey, value: Option<Handle>) {
+        self.cache.insert(key.clone(), value);
+        self.touch_cache_key(&key);
+
+        while self.cache.len() > MAX_CACHE_ENTRIES {
+            let Some(evicted) = self.cache_order.pop_front() else {
+                break;
+            };
+            self.cache.remove(&evicted);
+        }
     }
 }
 
@@ -676,6 +723,7 @@ fn resolve_icon_path_for_tests(
 
 #[cfg(test)]
 mod tests {
+    use super::MAX_CACHE_ENTRIES;
     use super::{
         desktop_alias_candidates, icon_name_candidates, resolve_icon_path_for_tests,
         theme_search_roots, themed_icon_paths, IconResolver, IconSearchEnv,
@@ -775,6 +823,40 @@ mod tests {
         let mut resolver = IconResolver::new();
         assert!(resolver.resolve("definitely-missing-icon", None).is_none());
         assert!(resolver.resolve("definitely-missing-icon", None).is_none());
+    }
+
+    #[test]
+    fn resolver_cache_is_bounded() {
+        let mut resolver = IconResolver::with_env_for_tests(IconSearchEnv {
+            home_dir: None,
+            xdg_data_home: None,
+            xdg_data_dirs: Vec::new(),
+        });
+        for index in 0..(MAX_CACHE_ENTRIES + 32) {
+            assert!(resolver
+                .resolve(&format!("__thinkpadbar_missing_icon_{index}__"), None)
+                .is_none());
+        }
+
+        let diagnostics = resolver.diagnostics();
+        assert_eq!(diagnostics.cache_entries, MAX_CACHE_ENTRIES);
+        assert_eq!(diagnostics.negative_entries, MAX_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn title_hint_misses_do_not_grow_negative_cache() {
+        let mut resolver = IconResolver::new();
+        assert!(resolver
+            .resolve_title_hint("Vesktop - unread 1", None)
+            .is_none());
+        assert!(resolver
+            .resolve_title_hint("Vesktop - unread 2", None)
+            .is_none());
+
+        let diagnostics = resolver.diagnostics();
+        assert_eq!(diagnostics.cache_entries, 0);
+        assert_eq!(diagnostics.negative_entries, 0);
+        assert_eq!(diagnostics.cache_misses, 2);
     }
 
     #[test]

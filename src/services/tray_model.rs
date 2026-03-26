@@ -155,7 +155,9 @@ impl Tray {
     ) -> Option<Handle> {
         icon_name
             .and_then(|name| self.icon_resolver.resolve(name, theme_path))
-            .or_else(|| title.and_then(|title| self.icon_resolver.resolve(title, theme_path)))
+            .or_else(|| {
+                title.and_then(|title| self.icon_resolver.resolve_title_hint(title, theme_path))
+            })
     }
 
     fn rebuild_owned_menu(item: &mut TrayItem) {
@@ -899,6 +901,7 @@ mod tests {
     };
     use iced::widget::image::Handle;
     use std::collections::HashMap;
+    use system_tray::item::StatusNotifierItem;
     use system_tray::menu::{MenuDiff, MenuItemUpdate};
 
     #[test]
@@ -1069,6 +1072,40 @@ mod tests {
             .runtime
             .last_menu_activation_error
             .is_none());
+    }
+
+    #[test]
+    fn tray_title_only_icon_resolution_does_not_grow_negative_cache() {
+        let mut tray = Tray::new();
+        tray.update(TrayMessage::ItemAdded(
+            "item".to_string(),
+            Box::new(StatusNotifierItem {
+                id: "item".to_string(),
+                category: system_tray::item::Category::ApplicationStatus,
+                title: Some("Vesktop - unread 1".to_string()),
+                status: system_tray::item::Status::Active,
+                window_id: 0,
+                icon_name: None,
+                overlay_icon_name: None,
+                overlay_icon_pixmap: None,
+                attention_icon_name: None,
+                attention_icon_pixmap: None,
+                attention_movie_name: None,
+                icon_theme_path: None,
+                icon_pixmap: None,
+                tool_tip: None,
+                item_is_menu: false,
+                menu: None,
+            }),
+        ));
+        tray.update(TrayMessage::ItemUpdated(
+            "item".to_string(),
+            UpdateEvent::Title(Some("Vesktop - unread 2".to_string())),
+        ));
+
+        let diagnostics = tray.diagnostics();
+        assert_eq!(diagnostics.resolver.cache_entries, 0);
+        assert_eq!(diagnostics.resolver.negative_entries, 0);
     }
 
     #[test]

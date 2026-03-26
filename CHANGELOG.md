@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.88] - 2026-03-26
+
+### Changed
+- Fixed the first concrete tray/icon memory-growth path:
+  - `IconResolver` now uses a bounded cache (`256` entries) instead of an unbounded `HashMap`, so long-running icon lookups cannot grow process memory indefinitely;
+  - tray title-based icon fallback now uses a `StoreHitsOnly` policy, which means volatile title misses no longer accumulate in the negative cache;
+  - tray integration keeps normal cached `icon_name` lookups, but avoids persistent negative caching for changing title strings such as unread counters or track names.
+
+### Quality
+- Added regression tests for:
+  - bounded icon resolver cache size,
+  - title-hint misses not growing the negative cache,
+  - tray title-only icon resolution not increasing resolver negative cache size.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.87] - 2026-03-26
 
 ### Changed
