@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.89] - 2026-03-26
+
+### Changed
+- Continued `P5 Observability v2` with runtime diagnostics for the remaining orchestration-heavy paths:
+  - `CompositorService` now exposes structured runtime diagnostics with configured/runtime backend, refresh inflight/queued state, last refresh latency, and explicit backend-fallback reason;
+  - `SystemInfoService` now tracks lightweight runtime diagnostics for the last refresh kind and whether the thermal sensor path is currently available;
+  - app-level coalescing now exposes a dedicated runtime summary for pending slider flushes, pending slow ticks, control refresh queues, and background request queues.
+- Debug `System Info` now includes dedicated `Compositor Runtime`, `Coalescing Runtime`, and `System Runtime` lines, plus a conditional `Compositor Unavailable` warning row when configured/runtime compositor backends diverge.
+
+### Quality
+- Added regression tests for:
+  - compositor diagnostics refresh-state and last-latency reporting,
+  - system-info diagnostics summary formatting,
+  - app-level coalescing diagnostics reporting and summary stability.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.88] - 2026-03-26
 
 ### Changed

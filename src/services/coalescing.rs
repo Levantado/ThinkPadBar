@@ -30,6 +30,10 @@ impl<T> ValueCoalescer<T> {
         self.pending.take()
     }
 
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
     #[cfg(test)]
     fn pending(&self) -> Option<&T> {
         self.pending.as_ref()
@@ -90,6 +94,14 @@ where
         self.states.remove(key);
     }
 
+    pub fn inflight_count(&self) -> usize {
+        self.states.values().filter(|state| state.inflight).count()
+    }
+
+    pub fn queued_count(&self) -> usize {
+        self.states.values().filter(|state| state.queued).count()
+    }
+
     #[cfg(test)]
     pub fn is_inflight(&self, key: &K) -> bool {
         self.states.get(key).is_some_and(|state| state.inflight)
@@ -122,7 +134,9 @@ mod tests {
         let mut coalescer = ValueCoalescer::default();
         let generation = coalescer.push("latest");
 
+        assert!(coalescer.has_pending());
         assert_eq!(coalescer.take_if_current(generation), Some("latest"));
+        assert!(!coalescer.has_pending());
         assert_eq!(coalescer.take_if_current(generation), None);
     }
 
@@ -134,14 +148,20 @@ mod tests {
         assert!(!coalescer.request("brightness"));
         assert!(coalescer.is_inflight(&"brightness"));
         assert!(coalescer.is_queued(&"brightness"));
+        assert_eq!(coalescer.inflight_count(), 1);
+        assert_eq!(coalescer.queued_count(), 1);
 
         assert!(coalescer.complete(&"brightness"));
         assert!(coalescer.is_inflight(&"brightness"));
         assert!(!coalescer.is_queued(&"brightness"));
+        assert_eq!(coalescer.inflight_count(), 1);
+        assert_eq!(coalescer.queued_count(), 0);
 
         assert!(!coalescer.complete(&"brightness"));
         assert!(!coalescer.is_inflight(&"brightness"));
         assert!(!coalescer.is_queued(&"brightness"));
+        assert_eq!(coalescer.inflight_count(), 0);
+        assert_eq!(coalescer.queued_count(), 0);
     }
 
     #[test]

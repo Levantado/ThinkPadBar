@@ -181,6 +181,36 @@ impl ControlsCoalescing {
                 .map(crate::services::controls::ControlsCommand::SetBrightness),
         }
     }
+
+    fn pending_count(&self) -> usize {
+        usize::from(self.volume.has_pending())
+            + usize::from(self.mic_volume.has_pending())
+            + usize::from(self.brightness.has_pending())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppCoalescingDiagnostics {
+    pending_control_flushes: usize,
+    pending_slow_tick: bool,
+    inflight_control_refreshes: usize,
+    queued_control_refreshes: usize,
+    inflight_background_requests: usize,
+    queued_background_requests: usize,
+}
+
+impl AppCoalescingDiagnostics {
+    fn summary(&self) -> String {
+        format!(
+            "ctrl pending:{} refresh {}/{} bg {}/{} slow:{}",
+            self.pending_control_flushes,
+            self.inflight_control_refreshes,
+            self.queued_control_refreshes,
+            self.inflight_background_requests,
+            self.queued_background_requests,
+            self.pending_slow_tick
+        )
+    }
 }
 
 impl ThinkPadBar {
@@ -334,6 +364,17 @@ impl ThinkPadBar {
 
     fn fan_runtime_summary(fan: &crate::services::controls::FanInfo) -> String {
         format!("{} RPM ({})", fan.speed, fan.level)
+    }
+
+    fn coalescing_diagnostics(&self) -> AppCoalescingDiagnostics {
+        AppCoalescingDiagnostics {
+            pending_control_flushes: self.controls_coalescing.pending_count(),
+            pending_slow_tick: self.slow_tick_coalescing.has_pending(),
+            inflight_control_refreshes: self.controls_refresh_coalescing.inflight_count(),
+            queued_control_refreshes: self.controls_refresh_coalescing.queued_count(),
+            inflight_background_requests: self.background_request_coalescing.inflight_count(),
+            queued_background_requests: self.background_request_coalescing.queued_count(),
+        }
     }
 
     fn set_battery_percent_string(&mut self, value: u8) {
@@ -1759,10 +1800,13 @@ impl ThinkPadBar {
                         ),
                 );
             let sys_data = self.system_info_service.snapshot();
+            let system_diagnostics = self.system_info_service.diagnostics();
+            let compositor_diagnostics = self.compositor_service.diagnostics();
             let controls_diagnostics = self.controls_service.diagnostics();
             let network_diagnostics = self.network_service.diagnostics();
             let idle_snapshot = self.idle_inhibitor_service.snapshot();
             let tray_diagnostics = self.tray_ui_service.diagnostics();
+            let coalescing_diagnostics = self.coalescing_diagnostics();
             col = col
                 .push(item("", "CPU Usage", sys_data.cpu_str.clone()))
                 .push(item("󰍛", "Memory Usage", sys_data.mem_str.clone()))
@@ -1872,9 +1916,19 @@ impl ThinkPadBar {
                         ),
                     ))
                     .push(item(
+                        "🪟",
+                        "Compositor Runtime",
+                        compositor_diagnostics.summary(),
+                    ))
+                    .push(item(
                         "🎛",
                         "Controls Backends",
                         controls_diagnostics.summary(),
+                    ))
+                    .push(item(
+                        "🌀",
+                        "Coalescing Runtime",
+                        coalescing_diagnostics.summary(),
                     ))
                     .push(item("📶", "Network Runtime", network_diagnostics.summary()))
                     .push(item(
@@ -1885,6 +1939,7 @@ impl ThinkPadBar {
                             .clone()
                             .unwrap_or_else(|| "n/a".to_string()),
                     ))
+                    .push(item("🖥", "System Runtime", system_diagnostics.summary()))
                     .push(item(
                         "☕",
                         "Idle Inhibitor Runtime",
@@ -1899,6 +1954,9 @@ impl ThinkPadBar {
 
                 if let Some(last_unresolved) = tray_diagnostics.last_unresolved_item {
                     col = col.push(item("⚠", "Tray Icon Last Unresolved", last_unresolved));
+                }
+                if let Some(unavailable_reason) = compositor_diagnostics.unavailable_reason {
+                    col = col.push(item("⚠", "Compositor Unavailable", unavailable_reason));
                 }
                 if let Some(last_error) = network_diagnostics.last_error {
                     col = col.push(item("⚠", "Network Last Error", last_error));
@@ -3007,6 +3065,46 @@ mod tests {
         assert_eq!(
             coalescing.take_command_if_current(CoalescedControlKind::Volume, volume),
             Some(crate::services::controls::ControlsCommand::SetVolume(33))
+        );
+    }
+
+    #[test]
+    fn app_coalescing_diagnostics_reports_pending_work() {
+        let mut bar = hermetic_bar();
+        let _ = bar
+            .controls_coalescing
+            .push(CoalescedControlKind::Volume, 33);
+        let _ = bar.slow_tick_coalescing.push(());
+        assert!(bar
+            .controls_refresh_coalescing
+            .request(crate::services::controls::ControlsRefreshKind::Brightness));
+        assert!(!bar
+            .controls_refresh_coalescing
+            .request(crate::services::controls::ControlsRefreshKind::Brightness));
+        assert!(bar
+            .background_request_coalescing
+            .request(BackgroundRequestKind::DbusConnect));
+
+        let diagnostics = bar.coalescing_diagnostics();
+        assert_eq!(diagnostics.pending_control_flushes, 1);
+        assert!(diagnostics.pending_slow_tick);
+        assert_eq!(diagnostics.inflight_control_refreshes, 1);
+        assert_eq!(diagnostics.queued_control_refreshes, 1);
+        assert_eq!(diagnostics.inflight_background_requests, 1);
+        assert_eq!(diagnostics.queued_background_requests, 0);
+    }
+
+    #[test]
+    fn app_coalescing_diagnostics_summary_is_stable() {
+        let mut bar = hermetic_bar();
+        let _ = bar
+            .controls_coalescing
+            .push(CoalescedControlKind::Brightness, 77);
+        let _ = bar.slow_tick_coalescing.push(());
+
+        assert_eq!(
+            bar.coalescing_diagnostics().summary(),
+            "ctrl pending:1 refresh 0/0 bg 0/0 slow:true"
         );
     }
 

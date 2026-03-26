@@ -6,6 +6,34 @@ use std::time::Instant;
 
 pub use types::{CompositorBackendKind, CompositorEvent, CompositorSnapshot, RefreshResult};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositorDiagnostics {
+    pub configured_backend: CompositorBackendKind,
+    pub active_backend: CompositorBackendKind,
+    pub refresh_inflight: bool,
+    pub refresh_queued: bool,
+    pub last_refresh_ms: Option<u64>,
+    pub unavailable_reason: Option<String>,
+}
+
+impl CompositorDiagnostics {
+    pub fn summary(&self) -> String {
+        let why = self.unavailable_reason.as_deref().unwrap_or("-");
+        let last = self
+            .last_refresh_ms
+            .map_or_else(|| "-".to_string(), |elapsed| elapsed.to_string());
+        format!(
+            "cfg {:?} act {:?} inflight:{} queued:{} last:{} why:{}",
+            self.configured_backend,
+            self.active_backend,
+            self.refresh_inflight,
+            self.refresh_queued,
+            last,
+            why
+        )
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct WorkspaceRefreshCoalescer {
     inflight: bool,
@@ -31,7 +59,6 @@ impl WorkspaceRefreshCoalescer {
         false
     }
 
-    #[cfg(test)]
     fn state(&self) -> (bool, bool) {
         (self.inflight, self.queued)
     }
@@ -42,6 +69,7 @@ pub struct CompositorService {
     backend: hyprland::HyprlandBackend,
     snapshot: CompositorSnapshot,
     refresh: WorkspaceRefreshCoalescer,
+    last_refresh_ms: Option<u64>,
 }
 
 impl Default for CompositorService {
@@ -77,11 +105,30 @@ impl CompositorService {
             backend,
             snapshot,
             refresh: WorkspaceRefreshCoalescer::default(),
+            last_refresh_ms: None,
         }
     }
 
     pub fn snapshot(&self) -> &CompositorSnapshot {
         &self.snapshot
+    }
+
+    pub fn diagnostics(&self) -> CompositorDiagnostics {
+        let (refresh_inflight, refresh_queued) = self.refresh.state();
+        CompositorDiagnostics {
+            configured_backend: self.snapshot.configured_backend,
+            active_backend: self.snapshot.active_backend,
+            refresh_inflight,
+            refresh_queued,
+            last_refresh_ms: self.last_refresh_ms,
+            unavailable_reason: (self.snapshot.configured_backend != self.snapshot.active_backend)
+                .then(|| {
+                    format!(
+                        "configured {:?}, runtime {:?}: backend fallback active",
+                        self.snapshot.configured_backend, self.snapshot.active_backend
+                    )
+                }),
+        }
     }
 
     fn collect_snapshot(&self) -> CompositorSnapshot {
@@ -104,6 +151,7 @@ impl CompositorService {
     }
 
     pub fn apply_refresh(&mut self, refresh: RefreshResult) {
+        self.last_refresh_ms = Some(refresh.elapsed_ms);
         self.snapshot = refresh.snapshot;
     }
 
@@ -151,6 +199,7 @@ impl CompositorService {
                 active_backend,
             },
             refresh: WorkspaceRefreshCoalescer::default(),
+            last_refresh_ms: None,
         }
     }
 }
@@ -161,7 +210,9 @@ pub fn cursor_position() -> Option<(i32, i32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompositorBackendKind, CompositorService, WorkspaceRefreshCoalescer};
+    use super::{
+        CompositorBackendKind, CompositorService, RefreshResult, WorkspaceRefreshCoalescer,
+    };
 
     #[test]
     fn cursor_position_absent_without_runtime_env() {
@@ -208,5 +259,37 @@ mod tests {
             });
         assert_eq!(configured_backend, CompositorBackendKind::Niri);
         assert_eq!(active_backend, CompositorBackendKind::Hyprland);
+    }
+
+    #[test]
+    fn diagnostics_report_backend_fallback_and_refresh_state() {
+        let mut service = CompositorService::hermetic_for_tests(
+            CompositorBackendKind::Niri,
+            CompositorBackendKind::Hyprland,
+        );
+        assert!(service.request_refresh());
+        assert!(!service.request_refresh());
+
+        let diagnostics = service.diagnostics();
+        assert!(diagnostics.refresh_inflight);
+        assert!(diagnostics.refresh_queued);
+        assert_eq!(
+            diagnostics.unavailable_reason.as_deref(),
+            Some("configured Niri, runtime Hyprland: backend fallback active")
+        );
+    }
+
+    #[test]
+    fn diagnostics_capture_last_refresh_elapsed_ms() {
+        let mut service = CompositorService::hermetic_for_tests(
+            CompositorBackendKind::Hyprland,
+            CompositorBackendKind::Hyprland,
+        );
+        service.apply_refresh(RefreshResult {
+            snapshot: service.snapshot().clone(),
+            elapsed_ms: 17,
+        });
+
+        assert_eq!(service.diagnostics().last_refresh_ms, Some(17));
     }
 }
