@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.97] - 2026-03-27
+
+### Changed
+- Finished a last focused `P6` polish by making common battery-threshold policies read naturally in `System Info`:
+  - `0% -> 100%` is now summarized as `Full charge allowed`;
+  - equal start/end thresholds are summarized as `Pinned at X%`.
+- Started `P7 Native Wayland Polish v2` with a first capability-oriented diagnostics slice:
+  - debug `System Info` now shows a dedicated `Wayland Runtime` line derived from native idle-inhibitor protocol state;
+  - when Wayland capability initialization is unavailable, the debug view now surfaces an explicit `Wayland Unavailable` warning row instead of burying the reason inside a longer runtime summary.
+
+### Quality
+- Extended regression coverage for:
+  - polished threshold-summary rendering,
+  - protocol-version `Wayland Runtime` summaries.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.96] - 2026-03-27
 
 ### Changed

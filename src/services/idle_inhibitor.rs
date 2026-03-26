@@ -47,6 +47,19 @@ impl IdleInhibitorDiagnostics {
             why
         )
     }
+
+    pub fn wayland_summary(&self, available: bool) -> String {
+        format!(
+            "{} avail:{} cmp:{} idle:{} surf:{}",
+            self.backend_label(),
+            available,
+            self.compositor_version
+                .map_or_else(|| "-".to_string(), |version| format!("v{version}")),
+            self.idle_manager_version
+                .map_or_else(|| "-".to_string(), |version| format!("v{version}")),
+            self.surface_bound
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -69,6 +82,10 @@ impl IdleInhibitorSnapshot {
 
     pub fn debug_summary(&self) -> String {
         self.diagnostics.summary(self.available, self.enabled)
+    }
+
+    pub fn wayland_summary(&self) -> String {
+        self.diagnostics.wayland_summary(self.available)
     }
 }
 
@@ -572,6 +589,20 @@ mod tests {
         assert_eq!(
             service.snapshot().debug_summary(),
             "none avail:false enabled:false req:false surf:false cmp:- idle:- why:wayland connection unavailable"
+        );
+    }
+
+    #[test]
+    fn wayland_summary_reports_protocol_versions() {
+        let service = IdleInhibitorService::with_backend(FakeBackend {
+            available: true,
+            enabled: false,
+            set_enabled_calls: Vec::new(),
+        });
+
+        assert_eq!(
+            service.snapshot().wayland_summary(),
+            "fake avail:true cmp:v5 idle:v1 surf:true"
         );
     }
 }

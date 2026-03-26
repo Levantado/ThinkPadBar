@@ -442,6 +442,8 @@ impl ThinkPadBar {
 
     fn battery_threshold_summary(battery: &crate::services::controls::BatteryInfo) -> String {
         match (battery.charge_start_threshold, battery.charge_end_threshold) {
+            (Some(0), Some(100)) => "Full charge allowed".to_string(),
+            (Some(start), Some(end)) if start == end => format!("Pinned at {end}%"),
             (Some(start), Some(end)) => format!("{start}% -> {end}%"),
             (Some(start), None) => format!("Start at {start}%"),
             (None, Some(end)) => format!("Stop at {end}%"),
@@ -2116,6 +2118,11 @@ impl ThinkPadBar {
                     ))
                     .push(item("🖥", "System Runtime", system_diagnostics.summary()))
                     .push(item(
+                        "🛣",
+                        "Wayland Runtime",
+                        idle_snapshot.wayland_summary(),
+                    ))
+                    .push(item(
                         "☕",
                         "Idle Inhibitor Runtime",
                         idle_snapshot.debug_summary(),
@@ -2138,6 +2145,11 @@ impl ThinkPadBar {
                 }
                 if let Some(unavailable_reason) = network_diagnostics.unavailable_reason {
                     col = col.push(item("⚠", "Network Unavailable", unavailable_reason));
+                }
+                if let Some(unavailable_reason) =
+                    idle_snapshot.diagnostics.unavailable_reason.clone()
+                {
+                    col = col.push(item("⚠", "Wayland Unavailable", unavailable_reason));
                 }
                 if let Some(last_failure) = tray_diagnostics.runtime.last_dispatch_failure {
                     col = col.push(item("⚠", "Tray Dispatch Failure", last_failure));
@@ -3287,6 +3299,47 @@ mod tests {
         assert_eq!(
             ThinkPadBar::battery_charge_state_summary(&resume),
             "Waiting to resume below 40%"
+        );
+    }
+
+    #[test]
+    fn battery_threshold_summary_polishes_common_policy_shapes() {
+        let full_charge = crate::services::controls::BatteryInfo {
+            capacity: 100,
+            status: "Full".to_string(),
+            time_remaining: None,
+            ac_online: Some(true),
+            health_percent: None,
+            power_rate_mw: None,
+            pack_voltage_mv: None,
+            cycle_count: None,
+            full_charge_mwh: None,
+            design_capacity_mwh: None,
+            charge_start_threshold: Some(0),
+            charge_end_threshold: Some(100),
+        };
+        assert_eq!(
+            ThinkPadBar::battery_threshold_summary(&full_charge),
+            "Full charge allowed"
+        );
+
+        let pinned = crate::services::controls::BatteryInfo {
+            capacity: 80,
+            status: "Not charging".to_string(),
+            time_remaining: None,
+            ac_online: Some(true),
+            health_percent: None,
+            power_rate_mw: None,
+            pack_voltage_mv: None,
+            cycle_count: None,
+            full_charge_mwh: None,
+            design_capacity_mwh: None,
+            charge_start_threshold: Some(80),
+            charge_end_threshold: Some(80),
+        };
+        assert_eq!(
+            ThinkPadBar::battery_threshold_summary(&pinned),
+            "Pinned at 80%"
         );
     }
 
