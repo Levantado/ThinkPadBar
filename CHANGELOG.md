@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.94] - 2026-03-27
+
+### Changed
+- Continued `P6 ThinkPad Hardware Refinement v2` with more actionable battery-health summaries in `System Info`:
+  - added a dedicated `Battery Wear` row derived from battery health and, when available, the absolute lost pack capacity in Wh;
+  - `Pack Capacity` now reports both current/design capacity and the absolute Wh loss when design capacity is known;
+  - `Cycle Count` is now rendered as a human-readable `"N cycles"` summary instead of a raw integer.
+
+### Quality
+- Extended regression coverage for:
+  - battery wear formatting,
+  - pack-capacity loss formatting,
+  - expanded hardware row set including the new `Battery Wear` line.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.93] - 2026-03-27
 
 ### Changed

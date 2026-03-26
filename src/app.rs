@@ -377,6 +377,20 @@ impl ThinkPadBar {
             .unwrap_or_else(|| "N/A".to_string())
     }
 
+    fn battery_wear_summary(battery: &crate::services::controls::BatteryInfo) -> String {
+        let Some(health_percent) = battery.health_percent else {
+            return "N/A".to_string();
+        };
+        let wear_percent = 100u8.saturating_sub(health_percent);
+        match (battery.full_charge_mwh, battery.design_capacity_mwh) {
+            (Some(full), Some(design)) if design >= full => format!(
+                "{wear_percent}% worn (-{:.1} Wh)",
+                (design - full) as f64 / 1000.0
+            ),
+            _ => format!("{wear_percent}% worn"),
+        }
+    }
+
     fn battery_power_summary(battery: &crate::services::controls::BatteryInfo) -> String {
         let Some(power_rate_mw) = battery.power_rate_mw else {
             return "N/A".to_string();
@@ -392,6 +406,14 @@ impl ThinkPadBar {
 
     fn battery_pack_summary(battery: &crate::services::controls::BatteryInfo) -> String {
         match (battery.full_charge_mwh, battery.design_capacity_mwh) {
+            (Some(full), Some(design)) if design >= full => {
+                format!(
+                    "{:.1} / {:.1} Wh (-{:.1} Wh)",
+                    full as f64 / 1000.0,
+                    design as f64 / 1000.0,
+                    (design - full) as f64 / 1000.0
+                )
+            }
             (Some(full), Some(design)) => {
                 format!(
                     "{:.1} / {:.1} Wh",
@@ -407,7 +429,7 @@ impl ThinkPadBar {
     fn battery_cycle_summary(battery: &crate::services::controls::BatteryInfo) -> String {
         battery
             .cycle_count
-            .map(|count| count.to_string())
+            .map(|count| format!("{count} cycles"))
             .unwrap_or_else(|| "N/A".to_string())
     }
 
@@ -448,6 +470,7 @@ impl ThinkPadBar {
             ),
             ("󰚥", "AC Adapter", Self::battery_ac_summary(battery)),
             ("", "Battery Health", Self::battery_health_summary(battery)),
+            ("󰾹", "Battery Wear", Self::battery_wear_summary(battery)),
             ("󱤅", "Pack Capacity", Self::battery_pack_summary(battery)),
             ("󰂄", "Cycle Count", Self::battery_cycle_summary(battery)),
             (
@@ -3119,12 +3142,16 @@ mod tests {
             ThinkPadBar::battery_health_summary(&battery),
             "92% of design"
         );
+        assert_eq!(
+            ThinkPadBar::battery_wear_summary(&battery),
+            "8% worn (-4.0 Wh)"
+        );
         assert_eq!(ThinkPadBar::battery_power_summary(&battery), "12.4 W draw");
         assert_eq!(
             ThinkPadBar::battery_pack_summary(&battery),
-            "48.0 / 52.0 Wh"
+            "48.0 / 52.0 Wh (-4.0 Wh)"
         );
-        assert_eq!(ThinkPadBar::battery_cycle_summary(&battery), "187");
+        assert_eq!(ThinkPadBar::battery_cycle_summary(&battery), "187 cycles");
     }
 
     #[test]
@@ -3189,13 +3216,14 @@ mod tests {
             },
         );
 
-        assert_eq!(rows.len(), 10);
+        assert_eq!(rows.len(), 11);
         assert_eq!(
             rows.iter().map(|(_, label, _)| *label).collect::<Vec<_>>(),
             vec![
                 "Battery Runtime",
                 "AC Adapter",
                 "Battery Health",
+                "Battery Wear",
                 "Pack Capacity",
                 "Cycle Count",
                 "Charge / Draw Power",
