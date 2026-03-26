@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.101] - 2026-03-27
+
+### Changed
+- Continued `P7 Native Wayland Polish v2` with an event-driven output path and another user-visible Wayland feature:
+  - `WaylandRuntimeService` now exposes a native `Subscription` and applies hotplug-aware snapshot updates from the Wayland socket instead of relying only on startup snapshots;
+  - regular `System Info` now shows a dedicated `Display Scale` row derived from `wl_output` scale events.
+- The Wayland output model is now rich enough to carry current mode, refresh, and scale while remaining event-driven and low-overhead.
+
+### Quality
+- Added regression coverage for:
+  - per-output scale summaries,
+  - app-level application of `WaylandRuntimeEvent::SnapshotUpdated`.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.100] - 2026-03-27
 
 ### Changed

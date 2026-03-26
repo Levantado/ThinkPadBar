@@ -95,6 +95,7 @@ pub enum Message {
     ControlsEvent(crate::services::controls::ControlsEvent),
     ControlsCommandCompleted(crate::services::controls::ControlsFollowUp),
     BackgroundWifiInfoSynced(crate::services::network::WifiInfo),
+    WaylandRuntimeEvent(crate::services::wayland_runtime::WaylandRuntimeEvent),
     RefreshCompositor,
     CompositorEvent(crate::services::compositor::CompositorEvent),
     CompositorRefreshed(crate::services::compositor::RefreshResult),
@@ -898,6 +899,11 @@ impl ThinkPadBar {
                 {
                     return self.request_wifi_info_sync();
                 }
+            }
+            Message::WaylandRuntimeEvent(
+                crate::services::wayland_runtime::WaylandRuntimeEvent::SnapshotUpdated(snapshot),
+            ) => {
+                self.wayland_runtime_service.apply_snapshot(snapshot);
             }
             Message::PopupWindowUnfocused(window_id) => {
                 if Self::should_close_popup_on_unfocus(self.popup_window_id, &self.popup, window_id)
@@ -2016,6 +2022,11 @@ impl ThinkPadBar {
                     wayland_snapshot.output_topology_summary(),
                 ))
                 .push(item(
+                    "🧪",
+                    "Display Scale",
+                    wayland_snapshot.output_scale_summary(),
+                ))
+                .push(item(
                     "🖥",
                     "Display Outputs",
                     wayland_snapshot.output_summary(),
@@ -3096,6 +3107,8 @@ impl ThinkPadBar {
             self.compositor_service
                 .subscription()
                 .map(Message::CompositorEvent),
+            crate::services::wayland_runtime::WaylandRuntimeService::subscription()
+                .map(Message::WaylandRuntimeEvent),
             crate::services::tray_ui::TrayUiService::subscription().map(Message::TrayEvent),
             self.controls_service
                 .subscription()
@@ -3113,7 +3126,8 @@ impl ThinkPadBar {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundRequestKind, CoalescedControlKind, ControlsCoalescing, Popup, ThinkPadBar,
+        BackgroundRequestKind, CoalescedControlKind, ControlsCoalescing, Message, Popup,
+        ThinkPadBar,
     };
     use iced::window::Id;
 
@@ -3508,6 +3522,30 @@ mod tests {
             coalescing.take_command_if_current(CoalescedControlKind::Volume, second),
             Some(crate::services::controls::ControlsCommand::SetVolume(42))
         );
+    }
+
+    #[test]
+    fn wayland_runtime_event_updates_snapshot() {
+        let mut bar = hermetic_bar();
+        let snapshot = crate::services::wayland_runtime::WaylandRuntimeSnapshot {
+            available: true,
+            outputs: vec![crate::services::wayland_runtime::WaylandOutputInfo {
+                global_name: 1,
+                version: 4,
+                name: Some("eDP-1".to_string()),
+                scale_factor: Some(2),
+                ..crate::services::wayland_runtime::WaylandOutputInfo::default()
+            }],
+            ..crate::services::wayland_runtime::WaylandRuntimeSnapshot::default()
+        };
+
+        let _ = bar.update(Message::WaylandRuntimeEvent(
+            crate::services::wayland_runtime::WaylandRuntimeEvent::SnapshotUpdated(
+                snapshot.clone(),
+            ),
+        ));
+
+        assert_eq!(bar.wayland_runtime_service.snapshot(), &snapshot);
     }
 
     #[test]

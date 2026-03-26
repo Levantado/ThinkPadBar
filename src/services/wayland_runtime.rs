@@ -1,3 +1,5 @@
+use iced::futures::SinkExt;
+use std::thread;
 use wayland_client::{
     protocol::{
         wl_compositor::WlCompositor,
@@ -8,6 +10,11 @@ use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaylandRuntimeEvent {
+    SnapshotUpdated(WaylandRuntimeSnapshot),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WaylandOutputInfo {
@@ -74,6 +81,11 @@ impl WaylandOutputInfo {
         };
         let upper = name.to_ascii_uppercase();
         upper.starts_with("EDP") || upper.starts_with("LVDS") || upper.starts_with("DSI")
+    }
+
+    pub fn scale_label(&self) -> Option<String> {
+        let scale_factor = self.scale_factor?;
+        (scale_factor > 0).then(|| format!("{} {}x", self.label(), scale_factor))
     }
 }
 
@@ -175,6 +187,27 @@ impl WaylandRuntimeSnapshot {
             .join(", ")
     }
 
+    pub fn output_scale_summary(&self) -> String {
+        if self.outputs.is_empty() {
+            return if self.available {
+                "No outputs".to_string()
+            } else {
+                "Wayland unavailable".to_string()
+            };
+        }
+
+        let labels = self
+            .outputs
+            .iter()
+            .filter_map(WaylandOutputInfo::scale_label)
+            .collect::<Vec<_>>();
+        if labels.is_empty() {
+            "Scale unavailable".to_string()
+        } else {
+            labels.join(", ")
+        }
+    }
+
     pub fn missing_capabilities(&self) -> Option<String> {
         let mut missing = Vec::new();
         if self.compositor_version.is_none() {
@@ -236,6 +269,22 @@ impl WaylandRuntimeService {
         &self.snapshot
     }
 
+    pub fn apply_snapshot(&mut self, snapshot: WaylandRuntimeSnapshot) {
+        self.snapshot = snapshot;
+    }
+
+    pub fn subscription() -> iced::Subscription<WaylandRuntimeEvent> {
+        struct WaylandRuntimeListener;
+
+        iced::Subscription::run_with_id(
+            std::any::TypeId::of::<WaylandRuntimeListener>(),
+            iced::stream::channel(1, move |output| async move {
+                let thread = thread::spawn(move || run_wayland_runtime_listener(output));
+                let _ = thread.join();
+            }),
+        )
+    }
+
     #[cfg(test)]
     pub fn unavailable_for_tests() -> Self {
         Self {
@@ -281,6 +330,63 @@ fn collect_snapshot() -> Result<WaylandRuntimeSnapshot, String> {
         outputs: state.outputs,
         unavailable_reason: None,
     })
+}
+
+fn snapshot_from_state(state: &WaylandRuntimeData) -> WaylandRuntimeSnapshot {
+    WaylandRuntimeSnapshot {
+        available: true,
+        compositor_version: state.compositor_version,
+        shm_version: state.shm_version,
+        xdg_wm_base_version: state.xdg_wm_base_version,
+        layer_shell_version: state.layer_shell_version,
+        idle_inhibit_version: state.idle_inhibit_version,
+        outputs: state.outputs.clone(),
+        unavailable_reason: None,
+    }
+}
+
+fn run_wayland_runtime_listener(
+    mut output: iced::futures::channel::mpsc::Sender<WaylandRuntimeEvent>,
+) {
+    let Ok(connection) = Connection::connect_to_env() else {
+        return;
+    };
+    let display = connection.display();
+    let event_queue = connection.new_event_queue();
+    let handle = event_queue.handle();
+    let registry = display.get_registry(&handle, ());
+    let mut state = WaylandRuntimeData::default();
+    let mut queue: EventQueue<WaylandRuntimeData> = event_queue;
+    let _ = registry;
+
+    if queue.roundtrip(&mut state).is_err() {
+        return;
+    }
+    if queue.roundtrip(&mut state).is_err() {
+        return;
+    }
+
+    let mut last_snapshot = snapshot_from_state(&state);
+    let _ = iced::futures::executor::block_on(
+        output.send(WaylandRuntimeEvent::SnapshotUpdated(last_snapshot.clone())),
+    );
+
+    loop {
+        if queue.blocking_dispatch(&mut state).is_err() {
+            break;
+        }
+        let snapshot = snapshot_from_state(&state);
+        if snapshot != last_snapshot {
+            last_snapshot = snapshot.clone();
+            if iced::futures::executor::block_on(
+                output.send(WaylandRuntimeEvent::SnapshotUpdated(snapshot)),
+            )
+            .is_err()
+            {
+                break;
+            }
+        }
+    }
 }
 
 impl Dispatch<WlRegistry, ()> for WaylandRuntimeData {
@@ -457,6 +563,35 @@ mod tests {
         assert_eq!(
             service.snapshot().output_detail_summary(),
             "eDP-1 1920x1200 60Hz 2x"
+        );
+    }
+
+    #[test]
+    fn output_scale_summary_lists_per_output_scale() {
+        let service = WaylandRuntimeService::with_snapshot_for_tests(WaylandRuntimeSnapshot {
+            available: true,
+            outputs: vec![
+                WaylandOutputInfo {
+                    global_name: 1,
+                    version: 4,
+                    name: Some("eDP-1".to_string()),
+                    scale_factor: Some(2),
+                    ..WaylandOutputInfo::default()
+                },
+                WaylandOutputInfo {
+                    global_name: 2,
+                    version: 4,
+                    name: Some("HDMI-A-1".to_string()),
+                    scale_factor: Some(1),
+                    ..WaylandOutputInfo::default()
+                },
+            ],
+            ..WaylandRuntimeSnapshot::default()
+        });
+
+        assert_eq!(
+            service.snapshot().output_scale_summary(),
+            "eDP-1 2x, HDMI-A-1 1x"
         );
     }
 
