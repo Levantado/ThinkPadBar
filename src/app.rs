@@ -412,6 +412,33 @@ impl ThinkPadBar {
         format!("{state} ({})", sys_data.temp_str)
     }
 
+    fn hardware_summary_rows(
+        battery: &crate::services::controls::BatteryInfo,
+        power_profile: &str,
+        fan: &crate::services::controls::FanInfo,
+        sys_data: &crate::modules::system::SysData,
+        idle_snapshot: &crate::services::idle_inhibitor::IdleInhibitorSnapshot,
+    ) -> Vec<(&'static str, &'static str, String)> {
+        vec![
+            (
+                "󰁹",
+                "Battery Runtime",
+                Self::battery_runtime_summary(battery),
+            ),
+            ("󰚥", "AC Adapter", Self::battery_ac_summary(battery)),
+            ("", "Battery Health", Self::battery_health_summary(battery)),
+            (
+                "󱐋",
+                "Charge / Draw Power",
+                Self::battery_power_summary(battery),
+            ),
+            ("󰾆", "Power Profile", power_profile.to_string()),
+            ("󰈐", "Fan Runtime", Self::fan_runtime_summary(fan)),
+            ("", "Thermal State", Self::thermal_state_summary(sys_data)),
+            ("", "Idle Inhibitor", idle_snapshot.label().to_string()),
+        ]
+    }
+
     fn coalescing_diagnostics(&self) -> AppCoalescingDiagnostics {
         AppCoalescingDiagnostics {
             pending_control_flushes: self.controls_coalescing.pending_count(),
@@ -1853,6 +1880,13 @@ impl ThinkPadBar {
             let idle_snapshot = self.idle_inhibitor_service.snapshot();
             let tray_diagnostics = self.tray_ui_service.diagnostics();
             let coalescing_diagnostics = self.coalescing_diagnostics();
+            let hardware_rows = Self::hardware_summary_rows(
+                &self.controls.battery,
+                &self.controls.power_profile,
+                &self.controls.fan,
+                sys_data,
+                &idle_snapshot,
+            );
             col = col
                 .push(item("", "CPU Usage", sys_data.cpu_str.clone()))
                 .push(item("󰍛", "Memory Usage", sys_data.mem_str.clone()))
@@ -1872,47 +1906,10 @@ impl ThinkPadBar {
                     iced::widget::text::Style {
                         color: Some(Color::from_rgb8(0x9e, 0xce, 0x6a)),
                     }
-                }))
-                .push(item(
-                    "󰁹",
-                    "Battery Runtime",
-                    Self::battery_runtime_summary(&self.controls.battery),
-                ))
-                .push(item(
-                    "󰚥",
-                    "AC Adapter",
-                    Self::battery_ac_summary(&self.controls.battery),
-                ))
-                .push(item(
-                    "",
-                    "Battery Health",
-                    Self::battery_health_summary(&self.controls.battery),
-                ))
-                .push(item(
-                    "󱐋",
-                    "Charge / Draw Power",
-                    Self::battery_power_summary(&self.controls.battery),
-                ))
-                .push(item(
-                    "󰾆",
-                    "Power Profile",
-                    self.controls.power_profile.clone(),
-                ))
-                .push(item(
-                    "󰈐",
-                    "Fan Runtime",
-                    Self::fan_runtime_summary(&self.controls.fan),
-                ))
-                .push(item(
-                    "",
-                    "Thermal State",
-                    Self::thermal_state_summary(sys_data),
-                ))
-                .push(item(
-                    "",
-                    "Idle Inhibitor",
-                    idle_snapshot.label().to_string(),
-                ));
+                }));
+            for (icon, label, value) in hardware_rows {
+                col = col.push(item(icon, label, value));
+            }
 
             if self.debug_ui_enabled {
                 col = col
@@ -2047,8 +2044,9 @@ impl ThinkPadBar {
             }
 
             return container(
-                container(col)
+                container(scrollable(col))
                     .width(Length::Fill)
+                    .height(Length::Fill)
                     .padding(Padding::from([20, 24]))
                     .style(|_| container::Style {
                         background: Some(iced::Background::Color(Color {
@@ -3121,6 +3119,51 @@ mod tests {
             }),
             "Hot (73°C)"
         );
+    }
+
+    #[test]
+    fn hardware_summary_rows_include_all_expected_lines() {
+        let rows = ThinkPadBar::hardware_summary_rows(
+            &crate::services::controls::BatteryInfo {
+                capacity: 64,
+                status: "Discharging".to_string(),
+                time_remaining: Some("2h 6m remaining".to_string()),
+                ac_online: Some(false),
+                health_percent: Some(92),
+                power_rate_mw: Some(12_400),
+            },
+            "balanced",
+            &crate::services::controls::FanInfo {
+                speed: "2700".to_string(),
+                level: "auto".to_string(),
+            },
+            &crate::modules::system::SysData {
+                temp: 56.0,
+                temp_str: "56°C".to_string(),
+                ..crate::modules::system::SysData::default()
+            },
+            &crate::services::idle_inhibitor::IdleInhibitorSnapshot {
+                available: true,
+                enabled: true,
+                diagnostics: crate::services::idle_inhibitor::IdleInhibitorDiagnostics::default(),
+            },
+        );
+
+        assert_eq!(rows.len(), 8);
+        assert_eq!(
+            rows.iter().map(|(_, label, _)| *label).collect::<Vec<_>>(),
+            vec![
+                "Battery Runtime",
+                "AC Adapter",
+                "Battery Health",
+                "Charge / Draw Power",
+                "Power Profile",
+                "Fan Runtime",
+                "Thermal State",
+                "Idle Inhibitor",
+            ]
+        );
+        assert!(rows.iter().all(|(_, _, value)| !value.is_empty()));
     }
 
     #[test]

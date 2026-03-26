@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.92] - 2026-03-27
+
+### Changed
+- Fixed a `System Info` layout regression introduced by the growing diagnostics/hardware sections:
+  - the `System Info` popup is now wrapped in `scrollable(...)`, so lower sections such as `ThinkPad Hardware` are reachable instead of being clipped by the popup height;
+  - hardware rows are now built through a dedicated helper, keeping the model stable as the section grows.
+
+### Quality
+- Added a regression test that asserts the complete `ThinkPad Hardware` row set is present and non-empty in the view model helper.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.91] - 2026-03-27
 
 ### Changed
