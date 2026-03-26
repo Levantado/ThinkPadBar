@@ -619,6 +619,24 @@ impl ThinkPadBar {
             .collect()
     }
 
+    fn display_pill_summary(
+        wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
+    ) -> Option<(&'static str, String)> {
+        if !wayland_snapshot.available {
+            return None;
+        }
+
+        let mode = wayland_snapshot.display_mode_summary();
+        let icon = match mode.as_str() {
+            "Laptop" => "󰌢",
+            "Docked" => "󰍹",
+            "Hybrid" => "󰍺",
+            "Headless" => "󰹑",
+            _ => "󰍹",
+        };
+        Some((icon, mode))
+    }
+
     fn coalescing_diagnostics(&self) -> AppCoalescingDiagnostics {
         AppCoalescingDiagnostics {
             pending_control_flushes: self.controls_coalescing.pending_count(),
@@ -1572,6 +1590,7 @@ impl ThinkPadBar {
             "󰂲"
         };
         let idle_snapshot = self.idle_inhibitor_service.snapshot();
+        let wayland_snapshot = self.wayland_runtime_service.snapshot();
 
         let bat_cap = self.controls.battery.capacity;
         let bat_status = &self.controls.battery.status;
@@ -1648,6 +1667,26 @@ impl ThinkPadBar {
             ..Default::default()
         });
 
+        let display_pill = Self::display_pill_summary(wayland_snapshot).map(|(icon, label)| {
+            container(
+                Row::new()
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .push(text(icon).size(14))
+                    .push(text(label).size(14)),
+            )
+            .padding(Padding::from([4, 12]))
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(pill_bg)),
+                text_color: Some(pill_fg),
+                border: iced::Border {
+                    radius: pill_border_radius.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        });
+
         // 3. Hardware Pill (Brightness, Audio/Mic, and Fan)
         let hw_pill = container(
             Row::new()
@@ -1713,6 +1752,10 @@ impl ThinkPadBar {
             .push(mouse_area(sys_pill).on_press(Message::TogglePopup(Popup::SystemMonitor)))
             .push(mouse_area(hw_pill).on_press(Message::TogglePopup(Popup::ControlCenter)))
             .push(mouse_area(combined_pill).on_press(Message::TogglePopup(Popup::ControlCenter)))
+            .push_maybe(
+                display_pill
+                    .map(|pill| mouse_area(pill).on_press(Message::TogglePopup(Popup::Displays))),
+            )
             .push(mouse_area(kbd_pill).on_press(Message::NextKeyboardLayout));
 
         if self.debug_ui_enabled {
@@ -3758,6 +3801,44 @@ mod tests {
         assert_eq!(rows[0].1, "1920x1200 · 60Hz · 2x scale · internal");
         assert_eq!(rows[1].0, "DP-2");
         assert_eq!(rows[1].1, "2560x1440 · 144Hz · 1x scale · external");
+    }
+
+    #[test]
+    fn display_pill_summary_uses_wayland_mode_and_hides_when_unavailable() {
+        assert_eq!(
+            ThinkPadBar::display_pill_summary(
+                &crate::services::wayland_runtime::WaylandRuntimeSnapshot {
+                    available: false,
+                    unavailable_reason: Some("no wayland".to_string()),
+                    ..crate::services::wayland_runtime::WaylandRuntimeSnapshot::default()
+                }
+            ),
+            None
+        );
+
+        assert_eq!(
+            ThinkPadBar::display_pill_summary(
+                &crate::services::wayland_runtime::WaylandRuntimeSnapshot {
+                    available: true,
+                    outputs: vec![
+                        crate::services::wayland_runtime::WaylandOutputInfo {
+                            global_name: 1,
+                            version: 4,
+                            name: Some("eDP-1".to_string()),
+                            ..crate::services::wayland_runtime::WaylandOutputInfo::default()
+                        },
+                        crate::services::wayland_runtime::WaylandOutputInfo {
+                            global_name: 2,
+                            version: 4,
+                            name: Some("HDMI-A-1".to_string()),
+                            ..crate::services::wayland_runtime::WaylandOutputInfo::default()
+                        },
+                    ],
+                    ..crate::services::wayland_runtime::WaylandRuntimeSnapshot::default()
+                }
+            ),
+            Some(("󰍺", "Hybrid".to_string()))
+        );
     }
 
     #[test]

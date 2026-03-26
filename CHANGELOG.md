@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.1] - 2026-03-27
+
+### Changed
+- Continued `P7 Native Wayland Polish v2` after `1.0.0` with a final fast-access display surface:
+  - the bar now exposes a hotplug-aware display pill that reflects the current `Display Mode` and opens the dedicated `Displays` popup directly;
+  - the `Displays` popup now acts as a proper user-facing Wayland surface with detailed per-output mode, refresh, scale, and internal/external classification instead of only summary rows in existing popups.
+
+### Quality
+- Added regression coverage for:
+  - display pill summary derivation,
+  - popup output detail formatting.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.0] - 2026-03-27
 
 ### Changed
