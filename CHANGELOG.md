@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.95] - 2026-03-27
+
+### Changed
+- Continued `P6 ThinkPad Hardware Refinement v2` with two ThinkPad-relevant battery details in `System Info`:
+  - `BatteryInfo` now carries live pack voltage and optional `charge_control_{start,end}_threshold` values from `/sys/class/power_supply`;
+  - `ThinkPad Hardware` now shows `Pack Voltage` and `Charge Thresholds`, so the battery block exposes both current electrical state and threshold policy without extra shell commands.
+
+### Quality
+- Extended regression coverage for:
+  - deriving pack voltage and charge thresholds from battery readings,
+  - hardware-summary formatting for the new `Pack Voltage` and `Charge Thresholds` rows.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.94] - 2026-03-27
 
 ### Changed

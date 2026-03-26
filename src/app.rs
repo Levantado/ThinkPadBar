@@ -404,6 +404,13 @@ impl ThinkPadBar {
         format!("{:.1} W {label}", power_rate_mw as f64 / 1000.0)
     }
 
+    fn battery_voltage_summary(battery: &crate::services::controls::BatteryInfo) -> String {
+        battery
+            .pack_voltage_mv
+            .map(|mv| format!("{:.1} V", mv as f64 / 1000.0))
+            .unwrap_or_else(|| "N/A".to_string())
+    }
+
     fn battery_pack_summary(battery: &crate::services::controls::BatteryInfo) -> String {
         match (battery.full_charge_mwh, battery.design_capacity_mwh) {
             (Some(full), Some(design)) if design >= full => {
@@ -431,6 +438,15 @@ impl ThinkPadBar {
             .cycle_count
             .map(|count| format!("{count} cycles"))
             .unwrap_or_else(|| "N/A".to_string())
+    }
+
+    fn battery_threshold_summary(battery: &crate::services::controls::BatteryInfo) -> String {
+        match (battery.charge_start_threshold, battery.charge_end_threshold) {
+            (Some(start), Some(end)) => format!("{start}% -> {end}%"),
+            (Some(start), None) => format!("Start at {start}%"),
+            (None, Some(end)) => format!("Stop at {end}%"),
+            (None, None) => "N/A".to_string(),
+        }
     }
 
     fn fan_runtime_summary(fan: &crate::services::controls::FanInfo) -> String {
@@ -472,7 +488,13 @@ impl ThinkPadBar {
             ("", "Battery Health", Self::battery_health_summary(battery)),
             ("󰾹", "Battery Wear", Self::battery_wear_summary(battery)),
             ("󱤅", "Pack Capacity", Self::battery_pack_summary(battery)),
+            ("󱈸", "Pack Voltage", Self::battery_voltage_summary(battery)),
             ("󰂄", "Cycle Count", Self::battery_cycle_summary(battery)),
+            (
+                "󱞊",
+                "Charge Thresholds",
+                Self::battery_threshold_summary(battery),
+            ),
             (
                 "󱐋",
                 "Charge / Draw Power",
@@ -3101,9 +3123,12 @@ mod tests {
                 ac_online: Some(false),
                 health_percent: Some(92),
                 power_rate_mw: Some(12_400),
+                pack_voltage_mv: None,
                 cycle_count: None,
                 full_charge_mwh: None,
                 design_capacity_mwh: None,
+                charge_start_threshold: None,
+                charge_end_threshold: None,
             }),
             "64% Discharging (2h 6m remaining)"
         );
@@ -3115,9 +3140,12 @@ mod tests {
                 ac_online: Some(true),
                 health_percent: Some(100),
                 power_rate_mw: None,
+                pack_voltage_mv: None,
                 cycle_count: None,
                 full_charge_mwh: None,
                 design_capacity_mwh: None,
+                charge_start_threshold: None,
+                charge_end_threshold: None,
             }),
             "100% Full"
         );
@@ -3132,9 +3160,12 @@ mod tests {
             ac_online: Some(false),
             health_percent: Some(92),
             power_rate_mw: Some(12_400),
+            pack_voltage_mv: Some(15_420),
             cycle_count: Some(187),
             full_charge_mwh: Some(48_000),
             design_capacity_mwh: Some(52_000),
+            charge_start_threshold: Some(40),
+            charge_end_threshold: Some(80),
         };
 
         assert_eq!(ThinkPadBar::battery_ac_summary(&battery), "Disconnected");
@@ -3147,11 +3178,16 @@ mod tests {
             "8% worn (-4.0 Wh)"
         );
         assert_eq!(ThinkPadBar::battery_power_summary(&battery), "12.4 W draw");
+        assert_eq!(ThinkPadBar::battery_voltage_summary(&battery), "15.4 V");
         assert_eq!(
             ThinkPadBar::battery_pack_summary(&battery),
             "48.0 / 52.0 Wh (-4.0 Wh)"
         );
         assert_eq!(ThinkPadBar::battery_cycle_summary(&battery), "187 cycles");
+        assert_eq!(
+            ThinkPadBar::battery_threshold_summary(&battery),
+            "40% -> 80%"
+        );
     }
 
     #[test]
@@ -3195,9 +3231,12 @@ mod tests {
                 ac_online: Some(false),
                 health_percent: Some(92),
                 power_rate_mw: Some(12_400),
+                pack_voltage_mv: Some(15_420),
                 cycle_count: Some(187),
                 full_charge_mwh: Some(48_000),
                 design_capacity_mwh: Some(52_000),
+                charge_start_threshold: Some(40),
+                charge_end_threshold: Some(80),
             },
             "balanced",
             &crate::services::controls::FanInfo {
@@ -3216,7 +3255,7 @@ mod tests {
             },
         );
 
-        assert_eq!(rows.len(), 11);
+        assert_eq!(rows.len(), 13);
         assert_eq!(
             rows.iter().map(|(_, label, _)| *label).collect::<Vec<_>>(),
             vec![
@@ -3225,7 +3264,9 @@ mod tests {
                 "Battery Health",
                 "Battery Wear",
                 "Pack Capacity",
+                "Pack Voltage",
                 "Cycle Count",
+                "Charge Thresholds",
                 "Charge / Draw Power",
                 "Power Profile",
                 "Fan Runtime",

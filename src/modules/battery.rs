@@ -9,9 +9,12 @@ pub struct BatteryInfo {
     pub ac_online: Option<bool>,
     pub health_percent: Option<u8>,
     pub power_rate_mw: Option<u32>,
+    pub pack_voltage_mv: Option<u32>,
     pub cycle_count: Option<u32>,
     pub full_charge_mwh: Option<u32>,
     pub design_capacity_mwh: Option<u32>,
+    pub charge_start_threshold: Option<u8>,
+    pub charge_end_threshold: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +33,8 @@ struct BatteryReadings {
     voltage_min_design_uv: Option<u64>,
     ac_online: Option<bool>,
     cycle_count: Option<u32>,
+    charge_start_threshold: Option<u8>,
+    charge_end_threshold: Option<u8>,
 }
 
 pub fn get_battery_info() -> BatteryInfo {
@@ -41,9 +46,12 @@ pub fn get_battery_info() -> BatteryInfo {
             ac_online: None,
             health_percent: None,
             power_rate_mw: None,
+            pack_voltage_mv: None,
             cycle_count: None,
             full_charge_mwh: None,
             design_capacity_mwh: None,
+            charge_start_threshold: None,
+            charge_end_threshold: None,
         };
     };
 
@@ -66,6 +74,8 @@ pub fn get_battery_info() -> BatteryInfo {
             .and_then(|path| read_u64_field(&path, "online"))
             .map(|value| value > 0),
         cycle_count: read_u64_field(&battery_path, "cycle_count").map(|value| value as u32),
+        charge_start_threshold: read_percent_field(&battery_path, "charge_control_start_threshold"),
+        charge_end_threshold: read_percent_field(&battery_path, "charge_control_end_threshold"),
     })
 }
 
@@ -89,6 +99,10 @@ fn read_string_field(path: &Path, name: &str) -> Option<String> {
 
 fn read_u64_field(path: &Path, name: &str) -> Option<u64> {
     read_string_field(path, name)?.parse::<u64>().ok()
+}
+
+fn read_percent_field(path: &Path, name: &str) -> Option<u8> {
+    read_u64_field(path, name).map(|value| value.min(100) as u8)
 }
 
 fn build_battery_info(readings: BatteryReadings) -> BatteryInfo {
@@ -135,6 +149,10 @@ fn build_battery_info(readings: BatteryReadings) -> BatteryInfo {
         )
         .map(|uw| (uw / 1_000) as u32)
         .filter(|mw| *mw > 0);
+    let pack_voltage_mv = readings
+        .voltage_now_uv
+        .map(|uv| (uv / 1_000) as u32)
+        .filter(|mv| *mv > 0);
 
     let conversion_voltage_uv = readings.voltage_min_design_uv.or(readings.voltage_now_uv);
     let full_charge_mwh = readings.energy_full_uwh.map(uwh_to_mwh).or_else(|| {
@@ -157,9 +175,12 @@ fn build_battery_info(readings: BatteryReadings) -> BatteryInfo {
         ac_online: readings.ac_online,
         health_percent,
         power_rate_mw,
+        pack_voltage_mv,
         cycle_count: readings.cycle_count,
         full_charge_mwh,
         design_capacity_mwh,
+        charge_start_threshold: readings.charge_start_threshold,
+        charge_end_threshold: readings.charge_end_threshold,
     }
 }
 
@@ -205,6 +226,8 @@ mod tests {
             voltage_min_design_uv: None,
             ac_online: Some(false),
             cycle_count: Some(187),
+            charge_start_threshold: None,
+            charge_end_threshold: None,
         });
 
         assert_eq!(info.time_remaining.as_deref(), Some("2h 35m remaining"));
@@ -233,6 +256,8 @@ mod tests {
             voltage_min_design_uv: None,
             ac_online: Some(true),
             cycle_count: None,
+            charge_start_threshold: None,
+            charge_end_threshold: None,
         });
 
         assert_eq!(info.time_remaining.as_deref(), Some("45m until full"));
@@ -256,6 +281,8 @@ mod tests {
             voltage_min_design_uv: None,
             ac_online: None,
             cycle_count: None,
+            charge_start_threshold: None,
+            charge_end_threshold: None,
         });
 
         assert_eq!(info.power_rate_mw, Some(40_000));
@@ -280,6 +307,8 @@ mod tests {
             voltage_min_design_uv: Some(11_400_000),
             ac_online: Some(false),
             cycle_count: Some(312),
+            charge_start_threshold: Some(40),
+            charge_end_threshold: Some(80),
         });
 
         assert_eq!(
@@ -291,5 +320,8 @@ mod tests {
             Some(charge_to_mwh(5_100_000, 11_400_000))
         );
         assert_eq!(info.cycle_count, Some(312));
+        assert_eq!(info.pack_voltage_mv, Some(12_000));
+        assert_eq!(info.charge_start_threshold, Some(40));
+        assert_eq!(info.charge_end_threshold, Some(80));
     }
 }
