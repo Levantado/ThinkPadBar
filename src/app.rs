@@ -37,6 +37,7 @@ pub struct ThinkPadBar {
     controls: crate::services::controls::ControlsSnapshot,
     network_service: crate::services::network::NetworkService,
     idle_inhibitor_service: crate::services::idle_inhibitor::IdleInhibitorService,
+    wayland_runtime_service: crate::services::wayland_runtime::WaylandRuntimeService,
     popup: Popup,
     battery_str: String,
     audio_str: String,
@@ -757,6 +758,8 @@ impl ThinkPadBar {
             let network_service = crate::services::network::NetworkService::new(&cfg.network);
             let idle_inhibitor_service =
                 crate::services::idle_inhibitor::IdleInhibitorService::new();
+            let wayland_runtime_service =
+                crate::services::wayland_runtime::WaylandRuntimeService::new();
             let popup_anchor_service =
                 crate::services::popup_anchor::PopupAnchorService::new(cfg.appearance.bar_height);
             let session_service = crate::services::session::SessionService::new();
@@ -775,6 +778,7 @@ impl ThinkPadBar {
                 controls: controls_snapshot,
                 network_service,
                 idle_inhibitor_service,
+                wayland_runtime_service,
                 popup: Popup::None,
                 battery_str: String::new(),
                 audio_str: String::new(),
@@ -1984,6 +1988,7 @@ impl ThinkPadBar {
             let controls_diagnostics = self.controls_service.diagnostics();
             let network_diagnostics = self.network_service.diagnostics();
             let idle_snapshot = self.idle_inhibitor_service.snapshot();
+            let wayland_snapshot = self.wayland_runtime_service.snapshot();
             let tray_diagnostics = self.tray_ui_service.diagnostics();
             let coalescing_diagnostics = self.coalescing_diagnostics();
             let hardware_rows = Self::hardware_summary_rows(
@@ -2005,6 +2010,11 @@ impl ThinkPadBar {
                     sys_data.disk_boot_str.clone(),
                 ))
                 .push(item("🌐", "IP Address", sys_data.ip_address.clone()))
+                .push(item(
+                    "🖥",
+                    "Display Outputs",
+                    wayland_snapshot.output_summary(),
+                ))
                 .push(item("⬇", "Download Speed", sys_data.net_down_str.clone()))
                 .push(item("⬆", "Upload Speed", sys_data.net_up_str.clone()))
                 .push(Space::with_height(Length::Fixed(8.0)))
@@ -2120,12 +2130,17 @@ impl ThinkPadBar {
                     .push(item(
                         "🛣",
                         "Wayland Runtime",
-                        idle_snapshot.wayland_summary(),
+                        wayland_snapshot.runtime_summary(),
                     ))
                     .push(item(
                         "🧬",
                         "Wayland Capabilities",
-                        idle_snapshot.capability_summary(),
+                        wayland_snapshot.capability_summary(),
+                    ))
+                    .push(item(
+                        "🖵",
+                        "Wayland Outputs",
+                        wayland_snapshot.output_summary(),
                     ))
                     .push(item(
                         "☕",
@@ -2151,12 +2166,10 @@ impl ThinkPadBar {
                 if let Some(unavailable_reason) = network_diagnostics.unavailable_reason {
                     col = col.push(item("⚠", "Network Unavailable", unavailable_reason));
                 }
-                if let Some(unavailable_reason) =
-                    idle_snapshot.diagnostics.unavailable_reason.clone()
-                {
+                if let Some(unavailable_reason) = wayland_snapshot.unavailable_reason.clone() {
                     col = col.push(item("⚠", "Wayland Unavailable", unavailable_reason));
                 }
-                if let Some(missing_caps) = idle_snapshot.missing_capabilities() {
+                if let Some(missing_caps) = wayland_snapshot.missing_capabilities() {
                     col = col.push(item("⚠", "Wayland Missing Caps", missing_caps));
                 }
                 if let Some(last_failure) = tray_diagnostics.runtime.last_dispatch_failure {
@@ -3105,6 +3118,8 @@ mod tests {
             ),
             idle_inhibitor_service:
                 crate::services::idle_inhibitor::IdleInhibitorService::unavailable_for_tests(),
+            wayland_runtime_service:
+                crate::services::wayland_runtime::WaylandRuntimeService::unavailable_for_tests(),
             popup: Popup::None,
             battery_str: String::new(),
             audio_str: String::new(),

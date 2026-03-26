@@ -47,48 +47,6 @@ impl IdleInhibitorDiagnostics {
             why
         )
     }
-
-    pub fn wayland_summary(&self, available: bool) -> String {
-        format!(
-            "{} avail:{} cmp:{} idle:{} surf:{}",
-            self.backend_label(),
-            available,
-            self.compositor_version
-                .map_or_else(|| "-".to_string(), |version| format!("v{version}")),
-            self.idle_manager_version
-                .map_or_else(|| "-".to_string(), |version| format!("v{version}")),
-            self.surface_bound
-        )
-    }
-
-    pub fn capability_summary(&self) -> String {
-        format!(
-            "wl_compositor:{} idle_inhibit:{} wl_surface:{}",
-            self.compositor_version
-                .map_or_else(|| "missing".to_string(), |version| format!("v{version}")),
-            self.idle_manager_version
-                .map_or_else(|| "missing".to_string(), |version| format!("v{version}")),
-            if self.surface_bound {
-                "bound"
-            } else {
-                "missing"
-            }
-        )
-    }
-
-    pub fn missing_capabilities(&self) -> Option<String> {
-        let mut missing = Vec::new();
-        if self.compositor_version.is_none() {
-            missing.push("wl_compositor");
-        }
-        if self.idle_manager_version.is_none() {
-            missing.push("zwp_idle_inhibit_manager_v1");
-        }
-        if !self.surface_bound {
-            missing.push("wl_surface");
-        }
-        (!missing.is_empty()).then(|| missing.join(", "))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -111,18 +69,6 @@ impl IdleInhibitorSnapshot {
 
     pub fn debug_summary(&self) -> String {
         self.diagnostics.summary(self.available, self.enabled)
-    }
-
-    pub fn wayland_summary(&self) -> String {
-        self.diagnostics.wayland_summary(self.available)
-    }
-
-    pub fn capability_summary(&self) -> String {
-        self.diagnostics.capability_summary()
-    }
-
-    pub fn missing_capabilities(&self) -> Option<String> {
-        self.diagnostics.missing_capabilities()
     }
 }
 
@@ -626,48 +572,6 @@ mod tests {
         assert_eq!(
             service.snapshot().debug_summary(),
             "none avail:false enabled:false req:false surf:false cmp:- idle:- why:wayland connection unavailable"
-        );
-    }
-
-    #[test]
-    fn wayland_summary_reports_protocol_versions() {
-        let service = IdleInhibitorService::with_backend(FakeBackend {
-            available: true,
-            enabled: false,
-            set_enabled_calls: Vec::new(),
-        });
-
-        assert_eq!(
-            service.snapshot().wayland_summary(),
-            "fake avail:true cmp:v5 idle:v1 surf:true"
-        );
-    }
-
-    #[test]
-    fn capability_summary_reports_wayland_matrix() {
-        let service = IdleInhibitorService::with_backend(FakeBackend {
-            available: true,
-            enabled: false,
-            set_enabled_calls: Vec::new(),
-        });
-
-        assert_eq!(
-            service.snapshot().capability_summary(),
-            "wl_compositor:v5 idle_inhibit:v1 wl_surface:bound"
-        );
-        assert_eq!(service.snapshot().missing_capabilities(), None);
-    }
-
-    #[test]
-    fn missing_capabilities_reports_expected_protocol_names() {
-        let service = IdleInhibitorService::unavailable_for_tests();
-        assert_eq!(
-            service.snapshot().capability_summary(),
-            "wl_compositor:missing idle_inhibit:missing wl_surface:missing"
-        );
-        assert_eq!(
-            service.snapshot().missing_capabilities().as_deref(),
-            Some("wl_compositor, zwp_idle_inhibit_manager_v1, wl_surface")
         );
     }
 }

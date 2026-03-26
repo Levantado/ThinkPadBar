@@ -12,3 +12,4 @@ pub mod tray;
 pub mod tray_menu;
 pub mod tray_model;
 pub mod tray_ui;
+pub mod wayland_runtime;

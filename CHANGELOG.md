@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.99] - 2026-03-27
+
+### Changed
+- Continued `P7 Native Wayland Polish v2` in both planned directions:
+  - added a dedicated `WaylandRuntimeService` that snapshots registry capabilities and outputs from a native Wayland connection without introducing a background loop;
+  - `System Info` now exposes a user-visible `Display Outputs` row driven by `wl_output`;
+  - debug `System Info` now uses the new service for `Wayland Runtime`, `Wayland Capabilities`, `Wayland Outputs`, and `Wayland Missing Caps`, expanding the capability surface beyond the idle-inhibit path alone.
+
+### Quality
+- Added regression coverage for:
+  - named output summaries,
+  - missing-capability reporting across compositor/shm/output/xdg/layer-shell/idle-inhibit protocols.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.98] - 2026-03-27
 
 ### Changed
