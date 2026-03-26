@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.93] - 2026-03-27
+
+### Changed
+- Refined the `System Info` / `ThinkPad Hardware` section after the first scrollable fix:
+  - reserved an explicit right gutter inside the scrollable content so the vertical scrollbar no longer overlays value text;
+  - continued `P6 ThinkPad Hardware Refinement v2` by extending `BatteryInfo` with cycle count plus full/design pack capacity and deriving those values from either `energy_*` fields or `charge_* x voltage`;
+  - `ThinkPad Hardware` now shows `Pack Capacity` and `Cycle Count` in addition to the earlier AC/health/power/profile/fan/thermal lines.
+
+### Quality
+- Added regression coverage for:
+  - deriving pack capacity from `charge_*` plus voltage,
+  - hardware summary rows including the full expanded battery section,
+  - battery detail summaries covering pack-capacity and cycle-count formatting.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [0.6.92] - 2026-03-27
 
 ### Changed

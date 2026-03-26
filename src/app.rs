@@ -390,6 +390,27 @@ impl ThinkPadBar {
         format!("{:.1} W {label}", power_rate_mw as f64 / 1000.0)
     }
 
+    fn battery_pack_summary(battery: &crate::services::controls::BatteryInfo) -> String {
+        match (battery.full_charge_mwh, battery.design_capacity_mwh) {
+            (Some(full), Some(design)) => {
+                format!(
+                    "{:.1} / {:.1} Wh",
+                    full as f64 / 1000.0,
+                    design as f64 / 1000.0
+                )
+            }
+            (Some(full), None) => format!("{:.1} Wh current full", full as f64 / 1000.0),
+            _ => "N/A".to_string(),
+        }
+    }
+
+    fn battery_cycle_summary(battery: &crate::services::controls::BatteryInfo) -> String {
+        battery
+            .cycle_count
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "N/A".to_string())
+    }
+
     fn fan_runtime_summary(fan: &crate::services::controls::FanInfo) -> String {
         format!("{} RPM ({})", fan.speed, fan.level)
     }
@@ -427,6 +448,8 @@ impl ThinkPadBar {
             ),
             ("󰚥", "AC Adapter", Self::battery_ac_summary(battery)),
             ("", "Battery Health", Self::battery_health_summary(battery)),
+            ("󱤅", "Pack Capacity", Self::battery_pack_summary(battery)),
+            ("󰂄", "Cycle Count", Self::battery_cycle_summary(battery)),
             (
                 "󱐋",
                 "Charge / Draw Power",
@@ -2044,7 +2067,7 @@ impl ThinkPadBar {
             }
 
             return container(
-                container(scrollable(col))
+                container(scrollable(container(col).padding([0, 18, 0, 0])))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding(Padding::from([20, 24]))
@@ -3055,6 +3078,9 @@ mod tests {
                 ac_online: Some(false),
                 health_percent: Some(92),
                 power_rate_mw: Some(12_400),
+                cycle_count: None,
+                full_charge_mwh: None,
+                design_capacity_mwh: None,
             }),
             "64% Discharging (2h 6m remaining)"
         );
@@ -3066,6 +3092,9 @@ mod tests {
                 ac_online: Some(true),
                 health_percent: Some(100),
                 power_rate_mw: None,
+                cycle_count: None,
+                full_charge_mwh: None,
+                design_capacity_mwh: None,
             }),
             "100% Full"
         );
@@ -3080,6 +3109,9 @@ mod tests {
             ac_online: Some(false),
             health_percent: Some(92),
             power_rate_mw: Some(12_400),
+            cycle_count: Some(187),
+            full_charge_mwh: Some(48_000),
+            design_capacity_mwh: Some(52_000),
         };
 
         assert_eq!(ThinkPadBar::battery_ac_summary(&battery), "Disconnected");
@@ -3088,6 +3120,11 @@ mod tests {
             "92% of design"
         );
         assert_eq!(ThinkPadBar::battery_power_summary(&battery), "12.4 W draw");
+        assert_eq!(
+            ThinkPadBar::battery_pack_summary(&battery),
+            "48.0 / 52.0 Wh"
+        );
+        assert_eq!(ThinkPadBar::battery_cycle_summary(&battery), "187");
     }
 
     #[test]
@@ -3131,6 +3168,9 @@ mod tests {
                 ac_online: Some(false),
                 health_percent: Some(92),
                 power_rate_mw: Some(12_400),
+                cycle_count: Some(187),
+                full_charge_mwh: Some(48_000),
+                design_capacity_mwh: Some(52_000),
             },
             "balanced",
             &crate::services::controls::FanInfo {
@@ -3149,13 +3189,15 @@ mod tests {
             },
         );
 
-        assert_eq!(rows.len(), 8);
+        assert_eq!(rows.len(), 10);
         assert_eq!(
             rows.iter().map(|(_, label, _)| *label).collect::<Vec<_>>(),
             vec![
                 "Battery Runtime",
                 "AC Adapter",
                 "Battery Health",
+                "Pack Capacity",
+                "Cycle Count",
                 "Charge / Draw Power",
                 "Power Profile",
                 "Fan Runtime",
