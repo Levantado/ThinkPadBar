@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.2] - 2026-03-27
+
+### Changed
+- Reduced the heavy glyph path in `System Info` and debug observability surfaces:
+  - replaced real emoji row markers with compact ASCII/Nerd-font-safe tags in `System Info`, display summaries, and warning rows;
+  - kept the same information architecture while avoiding the most likely color-emoji/font-fallback allocation path that appears when opening the popup.
+
+### Quality
+- Added regression coverage to keep display summary rows on compact tags instead of emoji markers.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.1] - 2026-03-27
 
 ### Changed

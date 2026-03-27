@@ -554,21 +554,21 @@ impl ThinkPadBar {
     ) -> Vec<(&'static str, &'static str, String)> {
         vec![
             (
-                "🧭",
+                "DSP",
                 "Display Mode",
                 wayland_snapshot.display_mode_summary(),
             ),
             (
-                "🧭",
+                "TOP",
                 "Display Topology",
                 wayland_snapshot.output_topology_summary(),
             ),
             (
-                "🧪",
+                "SCL",
                 "Display Scale",
                 wayland_snapshot.output_scale_summary(),
             ),
-            ("🖥", "Display Outputs", wayland_snapshot.output_summary()),
+            ("OUT", "Display Outputs", wayland_snapshot.output_summary()),
         ]
     }
 
@@ -2220,15 +2220,15 @@ impl ThinkPadBar {
                 .push(item("󰍛", "Memory Usage", sys_data.mem_str.clone()))
                 .push(item("󰍛", "Swap Usage", sys_data.swap_str.clone()))
                 .push(item("", "Temperature", sys_data.temp_str.clone()))
-                .push(item("💿", "Disk Usage /", sys_data.disk_root_str.clone()))
+                .push(item("DSK", "Disk Usage /", sys_data.disk_root_str.clone()))
                 .push(item(
-                    "💿",
+                    "BOT",
                     "Disk Usage /boot",
                     sys_data.disk_boot_str.clone(),
                 ))
-                .push(item("🌐", "IP Address", sys_data.ip_address.clone()))
-                .push(item("⬇", "Download Speed", sys_data.net_down_str.clone()))
-                .push(item("⬆", "Upload Speed", sys_data.net_up_str.clone()));
+                .push(item("NET", "IP Address", sys_data.ip_address.clone()))
+                .push(item("DL", "Download Speed", sys_data.net_down_str.clone()))
+                .push(item("UL", "Upload Speed", sys_data.net_up_str.clone()));
             for (icon, label, value) in display_rows {
                 col = col.push(item(icon, label, value));
             }
@@ -2252,7 +2252,7 @@ impl ThinkPadBar {
                         }
                     }))
                     .push(item(
-                        "⏱",
+                        "TIM",
                         "Workspace Refresh (last/avg ms)",
                         format!(
                             "{}/{}",
@@ -2261,7 +2261,7 @@ impl ThinkPadBar {
                         ),
                     ))
                     .push(item(
-                        "🔁",
+                        "REQ",
                         "Workspace Refresh (req/coalesced)",
                         format!(
                             "{}/{}",
@@ -2270,14 +2270,14 @@ impl ThinkPadBar {
                         ),
                     ))
                     .push(item(
-                        "🚌",
+                        "BUS",
                         "D-Bus Connect (ok/fail)",
                         format!(
                             "{}/{}",
                             self.perf.dbus_connect_successes, self.perf.dbus_connect_failures
                         ),
                     ))
-                    .push(item("🧩", "Built-in Modules", {
+                    .push(item("MOD", "Built-in Modules", {
                         let modules = crate::modules::capabilities::built_in_modules();
                         let modules_count = modules.len();
                         let capability_links: usize =
@@ -2289,7 +2289,7 @@ impl ThinkPadBar {
                         )
                     }))
                     .push(item(
-                        "🛠",
+                        "API",
                         "Runtime Contract",
                         format!(
                             "{} events:{} cmds:{} impl:{}",
@@ -2300,7 +2300,7 @@ impl ThinkPadBar {
                         ),
                     ))
                     .push(item(
-                        "🧭",
+                        "SVC",
                         "Service Backends",
                         format!(
                             "cmp {:?}->{:?} net {:?}->{:?}",
@@ -2311,23 +2311,27 @@ impl ThinkPadBar {
                         ),
                     ))
                     .push(item(
-                        "🪟",
+                        "CMP",
                         "Compositor Runtime",
                         compositor_diagnostics.summary(),
                     ))
                     .push(item(
-                        "🎛",
+                        "CTL",
                         "Controls Backends",
                         controls_diagnostics.summary(),
                     ))
                     .push(item(
-                        "🌀",
+                        "COL",
                         "Coalescing Runtime",
                         coalescing_diagnostics.summary(),
                     ))
-                    .push(item("📶", "Network Runtime", network_diagnostics.summary()))
                     .push(item(
-                        "🔊",
+                        "NET",
+                        "Network Runtime",
+                        network_diagnostics.summary(),
+                    ))
+                    .push(item(
+                        "AUD",
                         "Audio Runtime",
                         controls_diagnostics
                             .audio_runtime
@@ -2342,62 +2346,62 @@ impl ThinkPadBar {
                             .clone()
                             .unwrap_or_else(|| "n/a".to_string()),
                     ))
-                    .push(item("🖥", "System Runtime", system_diagnostics.summary()))
+                    .push(item("SYS", "System Runtime", system_diagnostics.summary()))
                     .push(item(
-                        "🛣",
+                        "WAY",
                         "Wayland Runtime",
                         wayland_snapshot.runtime_summary(),
                     ))
                     .push(item(
-                        "🧬",
+                        "CAP",
                         "Wayland Capabilities",
                         wayland_snapshot.capability_summary(),
                     ))
                     .push(item(
-                        "🖵",
+                        "OUT",
                         "Wayland Outputs",
                         wayland_snapshot.output_summary(),
                     ))
                     .push(item(
-                        "🗺",
+                        "DET",
                         "Wayland Outputs Detail",
                         wayland_snapshot.output_detail_summary(),
                     ))
                     .push(item(
-                        "☕",
+                        "IDL",
                         "Idle Inhibitor Runtime",
                         idle_snapshot.debug_summary(),
                     ))
-                    .push(item("🖼", "Tray Icons", tray_diagnostics.summary()))
+                    .push(item("TRY", "Tray Icons", tray_diagnostics.summary()))
                     .push(item(
-                        "🧭",
+                        "TRT",
                         "Tray Runtime",
                         tray_diagnostics.runtime.summary(),
                     ));
 
                 if let Some(last_unresolved) = tray_diagnostics.last_unresolved_item {
-                    col = col.push(item("⚠", "Tray Icon Last Unresolved", last_unresolved));
+                    col = col.push(item("WRN", "Tray Icon Last Unresolved", last_unresolved));
                 }
                 if let Some(unavailable_reason) = compositor_diagnostics.unavailable_reason {
-                    col = col.push(item("⚠", "Compositor Unavailable", unavailable_reason));
+                    col = col.push(item("WRN", "Compositor Unavailable", unavailable_reason));
                 }
                 if let Some(last_error) = network_diagnostics.last_error {
-                    col = col.push(item("⚠", "Network Last Error", last_error));
+                    col = col.push(item("WRN", "Network Last Error", last_error));
                 }
                 if let Some(unavailable_reason) = network_diagnostics.unavailable_reason {
-                    col = col.push(item("⚠", "Network Unavailable", unavailable_reason));
+                    col = col.push(item("WRN", "Network Unavailable", unavailable_reason));
                 }
                 if let Some(unavailable_reason) = wayland_snapshot.unavailable_reason.clone() {
-                    col = col.push(item("⚠", "Wayland Unavailable", unavailable_reason));
+                    col = col.push(item("WRN", "Wayland Unavailable", unavailable_reason));
                 }
                 if let Some(missing_caps) = wayland_snapshot.missing_capabilities() {
-                    col = col.push(item("⚠", "Wayland Missing Caps", missing_caps));
+                    col = col.push(item("WRN", "Wayland Missing Caps", missing_caps));
                 }
                 if let Some(last_failure) = tray_diagnostics.runtime.last_dispatch_failure {
-                    col = col.push(item("⚠", "Tray Dispatch Failure", last_failure));
+                    col = col.push(item("WRN", "Tray Dispatch Failure", last_failure));
                 }
                 if let Some(menu_error) = tray_diagnostics.runtime.last_menu_activation_error {
-                    col = col.push(item("⚠", "Tray Menu Error", menu_error));
+                    col = col.push(item("WRN", "Tray Menu Error", menu_error));
                 }
             }
 
@@ -3751,6 +3755,10 @@ mod tests {
             },
         );
 
+        assert_eq!(
+            rows.iter().map(|(icon, _, _)| *icon).collect::<Vec<_>>(),
+            vec!["DSP", "TOP", "SCL", "OUT"]
+        );
         assert_eq!(
             rows.iter().map(|(_, label, _)| *label).collect::<Vec<_>>(),
             vec![
