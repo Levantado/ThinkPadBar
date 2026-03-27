@@ -549,6 +549,34 @@ impl ThinkPadBar {
         ]
     }
 
+    fn control_center_power_items(
+        battery: &crate::services::controls::BatteryInfo,
+    ) -> Vec<(&'static str, &'static str, String)> {
+        vec![
+            (
+                "󰁹",
+                "Battery Runtime",
+                Self::battery_runtime_summary(battery),
+            ),
+            (
+                "󱐌",
+                "Charge State",
+                Self::battery_charge_state_summary(battery),
+            ),
+            ("󰚥", "AC Adapter", Self::battery_ac_summary(battery)),
+            (
+                "󱐋",
+                "Charge / Draw Power",
+                Self::battery_power_summary(battery),
+            ),
+            (
+                "󱞊",
+                "Charge Thresholds",
+                Self::battery_threshold_summary(battery),
+            ),
+        ]
+    }
+
     fn display_summary_rows(
         wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
     ) -> Vec<(&'static str, &'static str, String)> {
@@ -3280,6 +3308,84 @@ impl ThinkPadBar {
         }
 
         container_col = container_col
+            .push({
+                let power_items = Self::control_center_power_items(&self.controls.battery);
+                let power_tile = |icon: &'static str, label: &'static str, value: String| {
+                    container(
+                        Column::new()
+                            .spacing(4)
+                            .push(
+                                Row::new()
+                                    .spacing(6)
+                                    .align_y(Alignment::Center)
+                                    .push(text(icon).size(14))
+                                    .push(text(label).size(12).style(|_| {
+                                        iced::widget::text::Style {
+                                            color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
+                                        }
+                                    })),
+                            )
+                            .push(text(value).size(13).style(|_| iced::widget::text::Style {
+                                color: Some(Color::from_rgb8(0xe5, 0xe9, 0xf0)),
+                            })),
+                    )
+                    .width(Length::Fill)
+                    .padding(10)
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb8(
+                            0x29, 0x2e, 0x42,
+                        ))),
+                        border: iced::Border {
+                            radius: 10.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                };
+
+                Column::new()
+                    .spacing(8)
+                    .push(
+                        Row::new()
+                            .spacing(8)
+                            .align_y(Alignment::Center)
+                            .push(text("󰚥").size(16))
+                            .push(text("ThinkPad Power").size(14)),
+                    )
+                    .push(
+                        Row::new()
+                            .spacing(8)
+                            .push(power_tile(
+                                power_items[0].0,
+                                power_items[0].1,
+                                power_items[0].2.clone(),
+                            ))
+                            .push(power_tile(
+                                power_items[1].0,
+                                power_items[1].1,
+                                power_items[1].2.clone(),
+                            )),
+                    )
+                    .push(
+                        Row::new()
+                            .spacing(8)
+                            .push(power_tile(
+                                power_items[2].0,
+                                power_items[2].1,
+                                power_items[2].2.clone(),
+                            ))
+                            .push(power_tile(
+                                power_items[3].0,
+                                power_items[3].1,
+                                power_items[3].2.clone(),
+                            )),
+                    )
+                    .push(power_tile(
+                        power_items[4].0,
+                        power_items[4].1,
+                        power_items[4].2.clone(),
+                    ))
+            })
             .push(
                 Column::new()
                     .spacing(8)
@@ -3728,6 +3834,47 @@ mod tests {
             ]
         );
         assert!(rows.iter().all(|(_, _, value)| !value.is_empty()));
+    }
+
+    #[test]
+    fn control_center_power_items_surface_daily_battery_state() {
+        let battery = crate::services::controls::BatteryInfo {
+            capacity: 63,
+            status: "Not charging".to_string(),
+            time_remaining: Some("2h 06m remaining".to_string()),
+            ac_online: Some(true),
+            health_percent: Some(91),
+            power_rate_mw: Some(11_800),
+            pack_voltage_mv: None,
+            cycle_count: None,
+            full_charge_mwh: None,
+            design_capacity_mwh: None,
+            charge_start_threshold: Some(40),
+            charge_end_threshold: Some(80),
+        };
+
+        let items = ThinkPadBar::control_center_power_items(&battery);
+        let labels = items.iter().map(|(_, label, _)| *label).collect::<Vec<_>>();
+        let values = items
+            .iter()
+            .map(|(_, _, value)| value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec![
+                "Battery Runtime",
+                "Charge State",
+                "AC Adapter",
+                "Charge / Draw Power",
+                "Charge Thresholds",
+            ]
+        );
+        assert!(values.contains(&"63% Not charging (2h 06m remaining)"));
+        assert!(values.contains(&"Within 40-80% hold window"));
+        assert!(values.contains(&"Connected"));
+        assert!(values.contains(&"11.8 W rate"));
+        assert!(values.contains(&"40% -> 80%"));
     }
 
     #[test]

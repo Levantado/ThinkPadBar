@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.7] - 2026-03-27
+
+### Changed
+- Started the `ThinkPad product depth` track with a new `ThinkPad Power` section in the control-center popup:
+  - surfaces daily-use battery runtime, charge state, AC state, charge/draw power, and charge thresholds directly in the quick popup instead of keeping them only in `System Info`;
+  - reuses the existing typed battery summaries, so no new backend or polling path was introduced.
+
+### Quality
+- Added regression coverage for the new control-center power items.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.6] - 2026-03-27
 
 ### Changed
