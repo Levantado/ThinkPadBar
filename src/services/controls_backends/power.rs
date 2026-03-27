@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -14,6 +14,7 @@ impl super::PowerBackend for PlatformProfilePowerBackend {
         Some(power_runtime_summary(
             tlp_active(),
             Path::new("/sys/firmware/acpi/platform_profile").exists(),
+            battery_threshold_paths().is_some(),
         ))
     }
 
@@ -60,6 +61,39 @@ impl super::PowerBackend for PlatformProfilePowerBackend {
             }
         })
     }
+
+    fn set_battery_thresholds(
+        &self,
+        thresholds: crate::services::controls::BatteryThresholds,
+    ) -> super::BackendFuture<'_, ()> {
+        Box::pin(async move {
+            let Some((start_path, end_path)) = battery_threshold_paths() else {
+                warn!("Battery threshold files are unavailable; skipping threshold write");
+                return;
+            };
+
+            let thresholds =
+                crate::services::controls::BatteryThresholds::new(thresholds.start, thresholds.end);
+
+            if let Err(error) = write_battery_thresholds(&start_path, &end_path, thresholds) {
+                warn!(
+                    "Direct battery threshold write failed: {}. Falling back to pkexec.",
+                    error
+                );
+                let _ = tokio::process::Command::new("pkexec")
+                    .arg("sh")
+                    .arg("-c")
+                    .arg(battery_threshold_script(&start_path, &end_path, thresholds))
+                    .status()
+                    .await;
+            } else {
+                info!(
+                    "Battery thresholds successfully set via direct write: {} -> {}",
+                    thresholds.start, thresholds.end
+                );
+            }
+        })
+    }
 }
 
 fn tlp_active() -> bool {
@@ -93,16 +127,71 @@ fn resolve_current_profile(
     }
 }
 
-fn power_runtime_summary(tlp_active: bool, profile_path_exists: bool) -> String {
+fn battery_threshold_paths() -> Option<(PathBuf, PathBuf)> {
+    let battery_path = find_power_supply_by_type("Battery")?;
+    let start_path = battery_path.join("charge_control_start_threshold");
+    let end_path = battery_path.join("charge_control_end_threshold");
+    (start_path.exists() && end_path.exists()).then_some((start_path, end_path))
+}
+
+fn find_power_supply_by_type(kind: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir("/sys/class/power_supply").ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if read_string_field(&path, "type").as_deref() == Some(kind) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn read_string_field(path: &Path, name: &str) -> Option<String> {
+    fs::read_to_string(path.join(name))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn write_battery_thresholds(
+    start_path: &Path,
+    end_path: &Path,
+    thresholds: crate::services::controls::BatteryThresholds,
+) -> Result<(), std::io::Error> {
+    fs::write(start_path, thresholds.start.to_string())?;
+    fs::write(end_path, thresholds.end.to_string())?;
+    Ok(())
+}
+
+fn battery_threshold_script(
+    start_path: &Path,
+    end_path: &Path,
+    thresholds: crate::services::controls::BatteryThresholds,
+) -> String {
     format!(
-        "tlp:{} platform_profile:{}",
-        tlp_active, profile_path_exists
+        "printf '%u' {} > {} && printf '%u' {} > {}",
+        thresholds.start,
+        start_path.display(),
+        thresholds.end,
+        end_path.display()
+    )
+}
+
+fn power_runtime_summary(
+    tlp_active: bool,
+    profile_path_exists: bool,
+    threshold_paths_exist: bool,
+) -> String {
+    format!(
+        "tlp:{} platform_profile:{} thresholds:{}",
+        tlp_active, profile_path_exists, threshold_paths_exist
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{power_runtime_summary, resolve_current_profile};
+    use super::{battery_threshold_script, power_runtime_summary, resolve_current_profile};
+    use crate::services::controls::BatteryThresholds;
+    use std::path::Path;
 
     #[test]
     fn resolve_current_profile_prefers_tlp_when_active() {
@@ -134,8 +223,20 @@ mod tests {
     #[test]
     fn power_runtime_summary_reports_tlp_and_profile_path_state() {
         assert_eq!(
-            power_runtime_summary(true, false),
-            "tlp:true platform_profile:false"
+            power_runtime_summary(true, false, true),
+            "tlp:true platform_profile:false thresholds:true"
+        );
+    }
+
+    #[test]
+    fn battery_threshold_script_writes_both_threshold_files() {
+        assert_eq!(
+            battery_threshold_script(
+                Path::new("/sys/class/power_supply/BAT0/charge_control_start_threshold"),
+                Path::new("/sys/class/power_supply/BAT0/charge_control_end_threshold"),
+                BatteryThresholds::new(40, 80),
+            ),
+            "printf '%u' 40 > /sys/class/power_supply/BAT0/charge_control_start_threshold && printf '%u' 80 > /sys/class/power_supply/BAT0/charge_control_end_threshold"
         );
     }
 }

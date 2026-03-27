@@ -41,4 +41,8 @@ pub trait PowerBackend: Send + Sync {
     }
     fn profile(&self) -> String;
     fn set_profile(&self, profile: String) -> BackendFuture<'_, ()>;
+    fn set_battery_thresholds(
+        &self,
+        thresholds: crate::services::controls::BatteryThresholds,
+    ) -> BackendFuture<'_, ()>;
 }

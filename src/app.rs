@@ -109,6 +109,7 @@ pub enum Message {
     FlushCoalescedControl(CoalescedControlKind, u64),
     FlushSlowTick(u64),
     SetPowerProfile(String),
+    ApplyBatteryThresholdPreset(crate::services::controls::BatteryThresholdPreset),
     CyclePerformanceProfile,
     NetworkCommand(crate::services::network::NetworkCommand),
     NetworkEvent(crate::services::network::NetworkEvent),
@@ -574,6 +575,28 @@ impl ThinkPadBar {
                 "Charge Thresholds",
                 Self::battery_threshold_summary(battery),
             ),
+        ]
+    }
+
+    fn control_center_threshold_presets(
+        battery: &crate::services::controls::BatteryInfo,
+    ) -> Vec<(crate::services::controls::BatteryThresholdPreset, bool)> {
+        let active_thresholds = battery
+            .charge_start_threshold
+            .zip(battery.charge_end_threshold)
+            .map(|(start, end)| crate::services::controls::BatteryThresholds::new(start, end));
+
+        crate::services::controls::BatteryThresholdPreset::ALL
+            .into_iter()
+            .map(|preset| (preset, active_thresholds == Some(preset.thresholds())))
+            .collect()
+    }
+
+    fn display_popup_actions() -> Vec<(&'static str, &'static str, Popup)> {
+        vec![
+            ("󰍹", "Controls", Popup::ControlCenter),
+            ("󰈈", "System Info", Popup::SystemMonitor),
+            ("󰅖", "Close", Popup::Displays),
         ]
     }
 
@@ -1097,10 +1120,14 @@ impl ThinkPadBar {
             Message::TogglePopup(target) => {
                 let mut tasks = Vec::new();
 
-                // Refresh audio when opening ControlCenter
+                // Refresh fast-changing control-center surfaces on open so the popup does not
+                // rely on an arbitrary slow-tick snapshot.
                 if target == Popup::ControlCenter && self.popup != target {
                     tasks.push(self.request_controls_refresh(
                         crate::services::controls::ControlsRefreshKind::AudioMic,
+                    ));
+                    tasks.push(self.request_controls_refresh(
+                        crate::services::controls::ControlsRefreshKind::BatteryPower,
                     ));
                 }
 
@@ -1195,6 +1222,13 @@ impl ThinkPadBar {
             }
             Message::SetPowerProfile(prof) => {
                 let command = crate::services::controls::ControlsCommand::SetPowerProfile(prof);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
+            }
+            Message::ApplyBatteryThresholdPreset(preset) => {
+                let command =
+                    crate::services::controls::ControlsCommand::ApplyBatteryThresholdPreset(preset);
                 self.controls_service.preview_command(&command);
                 self.controls = self.controls_service.snapshot().clone();
                 return self.execute_controls_command(command);
@@ -1940,6 +1974,7 @@ impl ThinkPadBar {
         if self.popup == Popup::Displays {
             let summary_rows = Self::display_summary_rows(wayland_snapshot);
             let output_rows = Self::display_popup_output_rows(wayland_snapshot);
+            let popup_actions = Self::display_popup_actions();
 
             let item = |label: &str, val: String| -> Element<'_, Message, Theme, iced::Renderer> {
                 Row::new()
@@ -1957,6 +1992,31 @@ impl ThinkPadBar {
                             .align_x(iced::alignment::Horizontal::Right),
                     )
                     .into()
+            };
+            let action_button = |icon: &'static str,
+                                 label: &'static str,
+                                 target: Popup|
+             -> Element<'_, Message> {
+                button(
+                    Row::new()
+                        .spacing(6)
+                        .align_y(Alignment::Center)
+                        .push(text(icon).size(14))
+                        .push(text(label).size(12)),
+                )
+                .padding(Padding::from([8, 10]))
+                .width(Length::FillPortion(1))
+                .on_press(Message::TogglePopup(target))
+                .style(|_, _| iced::widget::button::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                    border: iced::Border {
+                        radius: 10.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
             };
 
             let mut outputs_col = Column::new().spacing(10);
@@ -1981,17 +2041,20 @@ impl ThinkPadBar {
                 );
             }
 
-            let mut content = Column::new().spacing(14).push(
-                Row::new()
-                    .align_y(Alignment::Center)
-                    .push(text("Displays").size(18))
-                    .push(Space::with_width(Length::Fill))
-                    .push(
-                        button(text("Back").size(12))
-                            .padding(Padding::from([6, 10]))
-                            .on_press(Message::TogglePopup(Popup::ControlCenter)),
-                    ),
-            );
+            let mut action_row = Row::new().spacing(8);
+            for (icon, label, target) in popup_actions {
+                action_row = action_row.push(action_button(icon, label, target));
+            }
+
+            let mut content = Column::new()
+                .spacing(14)
+                .push(
+                    Row::new()
+                        .align_y(Alignment::Center)
+                        .push(text("Displays").size(18))
+                        .push(Space::with_width(Length::Fill)),
+                )
+                .push(action_row);
             for (_icon, label, value) in summary_rows {
                 content = content.push(item(label, value));
             }
@@ -3310,6 +3373,8 @@ impl ThinkPadBar {
         container_col = container_col
             .push({
                 let power_items = Self::control_center_power_items(&self.controls.battery);
+                let threshold_presets =
+                    Self::control_center_threshold_presets(&self.controls.battery);
                 let power_tile = |icon: &'static str, label: &'static str, value: String| {
                     container(
                         Column::new()
@@ -3385,6 +3450,66 @@ impl ThinkPadBar {
                         power_items[4].1,
                         power_items[4].2.clone(),
                     ))
+                    .push(
+                        Column::new()
+                            .spacing(6)
+                            .push(text("Battery Care Presets").size(12).style(|_| {
+                                iced::widget::text::Style {
+                                    color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
+                                }
+                            }))
+                            .push({
+                                let mut row = Row::new().spacing(8);
+                                for (preset, is_active) in threshold_presets {
+                                    let label = format!("{} {}", preset.label(), preset.summary());
+                                    row = row.push(
+                                        button(
+                                            text(label)
+                                                .size(11)
+                                                .align_x(iced::alignment::Horizontal::Center),
+                                        )
+                                        .width(Length::FillPortion(1))
+                                        .height(Length::Fixed(30.0))
+                                        .padding(Padding::from([4, 0]))
+                                        .on_press(Message::ApplyBatteryThresholdPreset(preset))
+                                        .style(
+                                            move |_, _| {
+                                                if is_active {
+                                                    iced::widget::button::Style {
+                                                        background: Some(iced::Background::Color(
+                                                            Color::from_rgb8(0x7a, 0xa2, 0xf7),
+                                                        )),
+                                                        text_color: Color::from_rgb8(
+                                                            0x1a, 0x1b, 0x26,
+                                                        ),
+                                                        border: iced::Border {
+                                                            radius: 8.0.into(),
+                                                            ..Default::default()
+                                                        },
+                                                        ..Default::default()
+                                                    }
+                                                } else {
+                                                    iced::widget::button::Style {
+                                                        background: Some(iced::Background::Color(
+                                                            Color::from_rgb8(0x29, 0x2e, 0x42),
+                                                        )),
+                                                        text_color: Color::from_rgb8(
+                                                            0xc0, 0xca, 0xf5,
+                                                        ),
+                                                        border: iced::Border {
+                                                            radius: 8.0.into(),
+                                                            ..Default::default()
+                                                        },
+                                                        ..Default::default()
+                                                    }
+                                                }
+                                            },
+                                        ),
+                                    );
+                                }
+                                row
+                            }),
+                    )
             })
             .push(
                 Column::new()
@@ -3878,6 +4003,42 @@ mod tests {
     }
 
     #[test]
+    fn control_center_threshold_presets_mark_active_policy() {
+        let battery = crate::services::controls::BatteryInfo {
+            capacity: 63,
+            status: "Not charging".to_string(),
+            time_remaining: None,
+            ac_online: Some(true),
+            health_percent: Some(91),
+            power_rate_mw: Some(11_800),
+            pack_voltage_mv: None,
+            cycle_count: None,
+            full_charge_mwh: None,
+            design_capacity_mwh: None,
+            charge_start_threshold: Some(40),
+            charge_end_threshold: Some(80),
+        };
+
+        assert_eq!(
+            ThinkPadBar::control_center_threshold_presets(&battery),
+            vec![
+                (
+                    crate::services::controls::BatteryThresholdPreset::Care,
+                    true,
+                ),
+                (
+                    crate::services::controls::BatteryThresholdPreset::Balanced,
+                    false,
+                ),
+                (
+                    crate::services::controls::BatteryThresholdPreset::FullCharge,
+                    false,
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn display_summary_rows_include_mode_and_hotplug_aware_state() {
         let rows = ThinkPadBar::display_summary_rows(
             &crate::services::wayland_runtime::WaylandRuntimeSnapshot {
@@ -3959,6 +4120,18 @@ mod tests {
     }
 
     #[test]
+    fn display_popup_actions_include_navigation_targets() {
+        assert_eq!(
+            ThinkPadBar::display_popup_actions(),
+            vec![
+                ("󰍹", "Controls", Popup::ControlCenter),
+                ("󰈈", "System Info", Popup::SystemMonitor),
+                ("󰅖", "Close", Popup::Displays),
+            ]
+        );
+    }
+
+    #[test]
     fn display_pill_summary_uses_wayland_mode_and_hides_when_unavailable() {
         assert_eq!(
             ThinkPadBar::display_pill_summary(
@@ -3994,6 +4167,20 @@ mod tests {
             ),
             Some(("󰍺", "Hybrid".to_string()))
         );
+    }
+
+    #[test]
+    fn opening_control_center_requests_audio_and_battery_power_refreshes() {
+        let mut bar = hermetic_bar();
+
+        let _ = bar.update(Message::TogglePopup(Popup::ControlCenter));
+
+        assert!(bar
+            .controls_refresh_coalescing
+            .is_inflight(&crate::services::controls::ControlsRefreshKind::AudioMic));
+        assert!(bar
+            .controls_refresh_coalescing
+            .is_inflight(&crate::services::controls::ControlsRefreshKind::BatteryPower));
     }
 
     #[test]

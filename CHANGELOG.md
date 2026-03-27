@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.8] - 2026-03-27
+
+### Changed
+- Made the `ThinkPad Power` section in the control-center popup interactive:
+  - added typed battery care presets (`CARE 40-80`, `BAL 60-90`, `FULL 0-100`) wired through `ControlsService` and `PowerBackend` instead of ad-hoc shell UI logic;
+  - added a dedicated `BatteryPower` refresh path so threshold writes re-read battery and power-profile state immediately instead of waiting for a generic slow refresh;
+  - refreshed both `AudioMic` and `BatteryPower` when opening the control center so the new daily-use power surface does not rely on stale slow-tick data.
+- Expanded the `Displays` popup into a more useful daily surface:
+  - replaced the single `Back` button with a quick action bar for `Controls`, `System Info`, and `Close`;
+  - kept the hotplug-aware output detail cards and summary rows intact while making display navigation faster.
+- Extended the platform power backend:
+  - it now reports threshold-file support in diagnostics;
+  - it now writes charge thresholds directly to sysfs and falls back to `pkexec` only when direct writes fail.
+
+### Quality
+- Added regression coverage for:
+  - battery-threshold preset preview and backend execution routing;
+  - threshold write script generation and power-runtime diagnostics;
+  - active preset detection in the control center;
+  - display popup navigation actions;
+  - control-center open behavior requesting both audio and battery-power refreshes.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.7] - 2026-03-27
 
 ### Changed

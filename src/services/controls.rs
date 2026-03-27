@@ -38,6 +38,59 @@ impl BrightnessSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatteryThresholds {
+    pub start: u8,
+    pub end: u8,
+}
+
+impl BatteryThresholds {
+    pub fn new(start: u8, end: u8) -> Self {
+        let start = start.min(100);
+        let end = end.min(100);
+        if start <= end {
+            Self { start, end }
+        } else {
+            Self {
+                start: end,
+                end: start,
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryThresholdPreset {
+    Care,
+    Balanced,
+    FullCharge,
+}
+
+impl BatteryThresholdPreset {
+    pub const ALL: [Self; 3] = [Self::Care, Self::Balanced, Self::FullCharge];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Care => "CARE",
+            Self::Balanced => "BAL",
+            Self::FullCharge => "FULL",
+        }
+    }
+
+    pub fn thresholds(self) -> BatteryThresholds {
+        match self {
+            Self::Care => BatteryThresholds::new(40, 80),
+            Self::Balanced => BatteryThresholds::new(60, 90),
+            Self::FullCharge => BatteryThresholds::new(0, 100),
+        }
+    }
+
+    pub fn summary(self) -> String {
+        let thresholds = self.thresholds();
+        format!("{}-{}", thresholds.start, thresholds.end)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlsSnapshot {
     pub brightness: BrightnessSnapshot,
@@ -114,6 +167,7 @@ pub enum ControlsRefreshKind {
     AudioMic,
     Brightness,
     Fan,
+    BatteryPower,
     Power,
     Bluetooth,
     Slow,
@@ -139,6 +193,7 @@ pub enum ControlsCommand {
     SetBrightness(u32),
     SetFanLevel(String),
     SetPowerProfile(String),
+    ApplyBatteryThresholdPreset(BatteryThresholdPreset),
     ToggleBluetooth(bool),
     OpenOverskride,
 }
@@ -259,6 +314,11 @@ impl ControlsService {
             ControlsCommand::SetPowerProfile(profile) => {
                 self.snapshot.power_profile = profile.clone();
             }
+            ControlsCommand::ApplyBatteryThresholdPreset(preset) => {
+                let thresholds = preset.thresholds();
+                self.snapshot.battery.charge_start_threshold = Some(thresholds.start);
+                self.snapshot.battery.charge_end_threshold = Some(thresholds.end);
+            }
             ControlsCommand::ToggleBluetooth(enabled) => {
                 self.snapshot.bluetooth_enabled = *enabled;
             }
@@ -281,6 +341,11 @@ impl ControlsService {
             },
             ControlsRefreshKind::Fan => ControlsRefresh {
                 fan: Some(crate::modules::fan::get_fan_info()),
+                ..ControlsRefresh::default()
+            },
+            ControlsRefreshKind::BatteryPower => ControlsRefresh {
+                battery: Some(crate::modules::battery::get_battery_info()),
+                power_profile: Some(self.power_backend.profile()),
                 ..ControlsRefresh::default()
             },
             ControlsRefreshKind::Power => ControlsRefresh {
@@ -330,6 +395,12 @@ impl ControlsService {
             ControlsCommand::SetPowerProfile(profile) => {
                 self.power_backend.set_profile(profile).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Power)
+            }
+            ControlsCommand::ApplyBatteryThresholdPreset(preset) => {
+                self.power_backend
+                    .set_battery_thresholds(preset.thresholds())
+                    .await;
+                ControlsFollowUp::Refresh(ControlsRefreshKind::BatteryPower)
             }
             ControlsCommand::ToggleBluetooth(enabled) => {
                 let _ = self.bluetooth_backend.toggle(enabled);
@@ -468,13 +539,20 @@ impl crate::services::controls_backends::PowerBackend for NoopPowerBackend {
     ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
         Box::pin(async {})
     }
+
+    fn set_battery_thresholds(
+        &self,
+        _thresholds: BatteryThresholds,
+    ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioInfo, BrightnessSnapshot, ControlsCommand, ControlsRefresh, ControlsRefreshKind,
-        ControlsService, ControlsSnapshot,
+        AudioInfo, BatteryThresholdPreset, BatteryThresholds, BrightnessSnapshot, ControlsCommand,
+        ControlsRefresh, ControlsRefreshKind, ControlsService, ControlsSnapshot,
     };
     use crate::modules::mic::MicInfo;
     use std::sync::{Arc, Mutex};
@@ -622,6 +700,19 @@ mod tests {
                 calls.lock().unwrap().push(profile);
             })
         }
+
+        fn set_battery_thresholds(
+            &self,
+            thresholds: BatteryThresholds,
+        ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls.lock().unwrap().push(format!(
+                    "thresholds:{}-{}",
+                    thresholds.start, thresholds.end
+                ));
+            })
+        }
     }
 
     type TestServiceParts = (
@@ -716,10 +807,15 @@ mod tests {
         service.preview_command(&ControlsCommand::SetVolume(73));
         service.preview_command(&ControlsCommand::SetBrightness(64));
         service.preview_command(&ControlsCommand::SetPowerProfile("performance".to_string()));
+        service.preview_command(&ControlsCommand::ApplyBatteryThresholdPreset(
+            BatteryThresholdPreset::Care,
+        ));
 
         assert_eq!(service.snapshot().audio.volume, 73);
         assert_eq!(service.snapshot().brightness.percent, 64);
         assert_eq!(service.snapshot().power_profile, "performance");
+        assert_eq!(service.snapshot().battery.charge_start_threshold, Some(40));
+        assert_eq!(service.snapshot().battery.charge_end_threshold, Some(80));
     }
 
     #[test]
@@ -774,12 +870,18 @@ mod tests {
 
         let audio_refresh = service.refresh(ControlsRefreshKind::AudioMic).await;
         let brightness_refresh = service.refresh(ControlsRefreshKind::Brightness).await;
+        let battery_refresh = service.refresh(ControlsRefreshKind::BatteryPower).await;
         let power_refresh = service.refresh(ControlsRefreshKind::Power).await;
         let bluetooth_refresh = service.refresh(ControlsRefreshKind::Bluetooth).await;
 
         assert_eq!(audio_refresh.audio.unwrap().volume, 55);
         assert_eq!(audio_refresh.mic.unwrap().volume, 12);
         assert_eq!(brightness_refresh.brightness.unwrap().percent, 64);
+        assert_eq!(
+            battery_refresh.power_profile.as_deref(),
+            Some("performance")
+        );
+        assert!(battery_refresh.battery.is_some());
         assert_eq!(power_refresh.power_profile.unwrap(), "performance");
         assert!(bluetooth_refresh.bluetooth_enabled.unwrap());
     }
@@ -807,10 +909,15 @@ mod tests {
         let _ = service
             .execute(ControlsCommand::SetPowerProfile("balanced".to_string()))
             .await;
+        let battery_follow_up = service
+            .execute(ControlsCommand::ApplyBatteryThresholdPreset(
+                BatteryThresholdPreset::Balanced,
+            ))
+            .await;
         let _ = service
             .execute(ControlsCommand::ToggleBluetooth(false))
             .await;
-        let follow_up = service.execute(ControlsCommand::OpenOverskride).await;
+        let overskride_follow_up = service.execute(ControlsCommand::OpenOverskride).await;
 
         assert_eq!(
             audio_calls.lock().unwrap().as_slice(),
@@ -822,10 +929,20 @@ mod tests {
             ]
         );
         assert_eq!(brightness_calls.lock().unwrap().as_slice(), [31]);
-        assert_eq!(power_calls.lock().unwrap().as_slice(), ["balanced"]);
+        assert_eq!(
+            power_calls.lock().unwrap().as_slice(),
+            ["balanced", "thresholds:60-90"]
+        );
         assert_eq!(bluetooth_calls.lock().unwrap().as_slice(), [false]);
         assert_eq!(*overskride_calls.lock().unwrap(), 1);
-        assert_eq!(follow_up, super::ControlsFollowUp::RefreshCompositor);
+        assert_eq!(
+            battery_follow_up,
+            super::ControlsFollowUp::Refresh(ControlsRefreshKind::BatteryPower)
+        );
+        assert_eq!(
+            overskride_follow_up,
+            super::ControlsFollowUp::RefreshCompositor
+        );
     }
 
     #[test]
