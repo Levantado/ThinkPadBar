@@ -94,7 +94,20 @@ impl super::BluetoothBackend for BluetoothCtlBackend {
     fn scan_devices(&self) -> super::BackendFuture<'_, bool> {
         Box::pin(async move {
             tokio::process::Command::new("bluetoothctl")
-                .args(["--timeout", "5", "scan", "on"])
+                .args(bluetooth_scan_args())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|status| status.success())
+                .unwrap_or(false)
+        })
+    }
+
+    fn stop_scan_devices(&self) -> super::BackendFuture<'_, bool> {
+        Box::pin(async move {
+            tokio::process::Command::new("bluetoothctl")
+                .args(bluetooth_stop_scan_args())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
@@ -267,9 +280,12 @@ pub(crate) fn parse_connected_devices(output: &str) -> Vec<String> {
         .collect()
 }
 
-#[cfg(test)]
 pub(crate) fn bluetooth_scan_args() -> [&'static str; 4] {
     ["--timeout", "5", "scan", "on"]
+}
+
+pub(crate) fn bluetooth_stop_scan_args() -> [&'static str; 2] {
+    ["scan", "off"]
 }
 
 fn parse_connected_device_briefs(output: &str) -> Vec<ConnectedDeviceBrief> {
@@ -392,8 +408,8 @@ fn normalize_audio_profile_name(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bluetooth_scan_args, parse_bluetooth_device_info, parse_connected_device_briefs,
-        parse_connected_devices, parse_powered_from_bluetoothctl,
+        bluetooth_scan_args, bluetooth_stop_scan_args, parse_bluetooth_device_info,
+        parse_connected_device_briefs, parse_connected_devices, parse_powered_from_bluetoothctl,
     };
 
     #[test]
@@ -449,5 +465,10 @@ mod tests {
     #[test]
     fn bluetooth_scan_args_use_bounded_timeout_window() {
         assert_eq!(bluetooth_scan_args(), ["--timeout", "5", "scan", "on"]);
+    }
+
+    #[test]
+    fn bluetooth_stop_scan_args_issue_immediate_stop() {
+        assert_eq!(bluetooth_stop_scan_args(), ["scan", "off"]);
     }
 }

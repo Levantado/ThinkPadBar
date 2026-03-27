@@ -36,6 +36,7 @@ pub trait BluetoothBackend: Send + Sync {
     fn device_summary(&self) -> crate::services::controls::BluetoothDeviceSummary;
     fn toggle(&self, enable: bool) -> bool;
     fn scan_devices(&self) -> BackendFuture<'_, bool>;
+    fn stop_scan_devices(&self) -> BackendFuture<'_, bool>;
     fn connect_device(&self, address: String) -> BackendFuture<'_, bool>;
     fn disconnect_device(&self, address: String) -> BackendFuture<'_, bool>;
     fn pair_device(&self, address: String) -> BackendFuture<'_, bool>;

@@ -271,6 +271,7 @@ pub enum ControlsCommand {
     ApplyBatteryThresholdPreset(BatteryThresholdPreset),
     ToggleBluetooth(bool),
     ScanBluetoothDevices,
+    StopBluetoothScan,
     ConnectBluetoothDevice(String),
     DisconnectBluetoothDevice(String),
     PairBluetoothDevice(String),
@@ -419,7 +420,7 @@ impl ControlsService {
             ControlsCommand::ToggleBluetooth(enabled) => {
                 self.snapshot.bluetooth_enabled = *enabled;
             }
-            ControlsCommand::ScanBluetoothDevices => {}
+            ControlsCommand::ScanBluetoothDevices | ControlsCommand::StopBluetoothScan => {}
             ControlsCommand::ConnectBluetoothDevice(address) => {
                 update_bluetooth_device_connection_state(
                     &mut self.snapshot.bluetooth_devices,
@@ -548,6 +549,10 @@ impl ControlsService {
             }
             ControlsCommand::ScanBluetoothDevices => {
                 let _ = self.bluetooth_backend.scan_devices().await;
+                ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
+            }
+            ControlsCommand::StopBluetoothScan => {
+                let _ = self.bluetooth_backend.stop_scan_devices().await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
             }
             ControlsCommand::ConnectBluetoothDevice(address) => {
@@ -759,6 +764,10 @@ impl crate::services::controls_backends::BluetoothBackend for NoopBluetoothBacke
     }
 
     fn scan_devices(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
+    fn stop_scan_devices(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
         Box::pin(async { true })
     }
 
@@ -991,6 +1000,14 @@ mod tests {
             let command_calls = self.command_calls.clone();
             Box::pin(async move {
                 command_calls.lock().unwrap().push("scan".to_string());
+                true
+            })
+        }
+
+        fn stop_scan_devices(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+            let command_calls = self.command_calls.clone();
+            Box::pin(async move {
+                command_calls.lock().unwrap().push("stop-scan".to_string());
                 true
             })
         }
@@ -1298,6 +1315,7 @@ mod tests {
         service.preview_command(&ControlsCommand::SetBrightness(64));
         service.preview_command(&ControlsCommand::SetAudioInputRoute("80".to_string()));
         service.preview_command(&ControlsCommand::ScanBluetoothDevices);
+        service.preview_command(&ControlsCommand::StopBluetoothScan);
         service.preview_command(&ControlsCommand::ConnectBluetoothDevice(
             "AA:BB:CC:DD:EE:FF".to_string(),
         ));
@@ -1467,6 +1485,7 @@ mod tests {
             .execute(ControlsCommand::ToggleBluetooth(false))
             .await;
         let _ = service.execute(ControlsCommand::ScanBluetoothDevices).await;
+        let _ = service.execute(ControlsCommand::StopBluetoothScan).await;
         let _ = service
             .execute(ControlsCommand::ConnectBluetoothDevice(
                 "AA:BB:CC:DD:EE:FF".to_string(),
@@ -1515,6 +1534,7 @@ mod tests {
             bluetooth_command_calls.lock().unwrap().as_slice(),
             [
                 "scan",
+                "stop-scan",
                 "connect:AA:BB:CC:DD:EE:FF",
                 "disconnect:AA:BB:CC:DD:EE:FF",
                 "pair:AA:BB:CC:DD:EE:FF",

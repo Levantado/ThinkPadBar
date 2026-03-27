@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.17] - 2026-03-27
+
+### Changed
+- Deepened the dedicated `Bluetooth Devices` popup from a one-way bounded scan button to a clearer transient pairing flow:
+  - added an explicit `Stop Scan` action wired through a typed `ControlsCommand::StopBluetoothScan`;
+  - scan progress now carries a visible countdown (`Scanning (5s left)` down to `Finishing scan...`) instead of a flat busy state;
+  - completion still highlights newly discovered devices, but the in-flight state is now explicit and interruptible.
+- Polished `Audio Routes` popup detail so Bluetooth and USB paths carry meaningful runtime semantics instead of only origin labels:
+  - each route now surfaces a typed `profile` badge such as `A2DP`, `HFP`, `USB`, or `ANALOG`;
+  - route detail text now explains the likely path behavior (`Higher-latency media path`, `Low-latency external path`, etc.);
+  - active route summaries at the top of the popup now include both profile and latency interpretation.
+
+### Quality
+- Added regression coverage for:
+  - bounded Bluetooth stop-scan arguments;
+  - scan countdown and finishing-status rendering;
+  - audio route popup item profile/detail shaping;
+  - current-route summaries surfacing profile and latency interpretation.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.16] - 2026-03-27
 
 ### Changed
