@@ -29,6 +29,12 @@ impl super::BluetoothBackend for BluetoothCtlBackend {
         sysfs_bluetooth_state().unwrap_or(false)
     }
 
+    fn device_summary(&self) -> crate::services::controls::BluetoothDeviceSummary {
+        crate::services::controls::BluetoothDeviceSummary {
+            connected_devices: connected_devices(),
+        }
+    }
+
     fn toggle(&self, enable: bool) -> bool {
         let state = if enable { "on" } else { "off" };
         info!("Attempting to toggle bluetooth to state: {}", state);
@@ -120,6 +126,18 @@ fn sysfs_bluetooth_state() -> Option<bool> {
     None
 }
 
+fn connected_devices() -> Vec<String> {
+    Command::new("bluetoothctl")
+        .args(["devices", "Connected"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|stdout| parse_connected_devices(&stdout))
+        .unwrap_or_default()
+}
+
 pub(crate) fn parse_powered_from_bluetoothctl(output: &str) -> Option<bool> {
     for line in output.lines() {
         let trimmed = line.trim();
@@ -130,9 +148,22 @@ pub(crate) fn parse_powered_from_bluetoothctl(output: &str) -> Option<bool> {
     None
 }
 
+pub(crate) fn parse_connected_devices(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let rest = trimmed.strip_prefix("Device ")?;
+            let (_addr, name) = rest.split_once(' ')?;
+            let name = name.trim();
+            (!name.is_empty()).then(|| name.to_string())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_powered_from_bluetoothctl;
+    use super::{parse_connected_devices, parse_powered_from_bluetoothctl};
 
     #[test]
     fn parse_bluetoothctl_powered_yes() {
@@ -144,5 +175,14 @@ mod tests {
     fn parse_bluetoothctl_powered_no() {
         let sample = "Controller XX:XX:XX\n\tPowered: no\n";
         assert_eq!(parse_powered_from_bluetoothctl(sample), Some(false));
+    }
+
+    #[test]
+    fn parse_bluetoothctl_connected_devices_extracts_names() {
+        let sample = "Device AA:BB:CC:DD:EE:FF WH-1000XM5\nDevice 11:22:33:44:55:66 MX Master 3S\n";
+        assert_eq!(
+            parse_connected_devices(sample),
+            vec!["WH-1000XM5".to_string(), "MX Master 3S".to_string()]
+        );
     }
 }

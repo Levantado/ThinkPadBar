@@ -14,6 +14,7 @@ pub trait AudioBackend: Send + Sync {
     }
     fn audio_info(&self) -> crate::services::controls::AudioInfo;
     fn mic_info(&self) -> crate::modules::mic::MicInfo;
+    fn device_summary(&self) -> crate::services::controls::AudioDeviceSummary;
     fn set_volume(&self, percent: u32) -> BackendFuture<'_, ()>;
     fn toggle_audio_mute(&self) -> BackendFuture<'_, ()>;
     fn set_mic_volume(&self, percent: u32) -> BackendFuture<'_, ()>;
@@ -30,6 +31,7 @@ pub trait BrightnessBackend: Send + Sync {
 pub trait BluetoothBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
     fn enabled(&self) -> bool;
+    fn device_summary(&self) -> crate::services::controls::BluetoothDeviceSummary;
     fn toggle(&self, enable: bool) -> bool;
     fn open_overskride(&self) -> bool;
 }

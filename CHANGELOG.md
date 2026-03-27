@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.10] - 2026-03-27
+
+### Changed
+- Deepened the `Audio & Devices` surface in the control-center popup from simple adapter state to typed device summaries:
+  - audio now surfaces default output and input route names parsed from `wpctl status` alongside the existing mute/volume state;
+  - Bluetooth now surfaces connected device names parsed from `bluetoothctl devices Connected` instead of showing only the adapter power state.
+- Updated control-center refresh behavior so opening the popup refreshes `Bluetooth` alongside `AudioMic` and `BatteryPower`, keeping the daily-use device surface fresh.
+
+### Quality
+- Added regression coverage for:
+  - `wpctl status` default route parsing;
+  - `bluetoothctl devices Connected` parsing;
+  - control-center device cards surfacing route/device details;
+  - `ControlsService` carrying audio route and connected Bluetooth devices through refreshes;
+  - control-center open behavior now requesting Bluetooth refresh too.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.9] - 2026-03-27
 
 ### Changed

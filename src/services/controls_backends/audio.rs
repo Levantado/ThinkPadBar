@@ -161,6 +161,17 @@ impl WpctlAudioBackend {
         let stdout = String::from_utf8(output.stdout).ok()?;
         parse_wpctl_volume(&stdout)
     }
+
+    fn get_device_summary() -> crate::services::controls::AudioDeviceSummary {
+        Command::new("wpctl")
+            .arg("status")
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .as_deref()
+            .map(parse_wpctl_default_routes)
+            .unwrap_or_default()
+    }
 }
 
 impl super::AudioBackend for WpctlAudioBackend {
@@ -182,6 +193,10 @@ impl super::AudioBackend for WpctlAudioBackend {
     fn mic_info(&self) -> crate::modules::mic::MicInfo {
         let (volume, muted) = Self::get_volume("@DEFAULT_AUDIO_SOURCE@").unwrap_or((0, false));
         crate::modules::mic::MicInfo { volume, muted }
+    }
+
+    fn device_summary(&self) -> crate::services::controls::AudioDeviceSummary {
+        Self::get_device_summary()
     }
 
     fn set_volume(&self, percent: u32) -> super::BackendFuture<'_, ()> {
@@ -615,13 +630,65 @@ pub(crate) fn parse_wpctl_volume(output: &str) -> Option<(u32, bool)> {
     Some((volume, muted))
 }
 
+pub(crate) fn parse_wpctl_default_routes(
+    output: &str,
+) -> crate::services::controls::AudioDeviceSummary {
+    crate::services::controls::AudioDeviceSummary {
+        output_route: parse_wpctl_default_route(output, "Sinks:"),
+        input_route: parse_wpctl_default_route(output, "Sources:"),
+    }
+}
+
+fn parse_wpctl_default_route(output: &str, section_name: &str) -> Option<String> {
+    let mut in_section = false;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.ends_with(section_name) || trimmed == section_name {
+            in_section = true;
+            continue;
+        }
+
+        if in_section {
+            if trimmed.ends_with(':') && !trimmed.contains('*') {
+                break;
+            }
+
+            let Some(star_index) = line.find('*') else {
+                continue;
+            };
+            let candidate = line[star_index + 1..].trim();
+            if candidate.is_empty() {
+                continue;
+            }
+
+            let candidate = candidate.split(" [").next().unwrap_or(candidate).trim();
+            let candidate = candidate
+                .split_once(". ")
+                .map(|(_, rest)| rest.trim())
+                .unwrap_or(candidate)
+                .trim();
+
+            if !candidate.is_empty() {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        audio_param_event_label, metadata_event_label, parse_wpctl_volume,
-        should_emit_audio_metadata_property, should_emit_audio_node_info, should_emit_audio_param,
-        should_track_audio_metadata, should_track_audio_node, AudioEventRuntimeDiagnostics,
-        WpctlAudioBackend,
+        audio_param_event_label, metadata_event_label, parse_wpctl_default_routes,
+        parse_wpctl_volume, should_emit_audio_metadata_property, should_emit_audio_node_info,
+        should_emit_audio_param, should_track_audio_metadata, should_track_audio_node,
+        AudioEventRuntimeDiagnostics, WpctlAudioBackend,
     };
 
     #[test]
@@ -636,6 +703,24 @@ mod tests {
     #[test]
     fn parse_wpctl_volume_rejects_malformed_output() {
         assert_eq!(parse_wpctl_volume("garbage"), None);
+    }
+
+    #[test]
+    fn parse_wpctl_default_routes_extracts_default_sink_and_source() {
+        let parsed = parse_wpctl_default_routes(
+            "Audio\n\
+             ├─ Sinks:\n\
+             │  *   52. Built-in Audio Analog Stereo [vol: 0.50]\n\
+             │      77. USB Audio DAC [vol: 0.70]\n\
+             ├─ Sources:\n\
+             │  *   54. Internal Microphone [vol: 1.00]\n",
+        );
+
+        assert_eq!(
+            parsed.output_route.as_deref(),
+            Some("Built-in Audio Analog Stereo")
+        );
+        assert_eq!(parsed.input_route.as_deref(), Some("Internal Microphone"));
     }
 
     #[test]

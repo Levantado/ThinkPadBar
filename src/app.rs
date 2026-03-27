@@ -38,6 +38,14 @@ struct DisplayPopupOutputCard {
     badges: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ControlCenterDeviceItem {
+    icon: &'static str,
+    label: &'static str,
+    value: String,
+    detail: Option<String>,
+}
+
 pub struct ThinkPadBar {
     config: crate::config::Config,
     dbus_conn: Option<zbus::Connection>,
@@ -601,7 +609,7 @@ impl ThinkPadBar {
 
     fn control_center_device_items(
         controls: &crate::services::controls::ControlsSnapshot,
-    ) -> Vec<(&'static str, &'static str, String)> {
+    ) -> Vec<ControlCenterDeviceItem> {
         let output_summary = if controls.audio.muted {
             "Muted".to_string()
         } else {
@@ -619,9 +627,28 @@ impl ThinkPadBar {
         };
 
         vec![
-            ("", "Speakers", output_summary),
-            ("", "Microphone", mic_summary),
-            ("󰂯", "Bluetooth", bluetooth_summary),
+            ControlCenterDeviceItem {
+                icon: "",
+                label: "Speakers",
+                value: output_summary,
+                detail: controls.audio_devices.output_route.clone(),
+            },
+            ControlCenterDeviceItem {
+                icon: "",
+                label: "Microphone",
+                value: mic_summary,
+                detail: controls.audio_devices.input_route.clone(),
+            },
+            ControlCenterDeviceItem {
+                icon: "󰂯",
+                label: "Bluetooth",
+                value: bluetooth_summary,
+                detail: if controls.bluetooth_devices.connected_devices.is_empty() {
+                    None
+                } else {
+                    Some(controls.bluetooth_devices.connected_devices.join(", "))
+                },
+            },
         ]
     }
 
@@ -1165,6 +1192,9 @@ impl ThinkPadBar {
                     ));
                     tasks.push(self.request_controls_refresh(
                         crate::services::controls::ControlsRefreshKind::BatteryPower,
+                    ));
+                    tasks.push(self.request_controls_refresh(
+                        crate::services::controls::ControlsRefreshKind::Bluetooth,
                     ));
                 }
 
@@ -3126,7 +3156,7 @@ impl ThinkPadBar {
         };
         let device_items = Self::control_center_device_items(&self.controls);
         let device_card = {
-            let device_tile = |icon: &'static str, label: &'static str, value: String| {
+            let device_tile = |item: &ControlCenterDeviceItem| {
                 container(
                     Column::new()
                         .spacing(4)
@@ -3134,13 +3164,24 @@ impl ThinkPadBar {
                             Row::new()
                                 .spacing(6)
                                 .align_y(Alignment::Center)
-                                .push(text(icon).size(14))
-                                .push(text(label).size(12).style(|_| iced::widget::text::Style {
-                                    color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
+                                .push(text(item.icon).size(14))
+                                .push(text(item.label).size(12).style(|_| {
+                                    iced::widget::text::Style {
+                                        color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
+                                    }
                                 })),
                         )
-                        .push(text(value).size(13).style(|_| iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0xe5, 0xe9, 0xf0)),
+                        .push(text(item.value.clone()).size(13).style(|_| {
+                            iced::widget::text::Style {
+                                color: Some(Color::from_rgb8(0xe5, 0xe9, 0xf0)),
+                            }
+                        }))
+                        .push_maybe(item.detail.as_ref().map(|detail| {
+                            text(detail.clone())
+                                .size(11)
+                                .style(|_| iced::widget::text::Style {
+                                    color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                                })
                         })),
                 )
                 .width(Length::Fill)
@@ -3189,22 +3230,10 @@ impl ThinkPadBar {
                     .push(
                         Row::new()
                             .spacing(8)
-                            .push(device_tile(
-                                device_items[0].0,
-                                device_items[0].1,
-                                device_items[0].2.clone(),
-                            ))
-                            .push(device_tile(
-                                device_items[1].0,
-                                device_items[1].1,
-                                device_items[1].2.clone(),
-                            )),
+                            .push(device_tile(&device_items[0]))
+                            .push(device_tile(&device_items[1])),
                     )
-                    .push(device_tile(
-                        device_items[2].0,
-                        device_items[2].1,
-                        device_items[2].2.clone(),
-                    ))
+                    .push(device_tile(&device_items[2]))
                     .push(
                         Row::new()
                             .spacing(8)
@@ -3775,8 +3804,8 @@ impl ThinkPadBar {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundRequestKind, CoalescedControlKind, ControlsCoalescing, Message, Popup,
-        ThinkPadBar,
+        BackgroundRequestKind, CoalescedControlKind, ControlCenterDeviceItem, ControlsCoalescing,
+        Message, Popup, ThinkPadBar,
     };
     use iced::window::Id;
 
@@ -4213,6 +4242,10 @@ mod tests {
                     volume: 73,
                     muted: false,
                 },
+                audio_devices: crate::services::controls::AudioDeviceSummary {
+                    output_route: Some("Built-in Audio".to_string()),
+                    input_route: Some("Internal Microphone".to_string()),
+                },
                 mic: crate::services::controls::MicInfo {
                     volume: 18,
                     muted: true,
@@ -4237,15 +4270,33 @@ mod tests {
                 },
                 power_profile: "balanced".to_string(),
                 bluetooth_enabled: true,
+                bluetooth_devices: crate::services::controls::BluetoothDeviceSummary {
+                    connected_devices: vec!["WH-1000XM5".to_string(), "MX Master 3S".to_string()],
+                },
             },
         );
 
         assert_eq!(
             items,
             vec![
-                ("", "Speakers", "73% output".to_string()),
-                ("", "Microphone", "Muted".to_string()),
-                ("󰂯", "Bluetooth", "Adapter enabled".to_string()),
+                ControlCenterDeviceItem {
+                    icon: "",
+                    label: "Speakers",
+                    value: "73% output".to_string(),
+                    detail: Some("Built-in Audio".to_string()),
+                },
+                ControlCenterDeviceItem {
+                    icon: "",
+                    label: "Microphone",
+                    value: "Muted".to_string(),
+                    detail: Some("Internal Microphone".to_string()),
+                },
+                ControlCenterDeviceItem {
+                    icon: "󰂯",
+                    label: "Bluetooth",
+                    value: "Adapter enabled".to_string(),
+                    detail: Some("WH-1000XM5, MX Master 3S".to_string()),
+                },
             ]
         );
     }
@@ -4400,7 +4451,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_control_center_requests_audio_and_battery_power_refreshes() {
+    fn opening_control_center_requests_audio_battery_and_bluetooth_refreshes() {
         let mut bar = hermetic_bar();
 
         let _ = bar.update(Message::TogglePopup(Popup::ControlCenter));
@@ -4411,6 +4462,9 @@ mod tests {
         assert!(bar
             .controls_refresh_coalescing
             .is_inflight(&crate::services::controls::ControlsRefreshKind::BatteryPower));
+        assert!(bar
+            .controls_refresh_coalescing
+            .is_inflight(&crate::services::controls::ControlsRefreshKind::Bluetooth));
     }
 
     #[test]

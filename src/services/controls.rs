@@ -10,6 +10,17 @@ pub struct AudioInfo {
     pub muted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AudioDeviceSummary {
+    pub output_route: Option<String>,
+    pub input_route: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BluetoothDeviceSummary {
+    pub connected_devices: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrightnessSnapshot {
     pub percent: u32,
@@ -95,11 +106,13 @@ impl BatteryThresholdPreset {
 pub struct ControlsSnapshot {
     pub brightness: BrightnessSnapshot,
     pub audio: AudioInfo,
+    pub audio_devices: AudioDeviceSummary,
     pub mic: MicInfo,
     pub fan: FanInfo,
     pub battery: BatteryInfo,
     pub power_profile: String,
     pub bluetooth_enabled: bool,
+    pub bluetooth_devices: BluetoothDeviceSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +142,7 @@ impl Default for ControlsSnapshot {
                 volume: 0,
                 muted: false,
             },
+            audio_devices: AudioDeviceSummary::default(),
             mic: MicInfo {
                 volume: 0,
                 muted: false,
@@ -153,6 +167,7 @@ impl Default for ControlsSnapshot {
             },
             power_profile: "balanced".to_string(),
             bluetooth_enabled: false,
+            bluetooth_devices: BluetoothDeviceSummary::default(),
         }
     }
 }
@@ -177,11 +192,13 @@ pub enum ControlsRefreshKind {
 pub struct ControlsRefresh {
     pub brightness: Option<BrightnessSnapshot>,
     pub audio: Option<AudioInfo>,
+    pub audio_devices: Option<AudioDeviceSummary>,
     pub mic: Option<MicInfo>,
     pub fan: Option<FanInfo>,
     pub battery: Option<BatteryInfo>,
     pub power_profile: Option<String>,
     pub bluetooth_enabled: Option<bool>,
+    pub bluetooth_devices: Option<BluetoothDeviceSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,11 +250,13 @@ impl ControlsService {
             snapshot: ControlsSnapshot {
                 brightness: brightness_backend.snapshot(),
                 audio: audio_backend.audio_info(),
+                audio_devices: audio_backend.device_summary(),
                 mic: audio_backend.mic_info(),
                 fan: crate::modules::fan::get_fan_info(),
                 battery: crate::modules::battery::get_battery_info(),
                 power_profile: power_backend.profile(),
                 bluetooth_enabled: bluetooth_backend.enabled(),
+                bluetooth_devices: bluetooth_backend.device_summary(),
             },
             audio_backend,
             brightness_backend,
@@ -279,6 +298,9 @@ impl ControlsService {
         if let Some(audio) = refresh.audio {
             self.snapshot.audio = audio;
         }
+        if let Some(audio_devices) = refresh.audio_devices {
+            self.snapshot.audio_devices = audio_devices;
+        }
         if let Some(mic) = refresh.mic {
             crate::modules::mic::update_led(mic.muted);
             self.snapshot.mic = mic;
@@ -294,6 +316,9 @@ impl ControlsService {
         }
         if let Some(bluetooth_enabled) = refresh.bluetooth_enabled {
             self.snapshot.bluetooth_enabled = bluetooth_enabled;
+        }
+        if let Some(bluetooth_devices) = refresh.bluetooth_devices {
+            self.snapshot.bluetooth_devices = bluetooth_devices;
         }
     }
 
@@ -332,6 +357,7 @@ impl ControlsService {
         match kind {
             ControlsRefreshKind::AudioMic => ControlsRefresh {
                 audio: Some(self.audio_backend.audio_info()),
+                audio_devices: Some(self.audio_backend.device_summary()),
                 mic: Some(self.audio_backend.mic_info()),
                 ..ControlsRefresh::default()
             },
@@ -354,6 +380,7 @@ impl ControlsService {
             },
             ControlsRefreshKind::Bluetooth => ControlsRefresh {
                 bluetooth_enabled: Some(self.bluetooth_backend.enabled()),
+                bluetooth_devices: Some(self.bluetooth_backend.device_summary()),
                 ..ControlsRefresh::default()
             },
             ControlsRefreshKind::Slow => ControlsRefresh {
@@ -361,6 +388,7 @@ impl ControlsService {
                 battery: Some(crate::modules::battery::get_battery_info()),
                 power_profile: Some(self.power_backend.profile()),
                 bluetooth_enabled: Some(self.bluetooth_backend.enabled()),
+                bluetooth_devices: Some(self.bluetooth_backend.device_summary()),
                 ..ControlsRefresh::default()
             },
         }
@@ -448,6 +476,10 @@ impl crate::services::controls_backends::AudioBackend for NoopAudioBackend {
         }
     }
 
+    fn device_summary(&self) -> AudioDeviceSummary {
+        AudioDeviceSummary::default()
+    }
+
     fn set_volume(
         &self,
         _percent: u32,
@@ -506,6 +538,10 @@ impl crate::services::controls_backends::BluetoothBackend for NoopBluetoothBacke
         false
     }
 
+    fn device_summary(&self) -> BluetoothDeviceSummary {
+        BluetoothDeviceSummary::default()
+    }
+
     fn toggle(&self, _enable: bool) -> bool {
         true
     }
@@ -551,8 +587,9 @@ impl crate::services::controls_backends::PowerBackend for NoopPowerBackend {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioInfo, BatteryThresholdPreset, BatteryThresholds, BrightnessSnapshot, ControlsCommand,
-        ControlsRefresh, ControlsRefreshKind, ControlsService, ControlsSnapshot,
+        AudioDeviceSummary, AudioInfo, BatteryThresholdPreset, BatteryThresholds,
+        BluetoothDeviceSummary, BrightnessSnapshot, ControlsCommand, ControlsRefresh,
+        ControlsRefreshKind, ControlsService, ControlsSnapshot,
     };
     use crate::modules::mic::MicInfo;
     use std::sync::{Arc, Mutex};
@@ -565,6 +602,7 @@ mod tests {
     #[derive(Clone)]
     struct MockAudioBackend {
         audio: AudioInfo,
+        devices: AudioDeviceSummary,
         mic: MicInfo,
         calls: SharedStringCalls,
     }
@@ -580,6 +618,10 @@ mod tests {
 
         fn mic_info(&self) -> MicInfo {
             self.mic.clone()
+        }
+
+        fn device_summary(&self) -> AudioDeviceSummary {
+            self.devices.clone()
         }
 
         fn set_volume(
@@ -647,6 +689,7 @@ mod tests {
     #[derive(Clone)]
     struct MockBluetoothBackend {
         enabled: bool,
+        devices: BluetoothDeviceSummary,
         toggle_calls: SharedBoolCalls,
         overskride_calls: SharedCount,
     }
@@ -658,6 +701,10 @@ mod tests {
 
         fn enabled(&self) -> bool {
             self.enabled
+        }
+
+        fn device_summary(&self) -> BluetoothDeviceSummary {
+            self.devices.clone()
         }
 
         fn toggle(&self, enable: bool) -> bool {
@@ -737,6 +784,10 @@ mod tests {
                     volume: 55,
                     muted: true,
                 },
+                devices: AudioDeviceSummary {
+                    output_route: Some("Built-in Audio".to_string()),
+                    input_route: Some("Internal Microphone".to_string()),
+                },
                 mic: MicInfo {
                     volume: 12,
                     muted: false,
@@ -749,6 +800,9 @@ mod tests {
             }),
             Arc::new(MockBluetoothBackend {
                 enabled: true,
+                devices: BluetoothDeviceSummary {
+                    connected_devices: vec!["WH-1000XM5".to_string()],
+                },
                 toggle_calls: bluetooth_calls.clone(),
                 overskride_calls: overskride_calls.clone(),
             }),
@@ -784,6 +838,7 @@ mod tests {
                     volume: 0,
                     muted: false,
                 },
+                devices: AudioDeviceSummary::default(),
                 mic: MicInfo {
                     volume: 0,
                     muted: false,
@@ -796,6 +851,7 @@ mod tests {
             }),
             bluetooth_backend: Arc::new(MockBluetoothBackend {
                 enabled: false,
+                devices: BluetoothDeviceSummary::default(),
                 toggle_calls: Arc::new(Mutex::new(Vec::new())),
                 overskride_calls: Arc::new(Mutex::new(0)),
             }),
@@ -827,6 +883,7 @@ mod tests {
                     volume: 0,
                     muted: false,
                 },
+                devices: AudioDeviceSummary::default(),
                 mic: MicInfo {
                     volume: 0,
                     muted: false,
@@ -839,6 +896,7 @@ mod tests {
             }),
             bluetooth_backend: Arc::new(MockBluetoothBackend {
                 enabled: false,
+                devices: BluetoothDeviceSummary::default(),
                 toggle_calls: Arc::new(Mutex::new(Vec::new())),
                 overskride_calls: Arc::new(Mutex::new(0)),
             }),
@@ -875,6 +933,10 @@ mod tests {
         let bluetooth_refresh = service.refresh(ControlsRefreshKind::Bluetooth).await;
 
         assert_eq!(audio_refresh.audio.unwrap().volume, 55);
+        assert_eq!(
+            audio_refresh.audio_devices.unwrap().output_route.as_deref(),
+            Some("Built-in Audio")
+        );
         assert_eq!(audio_refresh.mic.unwrap().volume, 12);
         assert_eq!(brightness_refresh.brightness.unwrap().percent, 64);
         assert_eq!(
@@ -884,6 +946,13 @@ mod tests {
         assert!(battery_refresh.battery.is_some());
         assert_eq!(power_refresh.power_profile.unwrap(), "performance");
         assert!(bluetooth_refresh.bluetooth_enabled.unwrap());
+        assert_eq!(
+            bluetooth_refresh
+                .bluetooth_devices
+                .unwrap()
+                .connected_devices,
+            vec!["WH-1000XM5".to_string()]
+        );
     }
 
     #[tokio::test]
