@@ -11,14 +11,31 @@ pub struct AudioInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AudioRouteInfo {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AudioDeviceSummary {
     pub output_route: Option<String>,
     pub input_route: Option<String>,
+    pub output_routes: Vec<AudioRouteInfo>,
+    pub input_routes: Vec<AudioRouteInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BluetoothConnectedDevice {
+    pub address: String,
+    pub name: String,
+    pub battery_percent: Option<u8>,
+    pub audio_profiles: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BluetoothDeviceSummary {
     pub connected_devices: Vec<String>,
+    pub device_details: Vec<BluetoothConnectedDevice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,8 +222,10 @@ pub struct ControlsRefresh {
 pub enum ControlsCommand {
     SetVolume(u32),
     ToggleAudioMute,
+    CycleAudioOutputRoute,
     SetMicVolume(u32),
     ToggleMicMute,
+    CycleAudioInputRoute,
     SetBrightness(u32),
     SetFanLevel(String),
     SetPowerProfile(String),
@@ -327,8 +346,20 @@ impl ControlsService {
             ControlsCommand::SetVolume(volume) => {
                 self.snapshot.audio.volume = *volume;
             }
+            ControlsCommand::CycleAudioOutputRoute => {
+                self.snapshot.audio_devices.output_route = cycle_route_name(
+                    &self.snapshot.audio_devices.output_routes,
+                    self.snapshot.audio_devices.output_route.as_deref(),
+                );
+            }
             ControlsCommand::SetMicVolume(volume) => {
                 self.snapshot.mic.volume = *volume;
+            }
+            ControlsCommand::CycleAudioInputRoute => {
+                self.snapshot.audio_devices.input_route = cycle_route_name(
+                    &self.snapshot.audio_devices.input_routes,
+                    self.snapshot.audio_devices.input_route.as_deref(),
+                );
             }
             ControlsCommand::SetBrightness(percent) => {
                 self.snapshot.brightness = BrightnessSnapshot::from_percent(*percent);
@@ -404,12 +435,20 @@ impl ControlsService {
                 self.audio_backend.toggle_audio_mute().await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
+            ControlsCommand::CycleAudioOutputRoute => {
+                let _ = self.audio_backend.cycle_output_route().await;
+                ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
+            }
             ControlsCommand::SetMicVolume(volume) => {
                 self.audio_backend.set_mic_volume(volume).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
             ControlsCommand::ToggleMicMute => {
                 self.audio_backend.toggle_mic_mute().await;
+                ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
+            }
+            ControlsCommand::CycleAudioInputRoute => {
+                let _ = self.audio_backend.cycle_input_route().await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
             ControlsCommand::SetBrightness(percent) => {
@@ -444,6 +483,19 @@ impl ControlsService {
     pub fn subscription(&self) -> iced::Subscription<ControlsEvent> {
         self.audio_backend.subscription()
     }
+}
+
+fn cycle_route_name(routes: &[AudioRouteInfo], current: Option<&str>) -> Option<String> {
+    if routes.is_empty() {
+        return current.map(ToOwned::to_owned);
+    }
+
+    let next_index = current
+        .and_then(|current| routes.iter().position(|route| route.name == current))
+        .map(|index| (index + 1) % routes.len())
+        .unwrap_or(0);
+
+    Some(routes[next_index].name.clone())
 }
 
 impl Default for ControlsService {
@@ -491,6 +543,10 @@ impl crate::services::controls_backends::AudioBackend for NoopAudioBackend {
         Box::pin(async {})
     }
 
+    fn cycle_output_route(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        Box::pin(async { false })
+    }
+
     fn set_mic_volume(
         &self,
         _percent: u32,
@@ -500,6 +556,10 @@ impl crate::services::controls_backends::AudioBackend for NoopAudioBackend {
 
     fn toggle_mic_mute(&self) -> crate::services::controls_backends::BackendFuture<'_, ()> {
         Box::pin(async {})
+    }
+
+    fn cycle_input_route(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        Box::pin(async { false })
     }
 
     fn subscription(&self) -> iced::Subscription<ControlsEvent> {
@@ -587,9 +647,9 @@ impl crate::services::controls_backends::PowerBackend for NoopPowerBackend {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioDeviceSummary, AudioInfo, BatteryThresholdPreset, BatteryThresholds,
-        BluetoothDeviceSummary, BrightnessSnapshot, ControlsCommand, ControlsRefresh,
-        ControlsRefreshKind, ControlsService, ControlsSnapshot,
+        AudioDeviceSummary, AudioInfo, AudioRouteInfo, BatteryThresholdPreset, BatteryThresholds,
+        BluetoothConnectedDevice, BluetoothDeviceSummary, BrightnessSnapshot, ControlsCommand,
+        ControlsRefresh, ControlsRefreshKind, ControlsService, ControlsSnapshot,
     };
     use crate::modules::mic::MicInfo;
     use std::sync::{Arc, Mutex};
@@ -641,6 +701,16 @@ mod tests {
             })
         }
 
+        fn cycle_output_route(
+            &self,
+        ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls.lock().unwrap().push("cycle_output_route".to_string());
+                true
+            })
+        }
+
         fn set_mic_volume(
             &self,
             percent: u32,
@@ -658,6 +728,14 @@ mod tests {
             let calls = self.calls.clone();
             Box::pin(async move {
                 calls.lock().unwrap().push("toggle_mic_mute".to_string());
+            })
+        }
+
+        fn cycle_input_route(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls.lock().unwrap().push("cycle_input_route".to_string());
+                true
             })
         }
 
@@ -787,6 +865,26 @@ mod tests {
                 devices: AudioDeviceSummary {
                     output_route: Some("Built-in Audio".to_string()),
                     input_route: Some("Internal Microphone".to_string()),
+                    output_routes: vec![
+                        AudioRouteInfo {
+                            id: "52".to_string(),
+                            name: "Built-in Audio".to_string(),
+                        },
+                        AudioRouteInfo {
+                            id: "77".to_string(),
+                            name: "USB Audio DAC".to_string(),
+                        },
+                    ],
+                    input_routes: vec![
+                        AudioRouteInfo {
+                            id: "54".to_string(),
+                            name: "Internal Microphone".to_string(),
+                        },
+                        AudioRouteInfo {
+                            id: "80".to_string(),
+                            name: "USB Microphone".to_string(),
+                        },
+                    ],
                 },
                 mic: MicInfo {
                     volume: 12,
@@ -802,6 +900,12 @@ mod tests {
                 enabled: true,
                 devices: BluetoothDeviceSummary {
                     connected_devices: vec!["WH-1000XM5".to_string()],
+                    device_details: vec![BluetoothConnectedDevice {
+                        address: "AA:BB:CC:DD:EE:FF".to_string(),
+                        name: "WH-1000XM5".to_string(),
+                        battery_percent: Some(90),
+                        audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
+                    }],
                 },
                 toggle_calls: bluetooth_calls.clone(),
                 overskride_calls: overskride_calls.clone(),
@@ -832,7 +936,33 @@ mod tests {
     #[test]
     fn preview_command_updates_local_snapshot() {
         let mut service = ControlsService {
-            snapshot: ControlsSnapshot::default(),
+            snapshot: ControlsSnapshot {
+                audio_devices: AudioDeviceSummary {
+                    output_route: Some("Built-in Audio".to_string()),
+                    input_route: Some("Internal Microphone".to_string()),
+                    output_routes: vec![
+                        AudioRouteInfo {
+                            id: "52".to_string(),
+                            name: "Built-in Audio".to_string(),
+                        },
+                        AudioRouteInfo {
+                            id: "77".to_string(),
+                            name: "USB Audio DAC".to_string(),
+                        },
+                    ],
+                    input_routes: vec![
+                        AudioRouteInfo {
+                            id: "54".to_string(),
+                            name: "Internal Microphone".to_string(),
+                        },
+                        AudioRouteInfo {
+                            id: "80".to_string(),
+                            name: "USB Microphone".to_string(),
+                        },
+                    ],
+                },
+                ..ControlsSnapshot::default()
+            },
             audio_backend: Arc::new(MockAudioBackend {
                 audio: AudioInfo {
                     volume: 0,
@@ -861,14 +991,24 @@ mod tests {
             }),
         };
         service.preview_command(&ControlsCommand::SetVolume(73));
+        service.preview_command(&ControlsCommand::CycleAudioOutputRoute);
         service.preview_command(&ControlsCommand::SetBrightness(64));
+        service.preview_command(&ControlsCommand::CycleAudioInputRoute);
         service.preview_command(&ControlsCommand::SetPowerProfile("performance".to_string()));
         service.preview_command(&ControlsCommand::ApplyBatteryThresholdPreset(
             BatteryThresholdPreset::Care,
         ));
 
         assert_eq!(service.snapshot().audio.volume, 73);
+        assert_eq!(
+            service.snapshot().audio_devices.output_route.as_deref(),
+            Some("USB Audio DAC")
+        );
         assert_eq!(service.snapshot().brightness.percent, 64);
+        assert_eq!(
+            service.snapshot().audio_devices.input_route.as_deref(),
+            Some("USB Microphone")
+        );
         assert_eq!(service.snapshot().power_profile, "performance");
         assert_eq!(service.snapshot().battery.charge_start_threshold, Some(40));
         assert_eq!(service.snapshot().battery.charge_end_threshold, Some(80));
@@ -972,8 +1112,12 @@ mod tests {
             super::ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
         );
         let _ = service.execute(ControlsCommand::ToggleAudioMute).await;
+        let _ = service
+            .execute(ControlsCommand::CycleAudioOutputRoute)
+            .await;
         let _ = service.execute(ControlsCommand::SetMicVolume(22)).await;
         let _ = service.execute(ControlsCommand::ToggleMicMute).await;
+        let _ = service.execute(ControlsCommand::CycleAudioInputRoute).await;
         let _ = service.execute(ControlsCommand::SetBrightness(31)).await;
         let _ = service
             .execute(ControlsCommand::SetPowerProfile("balanced".to_string()))
@@ -993,8 +1137,10 @@ mod tests {
             [
                 "set_volume:77",
                 "toggle_audio_mute",
+                "cycle_output_route",
                 "set_mic_volume:22",
                 "toggle_mic_mute",
+                "cycle_input_route",
             ]
         );
         assert_eq!(brightness_calls.lock().unwrap().as_slice(), [31]);

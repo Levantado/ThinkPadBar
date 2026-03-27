@@ -30,9 +30,7 @@ impl super::BluetoothBackend for BluetoothCtlBackend {
     }
 
     fn device_summary(&self) -> crate::services::controls::BluetoothDeviceSummary {
-        crate::services::controls::BluetoothDeviceSummary {
-            connected_devices: connected_devices(),
-        }
+        connected_device_summary()
     }
 
     fn toggle(&self, enable: bool) -> bool {
@@ -126,16 +124,83 @@ fn sysfs_bluetooth_state() -> Option<bool> {
     None
 }
 
-fn connected_devices() -> Vec<String> {
-    Command::new("bluetoothctl")
+fn connected_device_summary() -> crate::services::controls::BluetoothDeviceSummary {
+    let device_briefs = Command::new("bluetoothctl")
         .args(["devices", "Connected"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
         .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|stdout| parse_connected_devices(&stdout))
-        .unwrap_or_default()
+        .map(|stdout| parse_connected_device_briefs(&stdout))
+        .unwrap_or_default();
+
+    let device_details = device_briefs
+        .iter()
+        .map(|device| {
+            let info_output = Command::new("bluetoothctl")
+                .args(["info", &device.address])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok());
+
+            let (battery_percent, audio_profiles) = info_output
+                .as_deref()
+                .map(parse_bluetooth_device_info)
+                .unwrap_or_default();
+
+            crate::services::controls::BluetoothConnectedDevice {
+                address: device.address.clone(),
+                name: device.name.clone(),
+                battery_percent,
+                audio_profiles,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    crate::services::controls::BluetoothDeviceSummary {
+        connected_devices: device_briefs
+            .into_iter()
+            .map(|device| device.name)
+            .collect(),
+        device_details,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectedDeviceBrief {
+    address: String,
+    name: String,
+}
+
+#[cfg(test)]
+pub(crate) fn parse_connected_devices(output: &str) -> Vec<String> {
+    parse_connected_device_briefs(output)
+        .into_iter()
+        .map(|device| device.name)
+        .collect()
+}
+
+fn parse_connected_device_briefs(output: &str) -> Vec<ConnectedDeviceBrief> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let rest = trimmed.strip_prefix("Device ")?;
+            let (address, name) = rest.split_once(' ')?;
+            let address = address.trim();
+            let name = name.trim();
+            if address.is_empty() || name.is_empty() {
+                return None;
+            }
+            Some(ConnectedDeviceBrief {
+                address: address.to_string(),
+                name: name.to_string(),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn parse_powered_from_bluetoothctl(output: &str) -> Option<bool> {
@@ -148,22 +213,75 @@ pub(crate) fn parse_powered_from_bluetoothctl(output: &str) -> Option<bool> {
     None
 }
 
-pub(crate) fn parse_connected_devices(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            let rest = trimmed.strip_prefix("Device ")?;
-            let (_addr, name) = rest.split_once(' ')?;
-            let name = name.trim();
-            (!name.is_empty()).then(|| name.to_string())
-        })
-        .collect()
+pub(crate) fn parse_bluetooth_device_info(output: &str) -> (Option<u8>, Vec<String>) {
+    let mut battery_percent = None;
+    let mut audio_profiles = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("Battery Percentage:") {
+            battery_percent = parse_bluetooth_battery_percent(value);
+            continue;
+        }
+
+        let Some(value) = trimmed.strip_prefix("UUID:") else {
+            continue;
+        };
+        let value = value.trim();
+        let Some((name, _uuid)) = value.rsplit_once('(') else {
+            continue;
+        };
+        if let Some(profile) = normalize_audio_profile_name(name.trim()) {
+            if !audio_profiles.iter().any(|existing| existing == profile) {
+                audio_profiles.push(profile.to_string());
+            }
+        }
+    }
+
+    (battery_percent, audio_profiles)
+}
+
+fn parse_bluetooth_battery_percent(value: &str) -> Option<u8> {
+    if let Some((_, trailing)) = value.split_once('(') {
+        let digits = trailing
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        if let Ok(percent) = digits.parse::<u8>() {
+            return Some(percent);
+        }
+    }
+
+    let digits = value
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    digits.parse::<u8>().ok()
+}
+
+fn normalize_audio_profile_name(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("audio sink") {
+        Some("A2DP")
+    } else if lower.contains("handsfree") {
+        Some("HFP")
+    } else if lower.contains("headset") {
+        Some("HSP")
+    } else if lower.contains("a/v_remote control target") {
+        Some("AVRCP Target")
+    } else if lower.contains("a/v_remote control") {
+        Some("AVRCP")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_connected_devices, parse_powered_from_bluetoothctl};
+    use super::{
+        parse_bluetooth_device_info, parse_connected_device_briefs, parse_connected_devices,
+        parse_powered_from_bluetoothctl,
+    };
 
     #[test]
     fn parse_bluetoothctl_powered_yes() {
@@ -183,6 +301,29 @@ mod tests {
         assert_eq!(
             parse_connected_devices(sample),
             vec!["WH-1000XM5".to_string(), "MX Master 3S".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_bluetoothctl_connected_devices_extracts_addresses_and_names() {
+        let sample = "Device AA:BB:CC:DD:EE:FF WH-1000XM5\n";
+        let devices = parse_connected_device_briefs(sample);
+        assert_eq!(devices[0].address, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(devices[0].name, "WH-1000XM5");
+    }
+
+    #[test]
+    fn parse_bluetooth_device_info_extracts_battery_and_audio_profiles() {
+        let sample = "Device AA:BB:CC:DD:EE:FF\n\
+                      \tBattery Percentage: 0x5A (90)\n\
+                      \tUUID: Audio Sink                (0000110b-0000-1000-8000-00805f9b34fb)\n\
+                      \tUUID: Handsfree                 (0000111e-0000-1000-8000-00805f9b34fb)\n\
+                      \tUUID: A/V_Remote Control        (0000110e-0000-1000-8000-00805f9b34fb)\n";
+        let (battery, profiles) = parse_bluetooth_device_info(sample);
+        assert_eq!(battery, Some(90));
+        assert_eq!(
+            profiles,
+            vec!["A2DP".to_string(), "HFP".to_string(), "AVRCP".to_string()]
         );
     }
 }

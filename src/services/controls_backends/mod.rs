@@ -17,8 +17,10 @@ pub trait AudioBackend: Send + Sync {
     fn device_summary(&self) -> crate::services::controls::AudioDeviceSummary;
     fn set_volume(&self, percent: u32) -> BackendFuture<'_, ()>;
     fn toggle_audio_mute(&self) -> BackendFuture<'_, ()>;
+    fn cycle_output_route(&self) -> BackendFuture<'_, bool>;
     fn set_mic_volume(&self, percent: u32) -> BackendFuture<'_, ()>;
     fn toggle_mic_mute(&self) -> BackendFuture<'_, ()>;
+    fn cycle_input_route(&self) -> BackendFuture<'_, bool>;
     fn subscription(&self) -> iced::Subscription<crate::services::controls::ControlsEvent>;
 }
 

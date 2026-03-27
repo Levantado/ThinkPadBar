@@ -46,6 +46,13 @@ struct ControlCenterDeviceItem {
     detail: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BluetoothDeviceCard {
+    label: String,
+    summary: String,
+    detail: Option<String>,
+}
+
 pub struct ThinkPadBar {
     config: crate::config::Config,
     dbus_conn: Option<zbus::Connection>,
@@ -106,7 +113,7 @@ pub enum Message {
     RefreshControls(crate::services::controls::ControlsRefreshKind),
     ControlsRefreshed(
         crate::services::controls::ControlsRefreshKind,
-        crate::services::controls::ControlsRefresh,
+        Box<crate::services::controls::ControlsRefresh>,
     ),
     ControlsEvent(crate::services::controls::ControlsEvent),
     ControlsCommandCompleted(crate::services::controls::ControlsFollowUp),
@@ -118,7 +125,9 @@ pub enum Message {
     SwitchWorkspace(i32, String),
     TogglePopup(Popup),
     SetVolume(u32),
+    CycleAudioOutputRoute,
     SetMicVolume(u32),
+    CycleAudioInputRoute,
     SetFanLevel(String),
     SetBrightness(u32),
     FlushCoalescedControl(CoalescedControlKind, u64),
@@ -620,7 +629,14 @@ impl ThinkPadBar {
         } else {
             format!("{}% input", controls.mic.volume)
         };
-        let bluetooth_summary = if controls.bluetooth_enabled {
+        let bluetooth_summary = if controls.bluetooth_enabled
+            && !controls.bluetooth_devices.device_details.is_empty()
+        {
+            format!(
+                "{} connected",
+                controls.bluetooth_devices.device_details.len()
+            )
+        } else if controls.bluetooth_enabled {
             "Adapter enabled".to_string()
         } else {
             "Adapter disabled".to_string()
@@ -650,6 +666,32 @@ impl ThinkPadBar {
                 },
             },
         ]
+    }
+
+    fn control_center_bluetooth_device_cards(
+        bluetooth: &crate::services::controls::BluetoothDeviceSummary,
+    ) -> Vec<BluetoothDeviceCard> {
+        bluetooth
+            .device_details
+            .iter()
+            .map(|device| {
+                let summary = device
+                    .battery_percent
+                    .map(|percent| format!("Battery {percent}%"))
+                    .unwrap_or_else(|| "Connected".to_string());
+                let detail = if device.audio_profiles.is_empty() {
+                    None
+                } else {
+                    Some(device.audio_profiles.join(" • "))
+                };
+
+                BluetoothDeviceCard {
+                    label: device.name.clone(),
+                    summary,
+                    detail,
+                }
+            })
+            .collect()
     }
 
     fn display_popup_actions() -> Vec<(&'static str, &'static str, Popup)> {
@@ -790,7 +832,7 @@ impl ThinkPadBar {
         let controls_service = self.controls_service.clone();
         Task::perform(
             async move { controls_service.refresh(kind).await },
-            move |refresh| Message::ControlsRefreshed(kind, refresh),
+            move |refresh| Message::ControlsRefreshed(kind, Box::new(refresh)),
         )
     }
 
@@ -1044,7 +1086,7 @@ impl ThinkPadBar {
                 );
             }
             Message::ControlsRefreshed(kind, refresh) => {
-                self.controls_service.apply_refresh(refresh);
+                self.controls_service.apply_refresh(*refresh);
                 self.controls = self.controls_service.snapshot().clone();
                 self.sync_control_summary_strings();
                 if self.controls_refresh_coalescing.complete(&kind) {
@@ -1235,6 +1277,12 @@ impl ThinkPadBar {
                     crate::services::controls::ControlsCommand::ToggleAudioMute,
                 );
             }
+            Message::CycleAudioOutputRoute => {
+                let command = crate::services::controls::ControlsCommand::CycleAudioOutputRoute;
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
+            }
             Message::SetMicVolume(val) => {
                 let command = crate::services::controls::ControlsCommand::SetMicVolume(val);
                 self.controls_service.preview_command(&command);
@@ -1251,6 +1299,12 @@ impl ThinkPadBar {
                 return self.execute_controls_command(
                     crate::services::controls::ControlsCommand::ToggleMicMute,
                 );
+            }
+            Message::CycleAudioInputRoute => {
+                let command = crate::services::controls::ControlsCommand::CycleAudioInputRoute;
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
             }
             Message::SetBrightness(val) => {
                 let command = crate::services::controls::ControlsCommand::SetBrightness(val);
@@ -3155,6 +3209,8 @@ impl ThinkPadBar {
                 })
         };
         let device_items = Self::control_center_device_items(&self.controls);
+        let bluetooth_device_cards =
+            Self::control_center_bluetooth_device_cards(&self.controls.bluetooth_devices);
         let device_card = {
             let device_tile = |item: &ControlCenterDeviceItem| {
                 container(
@@ -3216,65 +3272,168 @@ impl ThinkPadBar {
                     ..Default::default()
                 })
             };
-
-            container(
-                Column::new()
-                    .spacing(8)
-                    .push(
-                        Row::new()
-                            .spacing(8)
-                            .align_y(Alignment::Center)
-                            .push(text("󰕾").size(16))
-                            .push(text("Audio & Devices").size(14)),
-                    )
-                    .push(
-                        Row::new()
-                            .spacing(8)
-                            .push(device_tile(&device_items[0]))
-                            .push(device_tile(&device_items[1])),
-                    )
-                    .push(device_tile(&device_items[2]))
-                    .push(
-                        Row::new()
-                            .spacing(8)
-                            .push(action_btn(
-                                if self.controls.audio.muted {
-                                    "󰝟"
-                                } else {
-                                    ""
-                                },
-                                if self.controls.audio.muted {
-                                    "Unmute Output"
-                                } else {
-                                    "Mute Output"
-                                },
-                                Message::ToggleAudioMute,
-                            ))
-                            .push(action_btn(
-                                if self.controls.mic.muted {
-                                    "󰍭"
-                                } else {
-                                    ""
-                                },
-                                if self.controls.mic.muted {
-                                    "Unmute Mic"
-                                } else {
-                                    "Mute Mic"
-                                },
-                                Message::ToggleMicMute,
-                            ))
-                            .push(action_btn("󰳋", "Overskride", Message::OpenOverskride)),
-                    ),
-            )
-            .padding(16)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                border: iced::Border {
-                    radius: 12.0.into(),
+            let action_btn_maybe = |icon: &'static str,
+                                    label: String,
+                                    message: Option<Message>|
+             -> iced::widget::Button<'_, Message> {
+                let enabled = message.is_some();
+                let button = button(
+                    Row::new()
+                        .spacing(6)
+                        .align_y(Alignment::Center)
+                        .push(text(icon).size(14))
+                        .push(text(label).size(11)),
+                )
+                .width(Length::FillPortion(1))
+                .padding(Padding::from([8, 10]))
+                .style(move |_, _| iced::widget::button::Style {
+                    background: Some(iced::Background::Color(if enabled {
+                        Color::from_rgb8(0x41, 0x48, 0x68)
+                    } else {
+                        Color::from_rgb8(0x2f, 0x35, 0x4d)
+                    })),
+                    text_color: if enabled {
+                        Color::from_rgb8(0xc0, 0xca, 0xf5)
+                    } else {
+                        Color::from_rgb8(0x86, 0x90, 0xb2)
+                    },
+                    border: iced::Border {
+                        radius: 10.0.into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            })
+                });
+                if let Some(message) = message {
+                    button.on_press(message)
+                } else {
+                    button
+                }
+            };
+
+            let mut device_column = Column::new()
+                .spacing(8)
+                .push(
+                    Row::new()
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .push(text("󰕾").size(16))
+                        .push(text("Audio & Devices").size(14)),
+                )
+                .push(
+                    Row::new()
+                        .spacing(8)
+                        .push(device_tile(&device_items[0]))
+                        .push(device_tile(&device_items[1])),
+                )
+                .push(device_tile(&device_items[2]))
+                .push(
+                    Row::new()
+                        .spacing(8)
+                        .push(action_btn(
+                            if self.controls.audio.muted {
+                                "󰝟"
+                            } else {
+                                ""
+                            },
+                            if self.controls.audio.muted {
+                                "Unmute Output"
+                            } else {
+                                "Mute Output"
+                            },
+                            Message::ToggleAudioMute,
+                        ))
+                        .push(action_btn_maybe(
+                            "󰒓",
+                            if self.controls.audio_devices.output_routes.len() > 1 {
+                                "Next Output".to_string()
+                            } else {
+                                "Only Output".to_string()
+                            },
+                            (self.controls.audio_devices.output_routes.len() > 1)
+                                .then_some(Message::CycleAudioOutputRoute),
+                        ))
+                        .push(action_btn_maybe(
+                            "󰒔",
+                            if self.controls.audio_devices.input_routes.len() > 1 {
+                                "Next Input".to_string()
+                            } else {
+                                "Only Input".to_string()
+                            },
+                            (self.controls.audio_devices.input_routes.len() > 1)
+                                .then_some(Message::CycleAudioInputRoute),
+                        )),
+                )
+                .push(
+                    Row::new()
+                        .spacing(8)
+                        .push(action_btn(
+                            if self.controls.mic.muted {
+                                "󰍭"
+                            } else {
+                                ""
+                            },
+                            if self.controls.mic.muted {
+                                "Unmute Mic"
+                            } else {
+                                "Mute Mic"
+                            },
+                            Message::ToggleMicMute,
+                        ))
+                        .push(action_btn("󰳋", "Overskride", Message::OpenOverskride)),
+                );
+
+            if !bluetooth_device_cards.is_empty() {
+                for device in &bluetooth_device_cards {
+                    device_column = device_column.push(
+                        container(
+                            Column::new()
+                                .spacing(3)
+                                .push(
+                                    Row::new()
+                                        .spacing(6)
+                                        .align_y(Alignment::Center)
+                                        .push(text("󰂯").size(13))
+                                        .push(text(device.label.clone()).size(12)),
+                                )
+                                .push(text(device.summary.clone()).size(11).style(|_| {
+                                    iced::widget::text::Style {
+                                        color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                                    }
+                                }))
+                                .push_maybe(device.detail.as_ref().map(|detail| {
+                                    text(detail.clone()).size(11).style(|_| {
+                                        iced::widget::text::Style {
+                                            color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                                        }
+                                    })
+                                })),
+                        )
+                        .width(Length::Fill)
+                        .padding(10)
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(Color::from_rgb8(
+                                0x21, 0x26, 0x38,
+                            ))),
+                            border: iced::Border {
+                                radius: 10.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                    );
+                }
+            }
+
+            container(device_column)
+                .padding(16)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                    border: iced::Border {
+                        radius: 12.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
         };
         let bat_cap = self.controls.battery.capacity;
         let bat_status = &self.controls.battery.status;
@@ -4245,6 +4404,26 @@ mod tests {
                 audio_devices: crate::services::controls::AudioDeviceSummary {
                     output_route: Some("Built-in Audio".to_string()),
                     input_route: Some("Internal Microphone".to_string()),
+                    output_routes: vec![
+                        crate::services::controls::AudioRouteInfo {
+                            id: "52".to_string(),
+                            name: "Built-in Audio".to_string(),
+                        },
+                        crate::services::controls::AudioRouteInfo {
+                            id: "77".to_string(),
+                            name: "USB DAC".to_string(),
+                        },
+                    ],
+                    input_routes: vec![
+                        crate::services::controls::AudioRouteInfo {
+                            id: "54".to_string(),
+                            name: "Internal Microphone".to_string(),
+                        },
+                        crate::services::controls::AudioRouteInfo {
+                            id: "81".to_string(),
+                            name: "USB Mic".to_string(),
+                        },
+                    ],
                 },
                 mic: crate::services::controls::MicInfo {
                     volume: 18,
@@ -4272,6 +4451,20 @@ mod tests {
                 bluetooth_enabled: true,
                 bluetooth_devices: crate::services::controls::BluetoothDeviceSummary {
                     connected_devices: vec!["WH-1000XM5".to_string(), "MX Master 3S".to_string()],
+                    device_details: vec![
+                        crate::services::controls::BluetoothConnectedDevice {
+                            address: "AA:BB:CC:DD:EE:FF".to_string(),
+                            name: "WH-1000XM5".to_string(),
+                            battery_percent: Some(90),
+                            audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
+                        },
+                        crate::services::controls::BluetoothConnectedDevice {
+                            address: "11:22:33:44:55:66".to_string(),
+                            name: "MX Master 3S".to_string(),
+                            battery_percent: Some(55),
+                            audio_profiles: Vec::new(),
+                        },
+                    ],
                 },
             },
         );
@@ -4294,10 +4487,34 @@ mod tests {
                 ControlCenterDeviceItem {
                     icon: "󰂯",
                     label: "Bluetooth",
-                    value: "Adapter enabled".to_string(),
+                    value: "2 connected".to_string(),
                     detail: Some("WH-1000XM5, MX Master 3S".to_string()),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn bluetooth_device_cards_surface_battery_and_profiles() {
+        let cards = ThinkPadBar::control_center_bluetooth_device_cards(
+            &crate::services::controls::BluetoothDeviceSummary {
+                connected_devices: vec!["WH-1000XM5".to_string()],
+                device_details: vec![crate::services::controls::BluetoothConnectedDevice {
+                    address: "AA:BB:CC:DD:EE:FF".to_string(),
+                    name: "WH-1000XM5".to_string(),
+                    battery_percent: Some(90),
+                    audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
+                }],
+            },
+        );
+
+        assert_eq!(
+            cards,
+            vec![super::BluetoothDeviceCard {
+                label: "WH-1000XM5".to_string(),
+                summary: "Battery 90%".to_string(),
+                detail: Some("A2DP • AVRCP".to_string()),
+            }]
         );
     }
 
@@ -4608,17 +4825,11 @@ mod tests {
         assert!(bar.controls_refresh_coalescing.is_inflight(&kind));
         assert!(bar.controls_refresh_coalescing.is_queued(&kind));
 
-        let _ = bar.update(super::Message::ControlsRefreshed(
-            kind,
-            crate::services::controls::ControlsRefresh::default(),
-        ));
+        let _ = bar.update(super::Message::ControlsRefreshed(kind, Box::default()));
         assert!(bar.controls_refresh_coalescing.is_inflight(&kind));
         assert!(!bar.controls_refresh_coalescing.is_queued(&kind));
 
-        let _ = bar.update(super::Message::ControlsRefreshed(
-            kind,
-            crate::services::controls::ControlsRefresh::default(),
-        ));
+        let _ = bar.update(super::Message::ControlsRefreshed(kind, Box::default()));
         assert!(!bar.controls_refresh_coalescing.is_inflight(&kind));
         assert!(!bar.controls_refresh_coalescing.is_queued(&kind));
     }

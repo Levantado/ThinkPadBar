@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.11] - 2026-03-27
+
+### Changed
+- Made `Audio & Devices` interactive instead of read-only:
+  - added typed audio route inventories to `ControlsSnapshot`;
+  - added `Next Output` and `Next Input` actions in the control-center popup;
+  - wired route switching through `wpctl set-default`, with local preview and post-command refresh.
+- Deepened the Bluetooth daily-use surface from adapter state to connected device quality:
+  - added typed connected-device details with address, optional battery percentage, and normalized audio profile badges;
+  - enriched the control-center popup with per-device Bluetooth cards instead of only a flat device-name list.
+
+### Quality
+- Added regression coverage for:
+  - `wpctl status` route inventory parsing and route cycling preview/dispatch;
+  - `bluetoothctl info` parsing for battery and audio profiles;
+  - control-center Bluetooth device cards surfacing battery/profile details;
+  - `ControlsService` command routing for new audio route actions.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.10] - 2026-03-27
 
 ### Changed

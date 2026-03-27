@@ -169,7 +169,7 @@ impl WpctlAudioBackend {
             .ok()
             .and_then(|output| String::from_utf8(output.stdout).ok())
             .as_deref()
-            .map(parse_wpctl_default_routes)
+            .map(parse_wpctl_route_summary)
             .unwrap_or_default()
     }
 }
@@ -222,6 +222,10 @@ impl super::AudioBackend for WpctlAudioBackend {
         })
     }
 
+    fn cycle_output_route(&self) -> super::BackendFuture<'_, bool> {
+        Box::pin(async move { cycle_audio_route(AudioRouteSection::Sinks).await })
+    }
+
     fn set_mic_volume(&self, percent: u32) -> super::BackendFuture<'_, ()> {
         Box::pin(async move {
             let vol_str = format!("{:.2}", percent as f32 / 100.0);
@@ -243,6 +247,10 @@ impl super::AudioBackend for WpctlAudioBackend {
                 .status()
                 .await;
         })
+    }
+
+    fn cycle_input_route(&self) -> super::BackendFuture<'_, bool> {
+        Box::pin(async move { cycle_audio_route(AudioRouteSection::Sources).await })
     }
 
     fn subscription(&self) -> iced::Subscription<crate::services::controls::ControlsEvent> {
@@ -630,17 +638,51 @@ pub(crate) fn parse_wpctl_volume(output: &str) -> Option<(u32, bool)> {
     Some((volume, muted))
 }
 
+#[cfg(test)]
 pub(crate) fn parse_wpctl_default_routes(
     output: &str,
 ) -> crate::services::controls::AudioDeviceSummary {
+    let summary = parse_wpctl_route_summary(output);
     crate::services::controls::AudioDeviceSummary {
-        output_route: parse_wpctl_default_route(output, "Sinks:"),
-        input_route: parse_wpctl_default_route(output, "Sources:"),
+        output_route: summary.output_route,
+        input_route: summary.input_route,
+        ..crate::services::controls::AudioDeviceSummary::default()
     }
 }
 
-fn parse_wpctl_default_route(output: &str, section_name: &str) -> Option<String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioRouteSection {
+    Sinks,
+    Sources,
+}
+
+impl AudioRouteSection {
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Sinks => "Sinks:",
+            Self::Sources => "Sources:",
+        }
+    }
+}
+
+fn parse_wpctl_route_summary(output: &str) -> crate::services::controls::AudioDeviceSummary {
+    let output_routes = parse_wpctl_route_entries(output, AudioRouteSection::Sinks);
+    let input_routes = parse_wpctl_route_entries(output, AudioRouteSection::Sources);
+
+    crate::services::controls::AudioDeviceSummary {
+        output_route: output_routes.first().map(|route| route.name.clone()),
+        input_route: input_routes.first().map(|route| route.name.clone()),
+        output_routes,
+        input_routes,
+    }
+}
+
+fn parse_wpctl_route_entries(
+    output: &str,
+    section: AudioRouteSection,
+) -> Vec<crate::services::controls::AudioRouteInfo> {
     let mut in_section = false;
+    let mut routes = Vec::new();
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -648,7 +690,7 @@ fn parse_wpctl_default_route(output: &str, section_name: &str) -> Option<String>
             continue;
         }
 
-        if trimmed.ends_with(section_name) || trimmed == section_name {
+        if trimmed.ends_with(section.heading()) || trimmed == section.heading() {
             in_section = true;
             continue;
         }
@@ -658,28 +700,99 @@ fn parse_wpctl_default_route(output: &str, section_name: &str) -> Option<String>
                 break;
             }
 
-            let Some(star_index) = line.find('*') else {
+            let Some(route) = parse_wpctl_route_entry_line(line) else {
                 continue;
             };
-            let candidate = line[star_index + 1..].trim();
-            if candidate.is_empty() {
-                continue;
-            }
-
-            let candidate = candidate.split(" [").next().unwrap_or(candidate).trim();
-            let candidate = candidate
-                .split_once(". ")
-                .map(|(_, rest)| rest.trim())
-                .unwrap_or(candidate)
-                .trim();
-
-            if !candidate.is_empty() {
-                return Some(candidate.to_string());
+            if route.is_default {
+                routes.insert(0, route.info);
+            } else {
+                routes.push(route.info);
             }
         }
     }
 
-    None
+    routes
+}
+
+struct ParsedWpctlRoute {
+    info: crate::services::controls::AudioRouteInfo,
+    is_default: bool,
+}
+
+fn parse_wpctl_route_entry_line(line: &str) -> Option<ParsedWpctlRoute> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        return None;
+    }
+
+    let is_default = line.contains('*');
+    let candidate = trimmed
+        .trim_start_matches(['│', '├', '└', '─', ' '])
+        .trim_start_matches('*')
+        .trim();
+    let candidate = candidate.split(" [").next().unwrap_or(candidate).trim();
+    let (id, name) = candidate.split_once(". ")?;
+    let id = id.trim();
+    let name = name.trim();
+    if id.is_empty() || name.is_empty() {
+        return None;
+    }
+
+    Some(ParsedWpctlRoute {
+        info: crate::services::controls::AudioRouteInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+        },
+        is_default,
+    })
+}
+
+async fn cycle_audio_route(section: AudioRouteSection) -> bool {
+    let summary = Command::new("wpctl")
+        .arg("status")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|stdout| parse_wpctl_route_summary(&stdout))
+        .unwrap_or_default();
+
+    let routes = match section {
+        AudioRouteSection::Sinks => &summary.output_routes,
+        AudioRouteSection::Sources => &summary.input_routes,
+    };
+    let current = match section {
+        AudioRouteSection::Sinks => summary.output_route.as_deref(),
+        AudioRouteSection::Sources => summary.input_route.as_deref(),
+    };
+
+    let Some(next_route) = next_audio_route(routes, current) else {
+        return false;
+    };
+
+    tokio::process::Command::new("wpctl")
+        .args(["set-default", &next_route.id])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn next_audio_route<'a>(
+    routes: &'a [crate::services::controls::AudioRouteInfo],
+    current: Option<&str>,
+) -> Option<&'a crate::services::controls::AudioRouteInfo> {
+    if routes.is_empty() {
+        return None;
+    }
+
+    let next_index = current
+        .and_then(|current| routes.iter().position(|route| route.name == current))
+        .map(|index| (index + 1) % routes.len())
+        .unwrap_or(0);
+
+    routes.get(next_index)
 }
 
 #[cfg(test)]
