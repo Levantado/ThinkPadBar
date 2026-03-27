@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.19] - 2026-03-27
+
+### Changed
+- Rebalanced the control-center popup back toward daily-use controls instead of a dense mixed dashboard:
+  - promoted `Power Profiles (TLP)` and `Fan Control` above secondary device/display sections so they are visible immediately again;
+  - kept the Wi-Fi expansion panel directly under the toggle row instead of burying it below unrelated audio/display content;
+  - wrapped the popup body in a scrollable container with a right gutter so future growth does not silently hide controls again.
+- Reworked Bluetooth visibility in the control-center to keep the useful part while removing the overload:
+  - added a compact `Connected Bluetooth` card that shows currently connected devices, battery/profile detail, and a direct `Disconnect` action per device;
+  - kept the full `Bluetooth Devices` popup as the deeper management surface instead of forcing all Bluetooth detail into the main toggle popup.
+- Simplified control-center navigation into explicit quick shortcuts:
+  - `Audio Routes`
+  - `Bluetooth Devices` / `Manage Devices`
+  - `Displays`
+  - `System Info`
+
+### Quality
+- Added regression coverage for:
+  - compact control-center shortcut labels;
+  - existing connected Bluetooth card summaries still surfacing battery and profile detail;
+  - full validation gate on the rebalanced popup layout.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.18] - 2026-03-27
 
 ### Changed

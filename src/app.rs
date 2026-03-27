@@ -41,6 +41,7 @@ struct DisplayPopupOutputCard {
     badges: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ControlCenterDeviceItem {
     icon: &'static str,
@@ -627,6 +628,7 @@ impl ThinkPadBar {
         ]
     }
 
+    #[cfg(test)]
     fn control_center_power_items(
         battery: &crate::services::controls::BatteryInfo,
     ) -> Vec<(&'static str, &'static str, String)> {
@@ -669,6 +671,22 @@ impl ThinkPadBar {
             .collect()
     }
 
+    fn control_center_quick_action_labels(
+        controls: &crate::services::controls::ControlsSnapshot,
+    ) -> Vec<String> {
+        vec![
+            Self::audio_route_button_label(controls),
+            if controls.bluetooth_devices.device_details.is_empty() {
+                "Bluetooth Devices".to_string()
+            } else {
+                "Manage Devices".to_string()
+            },
+            "Displays".to_string(),
+            "System Info".to_string(),
+        ]
+    }
+
+    #[cfg(test)]
     fn control_center_device_items(
         controls: &crate::services::controls::ControlsSnapshot,
     ) -> Vec<ControlCenterDeviceItem> {
@@ -4212,232 +4230,6 @@ impl ThinkPadBar {
             }
             btn
         };
-        let display_rows = Self::display_summary_rows(wayland_snapshot);
-        let display_card = {
-            let mut display_col = Column::new().spacing(8).push(
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(text("󰍹").size(16))
-                    .push(text("Displays").size(14))
-                    .push(Space::with_width(Length::Fill))
-                    .push(
-                        button(text("Open").size(11))
-                            .padding(Padding::from([4, 8]))
-                            .on_press(Message::TogglePopup(Popup::Displays)),
-                    ),
-            );
-            for (_icon, label, value) in display_rows {
-                display_col = display_col.push(
-                    Row::new()
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .push(
-                            text(label)
-                                .size(12)
-                                .width(Length::FillPortion(2))
-                                .style(|_| iced::widget::text::Style {
-                                    color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
-                                }),
-                        )
-                        .push(
-                            text(value)
-                                .size(12)
-                                .width(Length::FillPortion(3))
-                                .align_x(iced::alignment::Horizontal::Right),
-                        ),
-                );
-            }
-            container(display_col)
-                .padding(16)
-                .style(|_| container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                    border: iced::Border {
-                        radius: 12.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-        };
-        let device_items = Self::control_center_device_items(&self.controls);
-        let bluetooth_device_cards =
-            Self::control_center_bluetooth_device_cards(&self.controls.bluetooth_devices);
-        let device_card = {
-            let device_tile = |item: &ControlCenterDeviceItem| {
-                container(
-                    Column::new()
-                        .spacing(4)
-                        .push(
-                            Row::new()
-                                .spacing(6)
-                                .align_y(Alignment::Center)
-                                .push(text(item.icon).size(14))
-                                .push(text(item.label).size(12).style(|_| {
-                                    iced::widget::text::Style {
-                                        color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
-                                    }
-                                })),
-                        )
-                        .push(text(item.value.clone()).size(13).style(|_| {
-                            iced::widget::text::Style {
-                                color: Some(Color::from_rgb8(0xe5, 0xe9, 0xf0)),
-                            }
-                        }))
-                        .push_maybe(item.detail.as_ref().map(|detail| {
-                            text(detail.clone())
-                                .size(11)
-                                .style(|_| iced::widget::text::Style {
-                                    color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
-                                })
-                        })),
-                )
-                .width(Length::Fill)
-                .padding(10)
-                .style(|_| container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                    border: iced::Border {
-                        radius: 10.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-            };
-            let action_btn = |icon: &'static str, label: &'static str, message: Message| {
-                button(
-                    Row::new()
-                        .spacing(6)
-                        .align_y(Alignment::Center)
-                        .push(text(icon).size(14))
-                        .push(text(label).size(11)),
-                )
-                .width(Length::FillPortion(1))
-                .padding(Padding::from([8, 10]))
-                .on_press(message)
-                .style(|_, _| iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
-                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                    border: iced::Border {
-                        radius: 10.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-            };
-            let action_btn_maybe = |icon: &'static str,
-                                    label: String,
-                                    message: Option<Message>|
-             -> iced::widget::Button<'_, Message> {
-                let enabled = message.is_some();
-                let button = button(
-                    Row::new()
-                        .spacing(6)
-                        .align_y(Alignment::Center)
-                        .push(text(icon).size(14))
-                        .push(text(label).size(11)),
-                )
-                .width(Length::FillPortion(1))
-                .padding(Padding::from([8, 10]))
-                .style(move |_, _| iced::widget::button::Style {
-                    background: Some(iced::Background::Color(if enabled {
-                        Color::from_rgb8(0x41, 0x48, 0x68)
-                    } else {
-                        Color::from_rgb8(0x2f, 0x35, 0x4d)
-                    })),
-                    text_color: if enabled {
-                        Color::from_rgb8(0xc0, 0xca, 0xf5)
-                    } else {
-                        Color::from_rgb8(0x86, 0x90, 0xb2)
-                    },
-                    border: iced::Border {
-                        radius: 10.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                });
-                if let Some(message) = message {
-                    button.on_press(message)
-                } else {
-                    button
-                }
-            };
-
-            let device_column = Column::new()
-                .spacing(8)
-                .push(
-                    Row::new()
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .push(text("󰕾").size(16))
-                        .push(text("Audio & Devices").size(14)),
-                )
-                .push(
-                    Row::new()
-                        .spacing(8)
-                        .push(device_tile(&device_items[0]))
-                        .push(device_tile(&device_items[1])),
-                )
-                .push(device_tile(&device_items[2]))
-                .push(
-                    Row::new()
-                        .spacing(8)
-                        .push(action_btn(
-                            if self.controls.audio.muted {
-                                "󰝟"
-                            } else {
-                                ""
-                            },
-                            if self.controls.audio.muted {
-                                "Unmute Output"
-                            } else {
-                                "Mute Output"
-                            },
-                            Message::ToggleAudioMute,
-                        ))
-                        .push(action_btn(
-                            if self.controls.mic.muted {
-                                "󰍭"
-                            } else {
-                                ""
-                            },
-                            if self.controls.mic.muted {
-                                "Unmute Mic"
-                            } else {
-                                "Mute Mic"
-                            },
-                            Message::ToggleMicMute,
-                        ))
-                        .push(action_btn_maybe(
-                            "󰑓",
-                            Self::audio_route_button_label(&self.controls),
-                            Some(Message::TogglePopup(Popup::AudioRoutes)),
-                        )),
-                )
-                .push(
-                    Row::new()
-                        .spacing(8)
-                        .push(action_btn(
-                            "󰂯",
-                            if bluetooth_device_cards.is_empty() {
-                                "Bluetooth Devices"
-                            } else {
-                                "Manage Devices"
-                            },
-                            Message::TogglePopup(Popup::BluetoothDevices),
-                        ))
-                        .push(action_btn("󰳋", "Overskride", Message::OpenOverskride)),
-                );
-
-            container(device_column)
-                .padding(16)
-                .style(|_| container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                    border: iced::Border {
-                        radius: 12.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-        };
         let bat_cap = self.controls.battery.capacity;
         let bat_status = &self.controls.battery.status;
         let (bat_icon, bat_color) = if bat_status.contains("Charging") {
@@ -4610,6 +4402,261 @@ impl ThinkPadBar {
             .push(vol_row)
             .push(mic_row);
 
+        let shortcut_button = |icon: &'static str, label: String, message: Message| {
+            button(
+                Row::new()
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .push(text(icon).size(14))
+                    .push(text(label).size(11)),
+            )
+            .width(Length::FillPortion(1))
+            .padding(Padding::from([8, 10]))
+            .on_press(message)
+            .style(|_, _| iced::widget::button::Style {
+                background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
+                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                border: iced::Border {
+                    radius: 10.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        };
+
+        let connected_bluetooth_cards =
+            Self::control_center_bluetooth_device_cards(&self.controls.bluetooth_devices)
+                .into_iter()
+                .filter(|card| card.connected)
+                .collect::<Vec<_>>();
+
+        let battery_care_card = {
+            let threshold_presets = Self::control_center_threshold_presets(&self.controls.battery);
+            let info_row = |icon: &'static str, label: &'static str, value: String| {
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(text(icon).size(13))
+                    .push(
+                        text(label)
+                            .size(12)
+                            .width(Length::FillPortion(2))
+                            .style(|_| iced::widget::text::Style {
+                                color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
+                            }),
+                    )
+                    .push(
+                        text(value)
+                            .size(12)
+                            .width(Length::FillPortion(3))
+                            .align_x(iced::alignment::Horizontal::Right),
+                    )
+            };
+
+            container(
+                Column::new()
+                    .spacing(8)
+                    .push(
+                        Row::new()
+                            .spacing(8)
+                            .align_y(Alignment::Center)
+                            .push(text("󰚥").size(16))
+                            .push(text("Battery Care").size(14)),
+                    )
+                    .push(info_row(
+                        "󰁹",
+                        "Charge State",
+                        Self::battery_charge_state_summary(&self.controls.battery),
+                    ))
+                    .push(info_row(
+                        "󰂄",
+                        "Thresholds",
+                        Self::battery_threshold_summary(&self.controls.battery),
+                    ))
+                    .push({
+                        let mut row = Row::new().spacing(8);
+                        for (preset, is_active) in threshold_presets {
+                            let label = format!("{} {}", preset.label(), preset.summary());
+                            row = row.push(
+                                button(
+                                    text(label)
+                                        .size(11)
+                                        .align_x(iced::alignment::Horizontal::Center),
+                                )
+                                .width(Length::FillPortion(1))
+                                .height(Length::Fixed(30.0))
+                                .padding(Padding::from([4, 0]))
+                                .on_press(Message::ApplyBatteryThresholdPreset(preset))
+                                .style(move |_, _| {
+                                    if is_active {
+                                        iced::widget::button::Style {
+                                            background: Some(iced::Background::Color(
+                                                Color::from_rgb8(0x7a, 0xa2, 0xf7),
+                                            )),
+                                            text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
+                                            border: iced::Border {
+                                                radius: 8.0.into(),
+                                                ..Default::default()
+                                            },
+                                            ..Default::default()
+                                        }
+                                    } else {
+                                        iced::widget::button::Style {
+                                            background: Some(iced::Background::Color(
+                                                Color::from_rgb8(0x29, 0x2e, 0x42),
+                                            )),
+                                            text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                                            border: iced::Border {
+                                                radius: 8.0.into(),
+                                                ..Default::default()
+                                            },
+                                            ..Default::default()
+                                        }
+                                    }
+                                }),
+                            );
+                        }
+                        row
+                    }),
+            )
+            .padding(16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        };
+
+        let bluetooth_quick_card = {
+            let mut column = Column::new().spacing(8).push(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(text("󰂯").size(16))
+                    .push(text("Connected Bluetooth").size(14))
+                    .push(Space::with_width(Length::Fill))
+                    .push(
+                        button(text("Open").size(11))
+                            .padding(Padding::from([4, 8]))
+                            .on_press(Message::TogglePopup(Popup::BluetoothDevices)),
+                    ),
+            );
+
+            if connected_bluetooth_cards.is_empty() {
+                column = column.push(text("No connected Bluetooth devices").size(12).style(|_| {
+                    iced::widget::text::Style {
+                        color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
+                    }
+                }));
+            } else {
+                for card in connected_bluetooth_cards {
+                    let summary = if let Some(detail) = &card.detail {
+                        format!("{} • {}", card.summary, detail)
+                    } else {
+                        card.summary.clone()
+                    };
+                    column = column.push(
+                        container(
+                            Column::new()
+                                .spacing(6)
+                                .push(
+                                    Row::new()
+                                        .spacing(8)
+                                        .align_y(Alignment::Center)
+                                        .push(text(card.label).size(13))
+                                        .push(Space::with_width(Length::Fill))
+                                        .push(
+                                            button(text("Disconnect").size(11))
+                                                .padding(Padding::from([6, 10]))
+                                                .on_press(Message::DisconnectBluetoothDevice(
+                                                    card.address.clone(),
+                                                )),
+                                        ),
+                                )
+                                .push(text(summary).size(11).style(|_| {
+                                    iced::widget::text::Style {
+                                        color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                                    }
+                                })),
+                        )
+                        .padding(10)
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(Color::from_rgb8(
+                                0x21, 0x26, 0x38,
+                            ))),
+                            border: iced::Border {
+                                radius: 10.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                    );
+                }
+            }
+
+            container(column).padding(16).style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        };
+
+        let quick_action_labels = Self::control_center_quick_action_labels(&self.controls);
+        let quick_actions_card = container(
+            Column::new()
+                .spacing(8)
+                .push(
+                    Row::new()
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .push(text("󰇚").size(16))
+                        .push(text("Shortcuts").size(14)),
+                )
+                .push(
+                    Row::new()
+                        .spacing(8)
+                        .push(shortcut_button(
+                            "󰑓",
+                            quick_action_labels[0].clone(),
+                            Message::TogglePopup(Popup::AudioRoutes),
+                        ))
+                        .push(shortcut_button(
+                            "󰂯",
+                            quick_action_labels[1].clone(),
+                            Message::TogglePopup(Popup::BluetoothDevices),
+                        )),
+                )
+                .push(
+                    Row::new()
+                        .spacing(8)
+                        .push(shortcut_button(
+                            "󰍹",
+                            quick_action_labels[2].clone(),
+                            Message::TogglePopup(Popup::Displays),
+                        ))
+                        .push(shortcut_button(
+                            "󰋊",
+                            quick_action_labels[3].clone(),
+                            Message::TogglePopup(Popup::SystemMonitor),
+                        )),
+                ),
+        )
+        .padding(16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+            border: iced::Border {
+                radius: 12.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
         let mut container_col = Column::new()
             .spacing(20)
             .push(top_row)
@@ -4620,9 +4667,7 @@ impl ThinkPadBar {
                     .push(wifi_btn)
                     .push(bt_btn)
                     .push(idle_btn),
-            )
-            .push(device_card)
-            .push(display_card);
+            );
 
         if wifi_snapshot.menu_open {
             let mut inner_col = Column::new().spacing(8);
@@ -4728,146 +4773,6 @@ impl ThinkPadBar {
         }
 
         container_col = container_col
-            .push({
-                let power_items = Self::control_center_power_items(&self.controls.battery);
-                let threshold_presets =
-                    Self::control_center_threshold_presets(&self.controls.battery);
-                let power_tile = |icon: &'static str, label: &'static str, value: String| {
-                    container(
-                        Column::new()
-                            .spacing(4)
-                            .push(
-                                Row::new()
-                                    .spacing(6)
-                                    .align_y(Alignment::Center)
-                                    .push(text(icon).size(14))
-                                    .push(text(label).size(12).style(|_| {
-                                        iced::widget::text::Style {
-                                            color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
-                                        }
-                                    })),
-                            )
-                            .push(text(value).size(13).style(|_| iced::widget::text::Style {
-                                color: Some(Color::from_rgb8(0xe5, 0xe9, 0xf0)),
-                            })),
-                    )
-                    .width(Length::Fill)
-                    .padding(10)
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x29, 0x2e, 0x42,
-                        ))),
-                        border: iced::Border {
-                            radius: 10.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    })
-                };
-
-                Column::new()
-                    .spacing(8)
-                    .push(
-                        Row::new()
-                            .spacing(8)
-                            .align_y(Alignment::Center)
-                            .push(text("󰚥").size(16))
-                            .push(text("ThinkPad Power").size(14)),
-                    )
-                    .push(
-                        Row::new()
-                            .spacing(8)
-                            .push(power_tile(
-                                power_items[0].0,
-                                power_items[0].1,
-                                power_items[0].2.clone(),
-                            ))
-                            .push(power_tile(
-                                power_items[1].0,
-                                power_items[1].1,
-                                power_items[1].2.clone(),
-                            )),
-                    )
-                    .push(
-                        Row::new()
-                            .spacing(8)
-                            .push(power_tile(
-                                power_items[2].0,
-                                power_items[2].1,
-                                power_items[2].2.clone(),
-                            ))
-                            .push(power_tile(
-                                power_items[3].0,
-                                power_items[3].1,
-                                power_items[3].2.clone(),
-                            )),
-                    )
-                    .push(power_tile(
-                        power_items[4].0,
-                        power_items[4].1,
-                        power_items[4].2.clone(),
-                    ))
-                    .push(
-                        Column::new()
-                            .spacing(6)
-                            .push(text("Battery Care Presets").size(12).style(|_| {
-                                iced::widget::text::Style {
-                                    color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
-                                }
-                            }))
-                            .push({
-                                let mut row = Row::new().spacing(8);
-                                for (preset, is_active) in threshold_presets {
-                                    let label = format!("{} {}", preset.label(), preset.summary());
-                                    row = row.push(
-                                        button(
-                                            text(label)
-                                                .size(11)
-                                                .align_x(iced::alignment::Horizontal::Center),
-                                        )
-                                        .width(Length::FillPortion(1))
-                                        .height(Length::Fixed(30.0))
-                                        .padding(Padding::from([4, 0]))
-                                        .on_press(Message::ApplyBatteryThresholdPreset(preset))
-                                        .style(
-                                            move |_, _| {
-                                                if is_active {
-                                                    iced::widget::button::Style {
-                                                        background: Some(iced::Background::Color(
-                                                            Color::from_rgb8(0x7a, 0xa2, 0xf7),
-                                                        )),
-                                                        text_color: Color::from_rgb8(
-                                                            0x1a, 0x1b, 0x26,
-                                                        ),
-                                                        border: iced::Border {
-                                                            radius: 8.0.into(),
-                                                            ..Default::default()
-                                                        },
-                                                        ..Default::default()
-                                                    }
-                                                } else {
-                                                    iced::widget::button::Style {
-                                                        background: Some(iced::Background::Color(
-                                                            Color::from_rgb8(0x29, 0x2e, 0x42),
-                                                        )),
-                                                        text_color: Color::from_rgb8(
-                                                            0xc0, 0xca, 0xf5,
-                                                        ),
-                                                        border: iced::Border {
-                                                            radius: 8.0.into(),
-                                                            ..Default::default()
-                                                        },
-                                                        ..Default::default()
-                                                    }
-                                                }
-                                            },
-                                        ),
-                                    );
-                                }
-                                row
-                            }),
-                    )
-            })
             .push(
                 Column::new()
                     .spacing(8)
@@ -4902,24 +4807,33 @@ impl ThinkPadBar {
                             .width(Length::Fill)
                             .align_x(iced::alignment::Horizontal::Center),
                     ),
-            );
+            )
+            .push(battery_care_card)
+            .push(bluetooth_quick_card)
+            .push(quick_actions_card);
 
         container(
-            container(container_col)
-                .padding(24)
-                .width(Length::Fill)
-                .style(|_| container::Style {
-                    background: Some(iced::Background::Color(Color {
-                        a: self.config.appearance.opacity,
-                        ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                    })),
-                    border: iced::Border {
-                        radius: 16.0.into(),
-                        color: Color::from_rgb8(0x29, 0x2e, 0x42),
-                        width: 1.5,
-                    },
-                    ..Default::default()
-                }),
+            container(
+                scrollable(
+                    container(container_col)
+                        .padding(Padding::from([24, 18, 24, 24]))
+                        .width(Length::Fill),
+                )
+                .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color {
+                    a: self.config.appearance.opacity,
+                    ..Color::from_rgb8(0x11, 0x12, 0x1d)
+                })),
+                border: iced::Border {
+                    radius: 16.0.into(),
+                    color: Color::from_rgb8(0x29, 0x2e, 0x42),
+                    width: 1.5,
+                },
+                ..Default::default()
+            }),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -5392,6 +5306,41 @@ mod tests {
                     crate::services::controls::BatteryThresholdPreset::FullCharge,
                     false,
                 ),
+            ]
+        );
+    }
+
+    #[test]
+    fn control_center_quick_action_labels_surface_primary_shortcuts() {
+        let mut controls = crate::services::controls::ControlsSnapshot::default();
+        controls.audio_devices.output_routes = vec![crate::services::controls::AudioRouteInfo {
+            id: "52".to_string(),
+            name: "Built-in Audio".to_string(),
+            origin: crate::services::controls::AudioRouteOrigin::Internal,
+        }];
+        controls.audio_devices.input_routes = vec![crate::services::controls::AudioRouteInfo {
+            id: "54".to_string(),
+            name: "Internal Microphone".to_string(),
+            origin: crate::services::controls::AudioRouteOrigin::Internal,
+        }];
+        controls.bluetooth_devices.device_details =
+            vec![crate::services::controls::BluetoothConnectedDevice {
+                address: "AA:BB:CC:DD:EE:FF".to_string(),
+                name: "WH-1000XM5".to_string(),
+                connected: true,
+                paired: true,
+                trusted: true,
+                battery_percent: Some(90),
+                audio_profiles: vec!["A2DP".to_string()],
+            }];
+
+        assert_eq!(
+            ThinkPadBar::control_center_quick_action_labels(&controls),
+            vec![
+                "Audio Routes".to_string(),
+                "Manage Devices".to_string(),
+                "Displays".to_string(),
+                "System Info".to_string(),
             ]
         );
     }
