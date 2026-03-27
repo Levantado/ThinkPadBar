@@ -43,6 +43,8 @@ This script can:
 - launch `target/release/thinkpadbar` automatically, or use `--installed`;
 - measure an existing PID with `--pid`;
 - validate simple thresholds for max RSS, average CPU, and max thread count;
+- load a baseline/threshold profile from a key=value file with `--profile-file`;
+- write the current run back as a baseline profile with `--write-profile`;
 - reuse `scripts/runtime-metrics.sh` for CSV generation.
 
 Examples:
@@ -57,12 +59,20 @@ Examples:
 # Use stricter limits for a regression check
 ./scripts/perf-smoke.sh --duration 60 --max-rss-kb 70000 --max-cpu-avg 4 --max-threads 32
 
+# Compare against a saved baseline profile
+./scripts/perf-smoke.sh --profile-file docs/validation/perf-smoke.profile.example
+
+# Save the current run as a new baseline profile
+./scripts/perf-smoke.sh --write-profile /tmp/thinkpadbar.profile
+
 # Measure an already-running ThinkPadBar instance
 ./scripts/perf-smoke.sh --pid 1576 --duration 60 --output /tmp/thinkpadbar-smoke.csv
 
 # Preview the exact commands
 ./scripts/perf-smoke.sh --dry-run
 ```
+
+An example profile is included at `docs/validation/perf-smoke.profile.example`.
 
 ## Interpreting Results
 - Focus on `CPU avg/min/max` and `RSS avg/min/max` deltas between idle/load runs.

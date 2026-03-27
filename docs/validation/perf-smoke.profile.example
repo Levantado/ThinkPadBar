@@ -1,0 +1,14 @@
+# ThinkPadBar perf smoke profile
+name=thinkpadbar
+duration=30
+interval=2
+settle=3
+max_rss_kb=80000
+max_cpu_avg=5
+max_threads=40
+baseline_rss_kb=50000
+baseline_cpu_avg=1.0
+baseline_threads=24
+allowed_rss_growth_kb=8000
+allowed_cpu_growth_pct=2.0
+allowed_thread_growth=4

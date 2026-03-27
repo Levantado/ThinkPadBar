@@ -17,6 +17,8 @@ Options:
   --max-rss-kb KB      Fail if max RSS exceeds this value (default: 80000)
   --max-cpu-avg PCT    Fail if average CPU exceeds this value (default: 5)
   --max-threads N      Fail if max thread count exceeds this value (default: 40)
+  --profile-file FILE  Load baseline/threshold values from a key=value profile
+  --write-profile FILE Write the current thresholds and measured baseline to FILE
   --output FILE        CSV output path (default: /tmp/<name>-perf-smoke-<timestamp>.csv)
   --installed          Launch thinkpadbar from PATH instead of target/release/thinkpadbar
   --dry-run            Print the commands and thresholds without executing them
@@ -26,6 +28,7 @@ Examples:
   ./scripts/perf-smoke.sh
   ./scripts/perf-smoke.sh --installed --duration 60 --max-rss-kb 70000
   ./scripts/perf-smoke.sh --pid 1576 --duration 120 --output /tmp/thinkpadbar.csv
+  ./scripts/perf-smoke.sh --profile-file perf-smoke.profile --write-profile perf-smoke.profile
   ./scripts/perf-smoke.sh -- env RUST_LOG=thinkpadbar=debug target/release/thinkpadbar
 USAGE
 }
@@ -54,10 +57,95 @@ settle=3
 max_rss_kb=80000
 max_cpu_avg=5
 max_threads=40
+baseline_rss_kb=""
+baseline_cpu_avg=""
+baseline_threads=""
+allowed_rss_growth_kb=0
+allowed_cpu_growth_pct=0
+allowed_thread_growth=0
+profile_file=""
+write_profile=""
 output=""
 installed=0
 dry_run=0
 launch_command=()
+
+is_uint() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+is_decimal() {
+  [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+load_profile() {
+  local file="$1"
+  local line key value
+
+  if [[ ! -f "$file" ]]; then
+    echo "Profile file not found: $file" >&2
+    exit 1
+  fi
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+
+    [[ -z "$line" ]] && continue
+
+    if [[ "$line" != *=* ]]; then
+      echo "Invalid profile line (expected key=value): $line" >&2
+      exit 1
+    fi
+
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    case "$key" in
+      name) name="$value" ;;
+      duration) duration="$value" ;;
+      interval) interval="$value" ;;
+      settle) settle="$value" ;;
+      max_rss_kb) max_rss_kb="$value" ;;
+      max_cpu_avg) max_cpu_avg="$value" ;;
+      max_threads) max_threads="$value" ;;
+      baseline_rss_kb) baseline_rss_kb="$value" ;;
+      baseline_cpu_avg) baseline_cpu_avg="$value" ;;
+      baseline_threads) baseline_threads="$value" ;;
+      allowed_rss_growth_kb) allowed_rss_growth_kb="$value" ;;
+      allowed_cpu_growth_pct) allowed_cpu_growth_pct="$value" ;;
+      allowed_thread_growth) allowed_thread_growth="$value" ;;
+      *)
+        echo "Unknown profile key: $key" >&2
+        exit 1
+        ;;
+    esac
+  done < "$file"
+}
+
+write_profile_file() {
+  local file="$1"
+  cat > "$file" <<EOF
+# ThinkPadBar perf smoke profile
+name=$name
+duration=$duration
+interval=$interval
+settle=$settle
+max_rss_kb=$max_rss_kb
+max_cpu_avg=$max_cpu_avg
+max_threads=$max_threads
+baseline_rss_kb=$rss_max
+baseline_cpu_avg=$cpu_avg
+baseline_threads=$threads_max
+allowed_rss_growth_kb=$allowed_rss_growth_kb
+allowed_cpu_growth_pct=$allowed_cpu_growth_pct
+allowed_thread_growth=$allowed_thread_growth
+EOF
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -93,6 +181,14 @@ while [[ $# -gt 0 ]]; do
       max_threads="${2:-}"
       shift 2
       ;;
+    --profile-file)
+      profile_file="${2:-}"
+      shift 2
+      ;;
+    --write-profile)
+      write_profile="${2:-}"
+      shift 2
+      ;;
     --output)
       output="${2:-}"
       shift 2
@@ -122,14 +218,37 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for value in "$duration" "$interval" "$settle" "$max_rss_kb" "$max_threads"; do
-  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+if [[ -n "$profile_file" ]]; then
+  load_profile "$profile_file"
+fi
+
+for value in "$duration" "$interval" "$settle" "$max_rss_kb" "$max_threads" "$allowed_rss_growth_kb" "$allowed_thread_growth"; do
+  if ! is_uint "$value"; then
     echo "duration, interval, settle, max-rss-kb, and max-threads must be positive integers" >&2
     exit 1
   fi
 done
 
-if ! [[ "$max_cpu_avg" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+for value in "$max_cpu_avg" "$allowed_cpu_growth_pct"; do
+  if ! is_decimal "$value"; then
+    echo "--max-cpu-avg and allowed_cpu_growth_pct must be positive numbers" >&2
+    exit 1
+  fi
+done
+
+for value in "$baseline_rss_kb" "$baseline_threads"; do
+  if [[ -n "$value" ]] && ! is_uint "$value"; then
+    echo "baseline_rss_kb and baseline_threads must be positive integers when set" >&2
+    exit 1
+  fi
+done
+
+if [[ -n "$baseline_cpu_avg" ]] && ! is_decimal "$baseline_cpu_avg"; then
+  echo "baseline_cpu_avg must be a positive number when set" >&2
+  exit 1
+fi
+
+if ! is_decimal "$max_cpu_avg"; then
   echo "--max-cpu-avg must be a positive number" >&2
   exit 1
 fi
@@ -161,6 +280,15 @@ trap cleanup EXIT
 if [[ "$dry_run" -eq 1 ]]; then
   echo "# repo: $repo_root"
   echo "# thresholds: max_rss_kb=$max_rss_kb max_cpu_avg=$max_cpu_avg max_threads=$max_threads duration=$duration interval=$interval settle=$settle"
+  if [[ -n "$profile_file" ]]; then
+    echo "# profile_file: $profile_file"
+  fi
+  if [[ -n "$baseline_rss_kb" || -n "$baseline_cpu_avg" || -n "$baseline_threads" ]]; then
+    echo "# baseline: rss_kb=${baseline_rss_kb:-unset} cpu_avg=${baseline_cpu_avg:-unset} threads=${baseline_threads:-unset} allowed_rss_growth_kb=$allowed_rss_growth_kb allowed_cpu_growth_pct=$allowed_cpu_growth_pct allowed_thread_growth=$allowed_thread_growth"
+  fi
+  if [[ -n "$write_profile" ]]; then
+    echo "# write_profile: $write_profile"
+  fi
 fi
 
 if [[ -n "$pid" ]]; then
@@ -174,22 +302,28 @@ else
   if [[ "$dry_run" -eq 1 ]]; then
     run "${launch_command[@]}"
     echo "# sleep $settle"
-    run "$metrics_script" --pid 424242 --name "$name" --duration "$duration" --interval "$interval" --output "$output"
-    exit 0
-  fi
+  else
+    (
+      cd "$repo_root"
+      "${launch_command[@]}"
+    ) &
+    launched_pid="$!"
+    pid="$launched_pid"
+    sleep "$settle"
 
-  (
-    cd "$repo_root"
-    "${launch_command[@]}"
-  ) &
-  launched_pid="$!"
-  pid="$launched_pid"
-  sleep "$settle"
-
-  if ! kill -0 "$pid" 2>/dev/null; then
-    echo "Launched process exited before sampling started" >&2
-    exit 1
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "Launched process exited before sampling started" >&2
+      exit 1
+    fi
   fi
+fi
+
+if [[ "$dry_run" -eq 1 ]]; then
+  run "$metrics_script" --pid "${pid:-424242}" --name "$name" --duration "$duration" --interval "$interval" --output "$output"
+  if [[ -n "$write_profile" ]]; then
+    echo "# would write profile to $write_profile"
+  fi
+  exit 0
 fi
 
 run "$metrics_script" --pid "$pid" --name "$name" --duration "$duration" --interval "$interval" --output "$output"
@@ -218,6 +352,13 @@ echo "RSS max     : ${rss_max} KB (limit ${max_rss_kb} KB)"
 echo "CPU avg     : ${cpu_avg}% (limit ${max_cpu_avg}%)"
 echo "Threads max : ${threads_max} (limit ${max_threads})"
 
+if [[ -n "$baseline_rss_kb" || -n "$baseline_cpu_avg" || -n "$baseline_threads" ]]; then
+  echo "=== Perf Smoke Baseline ==="
+  echo "RSS max     : ${rss_max} KB (baseline ${baseline_rss_kb:-unset} KB, allowed growth ${allowed_rss_growth_kb} KB)"
+  echo "CPU avg     : ${cpu_avg}% (baseline ${baseline_cpu_avg:-unset}%, allowed growth ${allowed_cpu_growth_pct}%)"
+  echo "Threads max : ${threads_max} (baseline ${baseline_threads:-unset}, allowed growth ${allowed_thread_growth})"
+fi
+
 failures=0
 
 if (( rss_max > max_rss_kb )); then
@@ -235,8 +376,28 @@ if (( threads_max > max_threads )); then
   failures=1
 fi
 
+if [[ -n "$baseline_rss_kb" ]] && (( rss_max > baseline_rss_kb + allowed_rss_growth_kb )); then
+  echo "FAIL: RSS max exceeded baseline growth budget" >&2
+  failures=1
+fi
+
+if [[ -n "$baseline_cpu_avg" ]] && awk -v actual="$cpu_avg" -v baseline="$baseline_cpu_avg" -v growth="$allowed_cpu_growth_pct" 'BEGIN { exit !(actual > baseline + growth) }'; then
+  echo "FAIL: CPU avg exceeded baseline growth budget" >&2
+  failures=1
+fi
+
+if [[ -n "$baseline_threads" ]] && (( threads_max > baseline_threads + allowed_thread_growth )); then
+  echo "FAIL: thread count exceeded baseline growth budget" >&2
+  failures=1
+fi
+
 if [[ "$failures" -ne 0 ]]; then
   exit 1
+fi
+
+if [[ -n "$write_profile" ]]; then
+  write_profile_file "$write_profile"
+  echo "Wrote profile: $write_profile"
 fi
 
 echo "PASS: perf smoke thresholds satisfied"

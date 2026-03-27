@@ -82,6 +82,12 @@ Useful variants:
 # Tighten thresholds and sample longer
 ./scripts/perf-smoke.sh --duration 60 --max-rss-kb 70000 --max-cpu-avg 4 --max-threads 32
 
+# Compare against a saved baseline profile
+./scripts/perf-smoke.sh --profile-file docs/validation/perf-smoke.profile.example
+
+# Save the current run as a new baseline profile
+./scripts/perf-smoke.sh --write-profile /tmp/thinkpadbar.profile
+
 # Preview the exact commands without starting the app
 ./scripts/perf-smoke.sh --dry-run
 ```

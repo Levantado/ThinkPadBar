@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.6] - 2026-03-27
+
+### Changed
+- Extended `scripts/perf-smoke.sh` with baseline-aware profiles:
+  - `--profile-file FILE` now loads key=value thresholds and baseline values from disk;
+  - `--write-profile FILE` now writes the current measured run back as a reusable baseline profile;
+  - baseline checks now enforce growth budgets for max RSS, average CPU, and max thread count.
+- Added `docs/validation/perf-smoke.profile.example` and documented baseline workflows in `README.md` and `docs/validation/runtime-metrics.md`.
+
+### Quality
+- Added shell smoke coverage for profile-aware perf smoke flows:
+  - `bash -n scripts/perf-smoke.sh`
+  - dry-run validation for `--profile-file` and `--write-profile`
+  - live profile write smoke using a short-lived process
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.5] - 2026-03-27
 
 ### Changed
