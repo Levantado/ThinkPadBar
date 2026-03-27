@@ -11,9 +11,9 @@ cargo build --release --locked
 ```
 
 ### 2. Install the binary
-Recommended local install path: copy the already-built locked binary to your local bin directory:
+Recommended local install path:
 ```bash
-install -Dm755 target/release/thinkpadbar ~/.local/bin/thinkpadbar
+./scripts/install-local.sh
 ```
 
 If you prefer `cargo install`, keep it locked to the repository dependency graph:
@@ -29,11 +29,16 @@ Add the following line to your `~/.config/hypr/hyprland.conf`:
 exec-once = thinkpadbar
 ```
 
+You can preview the local installer without writing files:
+```bash
+./scripts/install-local.sh --dry-run
+```
+
 ## 🗑️ Uninstallation
 
-If you copied it to `~/.local/bin`:
+If you used the local installer:
 ```bash
-rm ~/.local/bin/thinkpadbar
+./scripts/uninstall-local.sh
 ```
 
 If you used `cargo install`:

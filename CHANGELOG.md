@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.4] - 2026-03-27
+
+### Changed
+- Added a locked local installer workflow:
+  - new `scripts/install-local.sh` builds ThinkPadBar with `cargo build --locked`, installs the built binary into a local bin directory, and supports `--dry-run`;
+  - new `scripts/uninstall-local.sh` removes a locally installed binary and supports `--dry-run`.
+- Started a small post-1.0 deployment ergonomics workstream by replacing manual README install/uninstall steps with the new helper scripts while keeping `cargo install --path . --locked --force` documented as the cargo-based alternative.
+
+### Quality
+- Added shell smoke coverage via `bash -n scripts/install-local.sh scripts/uninstall-local.sh` and dry-run validation for both scripts.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.3] - 2026-03-27
 
 ### Changed
