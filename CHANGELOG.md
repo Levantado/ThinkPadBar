@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.13] - 2026-03-27
+
+### Changed
+- Deepened the daily-use device UX with a dedicated `Bluetooth Devices` popup:
+  - control-center now exposes a focused device-management entry point instead of forcing all per-device actions into inline cards;
+  - the popup surfaces adapter state, per-device address, connection state, battery badges, audio-profile details, and direct `Connect` / `Disconnect` actions;
+  - `Bluetooth` refreshes are now requested when opening the dedicated popup so device state is not stale.
+- Polished audio-route presentation around capability and availability:
+  - the `Audio Routes` popup now labels entries explicitly as `SINK` or `SOURCE`;
+  - missing output/input capabilities now render as explicit `UNAVAILABLE` rows instead of silently disabling the feature path;
+  - the control-center route action now reflects route availability shape (`Audio Routes`, `Partial Routes`, `Routes Unavailable`) instead of a single generic label.
+
+### Quality
+- Added regression coverage for:
+  - unavailable audio-route popup rows and capability labeling;
+  - route-action labeling based on discovered output/input availability;
+  - dedicated Bluetooth popup refresh behavior;
+  - richer Bluetooth device card summaries with address and badges.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.12] - 2026-03-27
 
 ### Changed

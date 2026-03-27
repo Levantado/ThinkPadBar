@@ -5,6 +5,7 @@ pub enum PopupSurfaceKind {
     Hidden,
     ControlCenter,
     AudioRoutes,
+    BluetoothDevices,
     SystemMonitor,
     Displays,
     Calendar,
@@ -59,6 +60,12 @@ impl PopupAnchorService {
             PopupSurfaceKind::AudioRoutes => PopupSurfacePlan {
                 width: 460,
                 height: 520,
+                anchor: Anchor::TOP | Anchor::RIGHT,
+                margin: (self.bar_height, 8, 0, 0),
+            },
+            PopupSurfaceKind::BluetoothDevices => PopupSurfacePlan {
+                width: 460,
+                height: 560,
                 anchor: Anchor::TOP | Anchor::RIGHT,
                 margin: (self.bar_height, 8, 0, 0),
             },
@@ -135,6 +142,15 @@ mod tests {
         let plan = service.plan(PopupSurfaceKind::AudioRoutes, None, None);
         assert_eq!(plan.width, 460);
         assert_eq!(plan.height, 520);
+        assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
+    }
+
+    #[test]
+    fn bluetooth_devices_plan_uses_dedicated_surface_size() {
+        let service = PopupAnchorService::new(24);
+        let plan = service.plan(PopupSurfaceKind::BluetoothDevices, None, None);
+        assert_eq!(plan.width, 460);
+        assert_eq!(plan.height, 560);
         assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
     }
 }
