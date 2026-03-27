@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.5] - 2026-03-27
+
+### Changed
+- Added `scripts/perf-smoke.sh` as the first perf-tooling slice after the local deployment workflow:
+  - launches `target/release/thinkpadbar` by default or uses `--installed`;
+  - can measure an already-running PID with `--pid`;
+  - reuses `scripts/runtime-metrics.sh` to collect CSV samples;
+  - fails on simple max RSS / average CPU / max thread thresholds;
+  - supports `--dry-run` for shell smoke validation.
+- Documented the new perf smoke workflow in `README.md` and `docs/validation/runtime-metrics.md`.
+
+### Quality
+- Added shell smoke coverage via `bash -n scripts/perf-smoke.sh` and dry-run validation for both default and `--installed` flows.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.4] - 2026-03-27
 
 ### Changed

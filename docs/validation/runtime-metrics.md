@@ -31,6 +31,39 @@ for `thinkpadbar` (or any process name/PID) on Linux.
 ./scripts/runtime-metrics.sh --duration 120 --interval 2 --output /tmp/thinkpadbar-load.csv
 ```
 
+## Perf Smoke
+
+For a quick pass/fail check instead of manual CSV inspection, use:
+
+```bash
+./scripts/perf-smoke.sh
+```
+
+This script can:
+- launch `target/release/thinkpadbar` automatically, or use `--installed`;
+- measure an existing PID with `--pid`;
+- validate simple thresholds for max RSS, average CPU, and max thread count;
+- reuse `scripts/runtime-metrics.sh` for CSV generation.
+
+Examples:
+
+```bash
+# Default smoke against target/release/thinkpadbar
+./scripts/perf-smoke.sh
+
+# Measure the installed binary from PATH
+./scripts/perf-smoke.sh --installed
+
+# Use stricter limits for a regression check
+./scripts/perf-smoke.sh --duration 60 --max-rss-kb 70000 --max-cpu-avg 4 --max-threads 32
+
+# Measure an already-running ThinkPadBar instance
+./scripts/perf-smoke.sh --pid 1576 --duration 60 --output /tmp/thinkpadbar-smoke.csv
+
+# Preview the exact commands
+./scripts/perf-smoke.sh --dry-run
+```
+
 ## Interpreting Results
 - Focus on `CPU avg/min/max` and `RSS avg/min/max` deltas between idle/load runs.
 - Rising RSS across repeated idle runs indicates potential retention/leak behavior.

@@ -65,6 +65,27 @@ Examples:
 
 Detailed notes: `docs/validation/runtime-metrics.md`.
 
+## 🧪 Perf Smoke
+
+You can run a repeatable runtime smoke check with simple RSS/CPU/thread limits:
+
+```bash
+./scripts/perf-smoke.sh
+```
+
+Useful variants:
+
+```bash
+# Measure the installed binary from PATH
+./scripts/perf-smoke.sh --installed
+
+# Tighten thresholds and sample longer
+./scripts/perf-smoke.sh --duration 60 --max-rss-kb 70000 --max-cpu-avg 4 --max-threads 32
+
+# Preview the exact commands without starting the app
+./scripts/perf-smoke.sh --dry-run
+```
+
 ## ⚙️ Performance Tuning
 
 You can tune periodic refresh intervals in `~/.config/thinkpadbar/config.toml`:
