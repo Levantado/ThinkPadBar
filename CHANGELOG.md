@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.20] - 2026-03-27
+
+### Changed
+- Started `Variant A` domain-first UX rollout without deleting legacy flows yet:
+  - introduced dedicated popup domains: `Stats`, `Power`, `Controls`, `Connectivity`;
+  - kept existing detail surfaces (`Audio Routes`, `Bluetooth Devices`, `Displays`, `System Info`) intact.
+- Reworked bar entry points from mixed pills to domain pills:
+  - `Stats` pill now surfaces thermal + fan summary;
+  - `Power` pill now surfaces battery + active power profile + inhibitor badge;
+  - `Controls` pill now focuses on brightness + audio state;
+  - `Connectivity` pill now focuses on Wi-Fi + Bluetooth state.
+- Updated popup navigation and refresh routing to match the new domains:
+  - `Audio Routes` now returns to `Controls`;
+  - `Bluetooth Devices` now returns to `Connectivity`;
+  - opening `Controls` requests `AudioMic` refresh,
+  - opening `Power` requests `BatteryPower` refresh,
+  - opening `Connectivity` requests `Bluetooth` refresh.
+- Added dedicated popup sizing plans for new domains in `PopupAnchorService`:
+  - `Stats` (compact),
+  - `Power` (tall),
+  - `Controls` (medium),
+  - `Connectivity` (tall).
+
+### Quality
+- Added regression coverage for:
+  - new popup sizing plans in `popup_anchor`;
+  - new popup action mapping (`Displays -> Controls`);
+  - domain refresh routing on popup open (`Controls`, `Power`, `Connectivity`).
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.19] - 2026-03-27
 
 ### Changed

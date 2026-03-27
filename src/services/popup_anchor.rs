@@ -3,6 +3,10 @@ use iced::platform_specific::shell::commands::layer_surface::Anchor;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopupSurfaceKind {
     Hidden,
+    Stats,
+    Power,
+    Controls,
+    Connectivity,
     ControlCenter,
     AudioRoutes,
     BluetoothDevices,
@@ -48,6 +52,30 @@ impl PopupAnchorService {
             PopupSurfaceKind::Calendar => PopupSurfacePlan {
                 width: 400,
                 height: 420,
+                anchor: Anchor::TOP | Anchor::RIGHT,
+                margin: (self.bar_height, 8, 0, 0),
+            },
+            PopupSurfaceKind::Stats => PopupSurfacePlan {
+                width: 420,
+                height: 420,
+                anchor: Anchor::TOP | Anchor::RIGHT,
+                margin: (self.bar_height, 8, 0, 0),
+            },
+            PopupSurfaceKind::Power => PopupSurfacePlan {
+                width: 460,
+                height: 680,
+                anchor: Anchor::TOP | Anchor::RIGHT,
+                margin: (self.bar_height, 8, 0, 0),
+            },
+            PopupSurfaceKind::Controls => PopupSurfacePlan {
+                width: 440,
+                height: 520,
+                anchor: Anchor::TOP | Anchor::RIGHT,
+                margin: (self.bar_height, 8, 0, 0),
+            },
+            PopupSurfaceKind::Connectivity => PopupSurfacePlan {
+                width: 460,
+                height: 620,
                 anchor: Anchor::TOP | Anchor::RIGHT,
                 margin: (self.bar_height, 8, 0, 0),
             },
@@ -133,6 +161,42 @@ mod tests {
         let plan = service.plan(PopupSurfaceKind::Displays, None, None);
         assert_eq!(plan.width, 460);
         assert_eq!(plan.height, 520);
+        assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
+    }
+
+    #[test]
+    fn stats_plan_uses_compact_surface_size() {
+        let service = PopupAnchorService::new(24);
+        let plan = service.plan(PopupSurfaceKind::Stats, None, None);
+        assert_eq!(plan.width, 420);
+        assert_eq!(plan.height, 420);
+        assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
+    }
+
+    #[test]
+    fn power_plan_uses_tall_surface_size() {
+        let service = PopupAnchorService::new(24);
+        let plan = service.plan(PopupSurfaceKind::Power, None, None);
+        assert_eq!(plan.width, 460);
+        assert_eq!(plan.height, 680);
+        assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
+    }
+
+    #[test]
+    fn controls_plan_uses_medium_surface_size() {
+        let service = PopupAnchorService::new(24);
+        let plan = service.plan(PopupSurfaceKind::Controls, None, None);
+        assert_eq!(plan.width, 440);
+        assert_eq!(plan.height, 520);
+        assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
+    }
+
+    #[test]
+    fn connectivity_plan_uses_tall_surface_size() {
+        let service = PopupAnchorService::new(24);
+        let plan = service.plan(PopupSurfaceKind::Connectivity, None, None);
+        assert_eq!(plan.width, 460);
+        assert_eq!(plan.height, 620);
         assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
     }
 
