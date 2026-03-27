@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.9] - 2026-03-27
+
+### Changed
+- Deepened the `ThinkPad product depth` track in the control-center popup:
+  - added a new `Audio & Devices` surface that exposes daily-use speaker, microphone, and Bluetooth adapter state as compact cards instead of forcing everything into top-row toggles;
+  - added direct action buttons for output mute, microphone mute, and launching Overskride from the same surface.
+- Made the `Displays` popup easier to scan:
+  - replaced plain per-output detail strings with output cards that emphasize status through badges (`INTERNAL/EXTERNAL`, resolution, refresh, scale);
+  - kept the existing hotplug-aware summary rows and quick navigation actions while making per-output state visually denser and faster to parse.
+- Removed the now-redundant standalone `Overskride` button row from the control-center popup after folding that action into the new device surface.
+
+### Quality
+- Added regression coverage for:
+  - control-center audio/microphone/Bluetooth device summaries;
+  - display popup output cards and status badges.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.8] - 2026-03-27
 
 ### Changed

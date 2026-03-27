@@ -31,6 +31,13 @@ pub enum PowerAction {
     Logout,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DisplayPopupOutputCard {
+    label: String,
+    summary: String,
+    badges: Vec<String>,
+}
+
 pub struct ThinkPadBar {
     config: crate::config::Config,
     dbus_conn: Option<zbus::Connection>,
@@ -592,6 +599,32 @@ impl ThinkPadBar {
             .collect()
     }
 
+    fn control_center_device_items(
+        controls: &crate::services::controls::ControlsSnapshot,
+    ) -> Vec<(&'static str, &'static str, String)> {
+        let output_summary = if controls.audio.muted {
+            "Muted".to_string()
+        } else {
+            format!("{}% output", controls.audio.volume)
+        };
+        let mic_summary = if controls.mic.muted {
+            "Muted".to_string()
+        } else {
+            format!("{}% input", controls.mic.volume)
+        };
+        let bluetooth_summary = if controls.bluetooth_enabled {
+            "Adapter enabled".to_string()
+        } else {
+            "Adapter disabled".to_string()
+        };
+
+        vec![
+            ("", "Speakers", output_summary),
+            ("", "Microphone", mic_summary),
+            ("󰂯", "Bluetooth", bluetooth_summary),
+        ]
+    }
+
     fn display_popup_actions() -> Vec<(&'static str, &'static str, Popup)> {
         vec![
             ("󰍹", "Controls", Popup::ControlCenter),
@@ -623,49 +656,53 @@ impl ThinkPadBar {
         ]
     }
 
-    fn display_popup_output_rows(
+    fn display_popup_output_cards(
         wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
-    ) -> Vec<(String, String)> {
+    ) -> Vec<DisplayPopupOutputCard> {
         if wayland_snapshot.outputs.is_empty() {
-            return vec![(
-                if wayland_snapshot.available {
+            return vec![DisplayPopupOutputCard {
+                label: if wayland_snapshot.available {
                     "No outputs".to_string()
                 } else {
                     "Wayland unavailable".to_string()
                 },
-                wayland_snapshot
+                summary: wayland_snapshot
                     .unavailable_reason
                     .clone()
                     .unwrap_or_else(|| "No wl_output state available".to_string()),
-            )];
+                badges: Vec::new(),
+            }];
         }
 
         wayland_snapshot
             .outputs
             .iter()
             .map(|output| {
-                let mut detail_parts = Vec::new();
+                let mut badges = vec![if output.is_internal() {
+                    "INTERNAL".to_string()
+                } else {
+                    "EXTERNAL".to_string()
+                }];
                 if let (Some(width), Some(height)) = (output.width, output.height) {
-                    detail_parts.push(format!("{width}x{height}"));
+                    badges.push(format!("{width}x{height}"));
                 }
                 if let Some(refresh_mhz) = output.refresh_mhz {
                     let refresh_hz = refresh_mhz as f64 / 1000.0;
                     if (refresh_hz.fract() - 0.0).abs() < f64::EPSILON {
-                        detail_parts.push(format!("{refresh_hz:.0}Hz"));
+                        badges.push(format!("{refresh_hz:.0}Hz"));
                     } else {
-                        detail_parts.push(format!("{refresh_hz:.1}Hz"));
+                        badges.push(format!("{refresh_hz:.1}Hz"));
                     }
                 }
                 if let Some(scale_factor) = output.scale_factor.filter(|scale| *scale > 0) {
-                    detail_parts.push(format!("{scale_factor}x scale"));
+                    badges.push(format!("{scale_factor}x SCALE"));
                 }
-                detail_parts.push(if output.is_internal() {
-                    "internal".to_string()
-                } else {
-                    "external".to_string()
-                });
 
-                (output.label(), detail_parts.join(" · "))
+                DisplayPopupOutputCard {
+                    label: output.label(),
+                    summary: output.detail_label(),
+                    badges,
+                }
             })
             .collect()
     }
@@ -1973,7 +2010,7 @@ impl ThinkPadBar {
 
         if self.popup == Popup::Displays {
             let summary_rows = Self::display_summary_rows(wayland_snapshot);
-            let output_rows = Self::display_popup_output_rows(wayland_snapshot);
+            let output_cards = Self::display_popup_output_cards(wayland_snapshot);
             let popup_actions = Self::display_popup_actions();
 
             let item = |label: &str, val: String| -> Element<'_, Message, Theme, iced::Renderer> {
@@ -2019,14 +2056,40 @@ impl ThinkPadBar {
                 .into()
             };
 
+            let badge = |label: String| {
+                container(text(label).size(10))
+                    .padding(Padding::from([4, 8]))
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb8(
+                            0x41, 0x48, 0x68,
+                        ))),
+                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                        border: iced::Border {
+                            radius: 999.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+            };
+
             let mut outputs_col = Column::new().spacing(10);
-            for (label, detail) in output_rows {
+            for card in output_cards {
+                let mut badges_row = Row::new().spacing(6);
+                for badge_label in card.badges {
+                    badges_row = badges_row.push(badge(badge_label));
+                }
                 outputs_col = outputs_col.push(
-                    container(Column::new().spacing(4).push(text(label).size(14)).push(
-                        text(detail).size(12).style(|_| iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
-                        }),
-                    ))
+                    container(
+                        Column::new()
+                            .spacing(8)
+                            .push(text(card.label).size(14))
+                            .push(badges_row)
+                            .push(text(card.summary).size(12).style(|_| {
+                                iced::widget::text::Style {
+                                    color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                                }
+                            })),
+                    )
                     .padding(12)
                     .style(|_| container::Style {
                         background: Some(iced::Background::Color(Color::from_rgb8(
@@ -3061,26 +3124,129 @@ impl ThinkPadBar {
                     ..Default::default()
                 })
         };
-        let bt_app_btn = button(
-            Row::new()
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .push(text("󰳋").size(16))
-                .push(text("Overskride").size(11)),
-        )
-        .width(Length::FillPortion(1))
-        .padding(Padding::from([8, 10]))
-        .on_press(Message::OpenOverskride)
-        .style(|_, _| iced::widget::button::Style {
-            background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
-            text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-            border: iced::Border {
-                radius: 12.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
+        let device_items = Self::control_center_device_items(&self.controls);
+        let device_card = {
+            let device_tile = |icon: &'static str, label: &'static str, value: String| {
+                container(
+                    Column::new()
+                        .spacing(4)
+                        .push(
+                            Row::new()
+                                .spacing(6)
+                                .align_y(Alignment::Center)
+                                .push(text(icon).size(14))
+                                .push(text(label).size(12).style(|_| iced::widget::text::Style {
+                                    color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
+                                })),
+                        )
+                        .push(text(value).size(13).style(|_| iced::widget::text::Style {
+                            color: Some(Color::from_rgb8(0xe5, 0xe9, 0xf0)),
+                        })),
+                )
+                .width(Length::Fill)
+                .padding(10)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                    border: iced::Border {
+                        radius: 10.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            };
+            let action_btn = |icon: &'static str, label: &'static str, message: Message| {
+                button(
+                    Row::new()
+                        .spacing(6)
+                        .align_y(Alignment::Center)
+                        .push(text(icon).size(14))
+                        .push(text(label).size(11)),
+                )
+                .width(Length::FillPortion(1))
+                .padding(Padding::from([8, 10]))
+                .on_press(message)
+                .style(|_, _| iced::widget::button::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
+                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                    border: iced::Border {
+                        radius: 10.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            };
 
+            container(
+                Column::new()
+                    .spacing(8)
+                    .push(
+                        Row::new()
+                            .spacing(8)
+                            .align_y(Alignment::Center)
+                            .push(text("󰕾").size(16))
+                            .push(text("Audio & Devices").size(14)),
+                    )
+                    .push(
+                        Row::new()
+                            .spacing(8)
+                            .push(device_tile(
+                                device_items[0].0,
+                                device_items[0].1,
+                                device_items[0].2.clone(),
+                            ))
+                            .push(device_tile(
+                                device_items[1].0,
+                                device_items[1].1,
+                                device_items[1].2.clone(),
+                            )),
+                    )
+                    .push(device_tile(
+                        device_items[2].0,
+                        device_items[2].1,
+                        device_items[2].2.clone(),
+                    ))
+                    .push(
+                        Row::new()
+                            .spacing(8)
+                            .push(action_btn(
+                                if self.controls.audio.muted {
+                                    "󰝟"
+                                } else {
+                                    ""
+                                },
+                                if self.controls.audio.muted {
+                                    "Unmute Output"
+                                } else {
+                                    "Mute Output"
+                                },
+                                Message::ToggleAudioMute,
+                            ))
+                            .push(action_btn(
+                                if self.controls.mic.muted {
+                                    "󰍭"
+                                } else {
+                                    ""
+                                },
+                                if self.controls.mic.muted {
+                                    "Unmute Mic"
+                                } else {
+                                    "Mute Mic"
+                                },
+                                Message::ToggleMicMute,
+                            ))
+                            .push(action_btn("󰳋", "Overskride", Message::OpenOverskride)),
+                    ),
+            )
+            .padding(16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        };
         let bat_cap = self.controls.battery.capacity;
         let bat_status = &self.controls.battery.status;
         let (bat_icon, bat_color) = if bat_status.contains("Charging") {
@@ -3264,8 +3430,8 @@ impl ThinkPadBar {
                     .push(bt_btn)
                     .push(idle_btn),
             )
-            .push(display_card)
-            .push(Row::new().spacing(16).push(bt_app_btn));
+            .push(device_card)
+            .push(display_card);
 
         if wifi_snapshot.menu_open {
             let mut inner_col = Column::new().spacing(8);
@@ -4039,6 +4205,52 @@ mod tests {
     }
 
     #[test]
+    fn control_center_device_items_surface_audio_mic_and_bluetooth_state() {
+        let items = ThinkPadBar::control_center_device_items(
+            &crate::services::controls::ControlsSnapshot {
+                brightness: crate::services::controls::BrightnessSnapshot::from_percent(42),
+                audio: crate::services::controls::AudioInfo {
+                    volume: 73,
+                    muted: false,
+                },
+                mic: crate::services::controls::MicInfo {
+                    volume: 18,
+                    muted: true,
+                },
+                fan: crate::services::controls::FanInfo {
+                    speed: "---".to_string(),
+                    level: "auto".to_string(),
+                },
+                battery: crate::services::controls::BatteryInfo {
+                    capacity: 63,
+                    status: "Not charging".to_string(),
+                    time_remaining: None,
+                    ac_online: Some(true),
+                    health_percent: None,
+                    power_rate_mw: None,
+                    pack_voltage_mv: None,
+                    cycle_count: None,
+                    full_charge_mwh: None,
+                    design_capacity_mwh: None,
+                    charge_start_threshold: None,
+                    charge_end_threshold: None,
+                },
+                power_profile: "balanced".to_string(),
+                bluetooth_enabled: true,
+            },
+        );
+
+        assert_eq!(
+            items,
+            vec![
+                ("", "Speakers", "73% output".to_string()),
+                ("", "Microphone", "Muted".to_string()),
+                ("󰂯", "Bluetooth", "Adapter enabled".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn display_summary_rows_include_mode_and_hotplug_aware_state() {
         let rows = ThinkPadBar::display_summary_rows(
             &crate::services::wayland_runtime::WaylandRuntimeSnapshot {
@@ -4083,8 +4295,8 @@ mod tests {
     }
 
     #[test]
-    fn display_popup_output_rows_include_resolution_scale_and_classification() {
-        let rows = ThinkPadBar::display_popup_output_rows(
+    fn display_popup_output_cards_include_status_badges() {
+        let cards = ThinkPadBar::display_popup_output_cards(
             &crate::services::wayland_runtime::WaylandRuntimeSnapshot {
                 available: true,
                 outputs: vec![
@@ -4113,10 +4325,28 @@ mod tests {
             },
         );
 
-        assert_eq!(rows[0].0, "eDP-1");
-        assert_eq!(rows[0].1, "1920x1200 · 60Hz · 2x scale · internal");
-        assert_eq!(rows[1].0, "DP-2");
-        assert_eq!(rows[1].1, "2560x1440 · 144Hz · 1x scale · external");
+        assert_eq!(cards[0].label, "eDP-1");
+        assert_eq!(cards[0].summary, "eDP-1 1920x1200 60Hz 2x");
+        assert_eq!(
+            cards[0].badges,
+            vec![
+                "INTERNAL".to_string(),
+                "1920x1200".to_string(),
+                "60Hz".to_string(),
+                "2x SCALE".to_string(),
+            ]
+        );
+
+        assert_eq!(cards[1].label, "DP-2");
+        assert_eq!(
+            cards[1].badges,
+            vec![
+                "EXTERNAL".to_string(),
+                "2560x1440".to_string(),
+                "144Hz".to_string(),
+                "1x SCALE".to_string(),
+            ]
+        );
     }
 
     #[test]
