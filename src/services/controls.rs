@@ -270,6 +270,7 @@ pub enum ControlsCommand {
     SetPowerProfile(String),
     ApplyBatteryThresholdPreset(BatteryThresholdPreset),
     ToggleBluetooth(bool),
+    ScanBluetoothDevices,
     ConnectBluetoothDevice(String),
     DisconnectBluetoothDevice(String),
     PairBluetoothDevice(String),
@@ -418,6 +419,7 @@ impl ControlsService {
             ControlsCommand::ToggleBluetooth(enabled) => {
                 self.snapshot.bluetooth_enabled = *enabled;
             }
+            ControlsCommand::ScanBluetoothDevices => {}
             ControlsCommand::ConnectBluetoothDevice(address) => {
                 update_bluetooth_device_connection_state(
                     &mut self.snapshot.bluetooth_devices,
@@ -542,6 +544,10 @@ impl ControlsService {
             }
             ControlsCommand::ToggleBluetooth(enabled) => {
                 let _ = self.bluetooth_backend.toggle(enabled);
+                ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
+            }
+            ControlsCommand::ScanBluetoothDevices => {
+                let _ = self.bluetooth_backend.scan_devices().await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
             }
             ControlsCommand::ConnectBluetoothDevice(address) => {
@@ -750,6 +756,10 @@ impl crate::services::controls_backends::BluetoothBackend for NoopBluetoothBacke
 
     fn toggle(&self, _enable: bool) -> bool {
         true
+    }
+
+    fn scan_devices(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        Box::pin(async { true })
     }
 
     fn connect_device(
@@ -975,6 +985,14 @@ mod tests {
         fn toggle(&self, enable: bool) -> bool {
             self.toggle_calls.lock().unwrap().push(enable);
             true
+        }
+
+        fn scan_devices(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+            let command_calls = self.command_calls.clone();
+            Box::pin(async move {
+                command_calls.lock().unwrap().push("scan".to_string());
+                true
+            })
         }
 
         fn connect_device(
@@ -1279,6 +1297,7 @@ mod tests {
         service.preview_command(&ControlsCommand::SetAudioOutputRoute("77".to_string()));
         service.preview_command(&ControlsCommand::SetBrightness(64));
         service.preview_command(&ControlsCommand::SetAudioInputRoute("80".to_string()));
+        service.preview_command(&ControlsCommand::ScanBluetoothDevices);
         service.preview_command(&ControlsCommand::ConnectBluetoothDevice(
             "AA:BB:CC:DD:EE:FF".to_string(),
         ));
@@ -1447,6 +1466,7 @@ mod tests {
         let _ = service
             .execute(ControlsCommand::ToggleBluetooth(false))
             .await;
+        let _ = service.execute(ControlsCommand::ScanBluetoothDevices).await;
         let _ = service
             .execute(ControlsCommand::ConnectBluetoothDevice(
                 "AA:BB:CC:DD:EE:FF".to_string(),
@@ -1494,6 +1514,7 @@ mod tests {
         assert_eq!(
             bluetooth_command_calls.lock().unwrap().as_slice(),
             [
+                "scan",
                 "connect:AA:BB:CC:DD:EE:FF",
                 "disconnect:AA:BB:CC:DD:EE:FF",
                 "pair:AA:BB:CC:DD:EE:FF",

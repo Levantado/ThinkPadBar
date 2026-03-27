@@ -91,6 +91,19 @@ impl super::BluetoothBackend for BluetoothCtlBackend {
         false
     }
 
+    fn scan_devices(&self) -> super::BackendFuture<'_, bool> {
+        Box::pin(async move {
+            tokio::process::Command::new("bluetoothctl")
+                .args(["--timeout", "5", "scan", "on"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|status| status.success())
+                .unwrap_or(false)
+        })
+    }
+
     fn connect_device(&self, address: String) -> super::BackendFuture<'_, bool> {
         Box::pin(async move {
             tokio::process::Command::new("bluetoothctl")
@@ -254,6 +267,11 @@ pub(crate) fn parse_connected_devices(output: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
+pub(crate) fn bluetooth_scan_args() -> [&'static str; 4] {
+    ["--timeout", "5", "scan", "on"]
+}
+
 fn parse_connected_device_briefs(output: &str) -> Vec<ConnectedDeviceBrief> {
     output
         .lines()
@@ -374,8 +392,8 @@ fn normalize_audio_profile_name(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_bluetooth_device_info, parse_connected_device_briefs, parse_connected_devices,
-        parse_powered_from_bluetoothctl,
+        bluetooth_scan_args, parse_bluetooth_device_info, parse_connected_device_briefs,
+        parse_connected_devices, parse_powered_from_bluetoothctl,
     };
 
     #[test]
@@ -426,5 +444,10 @@ mod tests {
             info.audio_profiles,
             vec!["A2DP".to_string(), "HFP".to_string(), "AVRCP".to_string()]
         );
+    }
+
+    #[test]
+    fn bluetooth_scan_args_use_bounded_timeout_window() {
+        assert_eq!(bluetooth_scan_args(), ["--timeout", "5", "scan", "on"]);
     }
 }

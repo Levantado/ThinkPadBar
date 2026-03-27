@@ -64,8 +64,10 @@ struct BluetoothDeviceCard {
 struct AudioRoutePopupItem {
     id: String,
     label: String,
+    icon: &'static str,
     capability_label: &'static str,
     origin_label: &'static str,
+    status_label: &'static str,
     detail: String,
     is_default: bool,
     available: bool,
@@ -158,6 +160,7 @@ pub enum Message {
     ToggleBluetooth(bool),
     ConnectBluetoothDevice(String),
     DisconnectBluetoothDevice(String),
+    ScanBluetoothDevices,
     PairBluetoothDevice(String),
     TrustBluetoothDevice(String),
     RemoveBluetoothDevice(String),
@@ -766,8 +769,10 @@ impl ThinkPadBar {
             return vec![AudioRoutePopupItem {
                 id: String::new(),
                 label: unavailable_label.to_string(),
+                icon: "󰖪",
                 capability_label,
                 origin_label: "N/A",
+                status_label: "UNAVAILABLE",
                 detail: format!("{capability_label} unavailable on current runtime"),
                 is_default: false,
                 available: false,
@@ -776,16 +781,34 @@ impl ThinkPadBar {
 
         routes
             .iter()
-            .map(|route| AudioRoutePopupItem {
-                id: route.id.clone(),
-                label: route.name.clone(),
-                capability_label,
-                origin_label: route.origin.badge_label(),
-                detail: route.origin.summary_label().to_string(),
-                is_default: current == Some(route.name.as_str()),
-                available: true,
+            .map(|route| {
+                let is_default = current == Some(route.name.as_str());
+                AudioRoutePopupItem {
+                    id: route.id.clone(),
+                    label: route.name.clone(),
+                    icon: Self::audio_route_origin_icon(route.origin),
+                    capability_label,
+                    origin_label: route.origin.badge_label(),
+                    status_label: if is_default { "ACTIVE" } else { "AVAILABLE" },
+                    detail: route.origin.summary_label().to_string(),
+                    is_default,
+                    available: true,
+                }
             })
             .collect()
+    }
+
+    fn audio_route_origin_icon(
+        origin: crate::services::controls::AudioRouteOrigin,
+    ) -> &'static str {
+        match origin {
+            crate::services::controls::AudioRouteOrigin::Bluetooth => "󰂯",
+            crate::services::controls::AudioRouteOrigin::Usb => "󰕓",
+            crate::services::controls::AudioRouteOrigin::Internal => "󰓃",
+            crate::services::controls::AudioRouteOrigin::Hdmi => "󰡁",
+            crate::services::controls::AudioRouteOrigin::Virtual => "󰕮",
+            crate::services::controls::AudioRouteOrigin::Unknown => "󰟢",
+        }
     }
 
     fn current_audio_route_summary(
@@ -1583,6 +1606,11 @@ impl ThinkPadBar {
                 self.controls_service.preview_command(&command);
                 self.controls = self.controls_service.snapshot().clone();
                 return self.execute_controls_command(command);
+            }
+            Message::ScanBluetoothDevices => {
+                return self.execute_controls_command(
+                    crate::services::controls::ControlsCommand::ScanBluetoothDevices,
+                );
             }
             Message::PairBluetoothDevice(address) => {
                 let command =
@@ -2512,6 +2540,7 @@ impl ThinkPadBar {
                             Row::new()
                                 .spacing(6)
                                 .align_y(Alignment::Center)
+                                .push(text(item.icon).size(13))
                                 .push(text(item.label.clone()).size(13))
                                 .push(route_badge(
                                     item.capability_label,
@@ -2519,24 +2548,23 @@ impl ThinkPadBar {
                                     Color::from_rgb8(0xc0, 0xca, 0xf5),
                                 ))
                                 .push(route_badge(
-                                    item.origin_label,
+                                    item.status_label,
                                     Color::from_rgb8(0x2f, 0x43, 0x52),
                                     Color::from_rgb8(0xc8, 0xdf, 0xf8),
                                 ))
-                                .push_maybe(item.is_default.then(|| {
-                                    route_badge(
-                                        "DEFAULT",
-                                        Color::from_rgb8(0x41, 0x48, 0x68),
-                                        Color::from_rgb8(0xc0, 0xca, 0xf5),
-                                    )
-                                }))
-                                .push_maybe((!item.available).then(|| {
-                                    route_badge(
-                                        "UNAVAILABLE",
-                                        Color::from_rgb8(0x53, 0x31, 0x31),
-                                        Color::from_rgb8(0xf7, 0xc0, 0xc0),
-                                    )
-                                }))
+                                .push(route_badge(
+                                    item.origin_label,
+                                    if item.available {
+                                        Color::from_rgb8(0x3a, 0x3f, 0x61)
+                                    } else {
+                                        Color::from_rgb8(0x53, 0x31, 0x31)
+                                    },
+                                    if item.available {
+                                        Color::from_rgb8(0xc0, 0xca, 0xf5)
+                                    } else {
+                                        Color::from_rgb8(0xf7, 0xc0, 0xc0)
+                                    },
+                                ))
                                 .push(Space::with_width(Length::Fill))
                                 .push_maybe((!item.id.is_empty()).then(|| {
                                     text(format!("#{}", item.id)).size(10).style(|_| {
@@ -2747,6 +2775,21 @@ impl ThinkPadBar {
                 )
                 .push(action_row)
                 .push(item("Bluetooth Adapter", adapter_summary))
+                .push(
+                    button(
+                        Row::new()
+                            .spacing(6)
+                            .align_y(Alignment::Center)
+                            .push(text("󰥔").size(14))
+                            .push(text("Scan 5s").size(12)),
+                    )
+                    .padding(Padding::from([8, 10]))
+                    .on_press_maybe(
+                        self.controls
+                            .bluetooth_enabled
+                            .then_some(Message::ScanBluetoothDevices),
+                    ),
+                )
                 .push(
                     button(
                         Row::new()
@@ -5161,8 +5204,10 @@ mod tests {
                 super::AudioRoutePopupItem {
                     id: "52".to_string(),
                     label: "Built-in Audio".to_string(),
+                    icon: "󰓃",
                     capability_label: "SINK",
                     origin_label: "INTERNAL",
+                    status_label: "AVAILABLE",
                     detail: "Internal route".to_string(),
                     is_default: false,
                     available: true,
@@ -5170,8 +5215,10 @@ mod tests {
                 super::AudioRoutePopupItem {
                     id: "77".to_string(),
                     label: "USB DAC".to_string(),
+                    icon: "󰕓",
                     capability_label: "SINK",
                     origin_label: "USB",
+                    status_label: "ACTIVE",
                     detail: "USB route".to_string(),
                     is_default: true,
                     available: true,
@@ -5190,13 +5237,34 @@ mod tests {
             vec![super::AudioRoutePopupItem {
                 id: String::new(),
                 label: "No input routes discovered".to_string(),
+                icon: "󰖪",
                 capability_label: "SOURCE",
                 origin_label: "N/A",
+                status_label: "UNAVAILABLE",
                 detail: "SOURCE unavailable on current runtime".to_string(),
                 is_default: false,
                 available: false,
             }]
         );
+    }
+
+    #[test]
+    fn audio_route_popup_items_surface_origin_icons_and_status() {
+        let items = ThinkPadBar::audio_route_popup_items(
+            &[crate::services::controls::AudioRouteInfo {
+                id: "77".to_string(),
+                name: "WH-1000XM5 a2dp-sink".to_string(),
+                origin: crate::services::controls::AudioRouteOrigin::Bluetooth,
+            }],
+            None,
+            "SINK",
+            "No output routes discovered",
+        );
+
+        assert_eq!(items[0].icon, "󰂯");
+        assert_eq!(items[0].origin_label, "BT");
+        assert_eq!(items[0].status_label, "AVAILABLE");
+        assert_eq!(items[0].detail, "Bluetooth route");
     }
 
     #[test]

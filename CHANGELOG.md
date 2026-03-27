@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.15] - 2026-03-27
+
+### Changed
+- Deepened the dedicated `Bluetooth Devices` popup from managing only already-known devices to supporting lightweight discovery flow:
+  - added a bounded `Scan 5s` action wired through a typed `ControlsCommand::ScanBluetoothDevices`;
+  - the Bluetooth backend now runs a time-bounded `bluetoothctl --timeout 5 scan on` path and refreshes the typed device summary afterward;
+  - this keeps pairing on the same dedicated surface without introducing a new background scan state machine.
+- Polished `Audio Routes` popup readability so routes are distinguishable at a glance:
+  - each route now surfaces an explicit origin icon for Bluetooth, USB, internal, HDMI/display, virtual, and unknown paths;
+  - each route row now carries an explicit status label (`ACTIVE`, `AVAILABLE`, `UNAVAILABLE`) instead of relying only on the old default/unavailable badges;
+  - route summaries remain typed and now combine with the origin icon/status model for clearer output and input selection.
+
+### Quality
+- Added regression coverage for:
+  - bounded Bluetooth scan command arguments;
+  - controls command routing for `ScanBluetoothDevices`;
+  - route origin icon/status mapping in popup item generation.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.14] - 2026-03-27
 
 ### Changed
