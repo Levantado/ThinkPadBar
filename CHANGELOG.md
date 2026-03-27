@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.18] - 2026-03-27
+
+### Changed
+- Polished the dedicated `Bluetooth Devices` popup into a clearer transient pairing surface:
+  - completed bounded scans now keep a short post-scan result window with explicit countdown and then automatically return to `Idle`;
+  - the status row now reflects both in-flight scan time and post-scan idle timeout instead of sticking in a completed state indefinitely.
+- Deepened `Audio Routes` runtime semantics for Bluetooth headset paths:
+  - route rows now carry explicit warning badges for Bluetooth profile trade-offs like `NO MIC` on `A2DP` media paths and `LOW FIDELITY` on `HFP/HSP` call paths;
+  - active route summaries and route-detail text now surface explicit conflict explanations instead of only raw profile/origin labels;
+  - unavailable input/output capabilities now explain Bluetooth profile-caused absence when the opposite side exposes only media or call-profile routes.
+
+### Quality
+- Added regression coverage for:
+  - completed Bluetooth scan auto-return to `Idle`;
+  - completed scan status countdown formatting;
+  - Bluetooth media/call-profile warning shaping in audio route popup items;
+  - active route summaries surfacing conflict detail.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.17] - 2026-03-27
 
 ### Changed

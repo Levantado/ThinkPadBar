@@ -70,10 +70,14 @@ struct AudioRoutePopupItem {
     origin_label: &'static str,
     profile_label: &'static str,
     status_label: &'static str,
+    warning_label: Option<&'static str>,
     detail: String,
     is_default: bool,
     available: bool,
 }
+
+const BLUETOOTH_SCAN_WINDOW_SECS: u8 = 5;
+const BLUETOOTH_SCAN_RESULT_WINDOW_SECS: u8 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum BluetoothScanState {
@@ -86,6 +90,7 @@ enum BluetoothScanState {
     Completed {
         total_devices: usize,
         newly_discovered_addresses: Vec<String>,
+        remaining_secs: u8,
     },
 }
 
@@ -779,6 +784,7 @@ impl ThinkPadBar {
 
     fn audio_route_popup_items(
         routes: &[crate::services::controls::AudioRouteInfo],
+        opposite_routes: &[crate::services::controls::AudioRouteInfo],
         current: Option<&str>,
         capability_label: &'static str,
         unavailable_label: &'static str,
@@ -792,7 +798,8 @@ impl ThinkPadBar {
                 origin_label: "N/A",
                 profile_label: "N/A",
                 status_label: "UNAVAILABLE",
-                detail: format!("{capability_label} unavailable on current runtime"),
+                warning_label: Some("WHY"),
+                detail: Self::audio_route_unavailable_detail(opposite_routes, capability_label),
                 is_default: false,
                 available: false,
             }];
@@ -810,11 +817,8 @@ impl ThinkPadBar {
                     origin_label: route.origin.badge_label(),
                     profile_label: Self::audio_route_profile_label(route),
                     status_label: if is_default { "ACTIVE" } else { "AVAILABLE" },
-                    detail: format!(
-                        "{} • {}",
-                        route.origin.summary_label(),
-                        Self::audio_route_latency_label(route)
-                    ),
+                    warning_label: Self::audio_route_warning_label(route),
+                    detail: Self::audio_route_detail(route),
                     is_default,
                     available: true,
                 }
@@ -844,14 +848,7 @@ impl ThinkPadBar {
             Some(current_name) => routes
                 .iter()
                 .find(|route| route.name == current_name)
-                .map(|route| {
-                    format!(
-                        "{} • {} • {}",
-                        route.name,
-                        Self::audio_route_profile_label(route),
-                        Self::audio_route_latency_label(route)
-                    )
-                })
+                .map(|route| format!("{} • {}", route.name, Self::audio_route_detail(route)))
                 .unwrap_or_else(|| format!("{current_name} • Active default")),
             None => empty_label.to_string(),
         }
@@ -913,6 +910,95 @@ impl ThinkPadBar {
         }
     }
 
+    fn audio_route_warning_label(
+        route: &crate::services::controls::AudioRouteInfo,
+    ) -> Option<&'static str> {
+        let lower = route.name.to_ascii_lowercase();
+        match route.origin {
+            crate::services::controls::AudioRouteOrigin::Bluetooth => {
+                if lower.contains("a2dp") {
+                    Some("NO MIC")
+                } else if lower.contains("handsfree")
+                    || lower.contains("hfp")
+                    || lower.contains("headset")
+                    || lower.contains("hsp")
+                {
+                    Some("LOW FIDELITY")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn audio_route_conflict_detail(
+        route: &crate::services::controls::AudioRouteInfo,
+    ) -> Option<&'static str> {
+        let lower = route.name.to_ascii_lowercase();
+        match route.origin {
+            crate::services::controls::AudioRouteOrigin::Bluetooth => {
+                if lower.contains("a2dp") {
+                    Some("microphone path unavailable")
+                } else if lower.contains("handsfree")
+                    || lower.contains("hfp")
+                    || lower.contains("headset")
+                    || lower.contains("hsp")
+                {
+                    Some("reduced media quality")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn audio_route_detail(route: &crate::services::controls::AudioRouteInfo) -> String {
+        let mut detail = format!(
+            "{} • {}",
+            route.origin.summary_label(),
+            Self::audio_route_latency_label(route)
+        );
+        if let Some(conflict) = Self::audio_route_conflict_detail(route) {
+            detail.push_str(" • ");
+            detail.push_str(conflict);
+        }
+        detail
+    }
+
+    fn audio_route_unavailable_detail(
+        opposite_routes: &[crate::services::controls::AudioRouteInfo],
+        capability_label: &'static str,
+    ) -> String {
+        let has_bt_media = opposite_routes.iter().any(|route| {
+            route.origin == crate::services::controls::AudioRouteOrigin::Bluetooth
+                && route.name.to_ascii_lowercase().contains("a2dp")
+        });
+        let has_bt_call = opposite_routes.iter().any(|route| {
+            route.origin == crate::services::controls::AudioRouteOrigin::Bluetooth && {
+                let lower = route.name.to_ascii_lowercase();
+                lower.contains("handsfree")
+                    || lower.contains("hfp")
+                    || lower.contains("headset")
+                    || lower.contains("hsp")
+            }
+        });
+
+        match capability_label {
+            "SOURCE" if has_bt_media => {
+                "SOURCE unavailable: Bluetooth media profile hides microphone path".to_string()
+            }
+            "SINK" if has_bt_call => {
+                "SINK unavailable: Bluetooth call profile did not expose media output".to_string()
+            }
+            _ if has_bt_media || has_bt_call => {
+                format!("{capability_label} unavailable on active Bluetooth profile")
+            }
+            _ => format!("{capability_label} unavailable on current runtime"),
+        }
+    }
+
     fn group_audio_route_popup_items_by_origin(
         items: &[AudioRoutePopupItem],
     ) -> Vec<(&'static str, Vec<AudioRoutePopupItem>)> {
@@ -943,13 +1029,16 @@ impl ThinkPadBar {
             BluetoothScanState::Completed {
                 total_devices,
                 newly_discovered_addresses,
+                remaining_secs,
             } => {
                 if newly_discovered_addresses.is_empty() {
-                    format!("{total_devices} devices known; no new devices")
+                    format!(
+                        "{total_devices} devices known; no new devices • idle in {remaining_secs}s"
+                    )
                 } else {
                     format!(
-                        "{total_devices} devices known; {} newly discovered",
-                        newly_discovered_addresses.len()
+                        "{total_devices} devices known; {} newly discovered • idle in {remaining_secs}s",
+                        newly_discovered_addresses.len(),
                     )
                 }
             }
@@ -1370,10 +1459,18 @@ impl ThinkPadBar {
         match message {
             Message::Tick(now) => {
                 self.clock = now.format("%a %d %b %H:%M").to_string();
-                if let BluetoothScanState::Scanning { remaining_secs, .. } =
-                    &mut self.bluetooth_scan_state
-                {
-                    *remaining_secs = remaining_secs.saturating_sub(1);
+                match &mut self.bluetooth_scan_state {
+                    BluetoothScanState::Scanning { remaining_secs, .. } => {
+                        *remaining_secs = remaining_secs.saturating_sub(1);
+                    }
+                    BluetoothScanState::Completed { remaining_secs, .. } => {
+                        if *remaining_secs > 1 {
+                            *remaining_secs -= 1;
+                        } else {
+                            self.bluetooth_scan_state = BluetoothScanState::Idle;
+                        }
+                    }
+                    BluetoothScanState::Idle => {}
                 }
                 self.system_info_service
                     .refresh(crate::services::system_info::SystemInfoRefreshKind::Fast);
@@ -1422,6 +1519,7 @@ impl ThinkPadBar {
                     self.bluetooth_scan_state = BluetoothScanState::Completed {
                         total_devices: self.controls.bluetooth_devices.device_details.len(),
                         newly_discovered_addresses,
+                        remaining_secs: BLUETOOTH_SCAN_RESULT_WINDOW_SECS,
                     };
                 }
                 self.sync_control_summary_strings();
@@ -1803,7 +1901,7 @@ impl ThinkPadBar {
                     .map(|device| device.address.clone())
                     .collect::<Vec<_>>();
                 self.bluetooth_scan_state = BluetoothScanState::Scanning {
-                    remaining_secs: 5,
+                    remaining_secs: BLUETOOTH_SCAN_WINDOW_SECS,
                     baseline_addresses,
                 };
                 return self.execute_controls_command(
@@ -2655,12 +2753,14 @@ impl ThinkPadBar {
         if self.popup == Popup::AudioRoutes {
             let output_routes = Self::audio_route_popup_items(
                 &self.controls.audio_devices.output_routes,
+                &self.controls.audio_devices.input_routes,
                 self.controls.audio_devices.output_route.as_deref(),
                 "SINK",
                 "No output routes discovered",
             );
             let input_routes = Self::audio_route_popup_items(
                 &self.controls.audio_devices.input_routes,
+                &self.controls.audio_devices.output_routes,
                 self.controls.audio_devices.input_route.as_deref(),
                 "SOURCE",
                 "No input routes discovered",
@@ -2733,7 +2833,7 @@ impl ThinkPadBar {
                     Message::SetAudioInputRoute(item.id.clone())
                 };
                 let detail = if item.is_default {
-                    "Selected default".to_string()
+                    format!("Selected default • {}", item.detail)
                 } else {
                     item.detail.clone()
                 };
@@ -2761,6 +2861,13 @@ impl ThinkPadBar {
                                     Color::from_rgb8(0x4b, 0x36, 0x59),
                                     Color::from_rgb8(0xe1, 0xcf, 0xf8),
                                 ))
+                                .push_maybe(item.warning_label.map(|warning| {
+                                    route_badge(
+                                        warning,
+                                        Color::from_rgb8(0x4f, 0x34, 0x1a),
+                                        Color::from_rgb8(0xf6, 0xd7, 0x92),
+                                    )
+                                }))
                                 .push(route_badge(
                                     item.origin_label,
                                     if item.available {
@@ -5453,6 +5560,7 @@ mod tests {
                     origin: crate::services::controls::AudioRouteOrigin::Usb,
                 },
             ],
+            &[],
             Some("USB DAC"),
             "SINK",
             "No output routes discovered",
@@ -5469,6 +5577,7 @@ mod tests {
                     origin_label: "INTERNAL",
                     profile_label: "ANALOG",
                     status_label: "AVAILABLE",
+                    warning_label: None,
                     detail: "Internal route • Integrated device path".to_string(),
                     is_default: false,
                     available: true,
@@ -5481,6 +5590,7 @@ mod tests {
                     origin_label: "USB",
                     profile_label: "USB",
                     status_label: "ACTIVE",
+                    warning_label: None,
                     detail: "USB route • Low-latency external path".to_string(),
                     is_default: true,
                     available: true,
@@ -5491,8 +5601,17 @@ mod tests {
 
     #[test]
     fn audio_route_popup_items_surface_unavailable_capability() {
-        let items =
-            ThinkPadBar::audio_route_popup_items(&[], None, "SOURCE", "No input routes discovered");
+        let items = ThinkPadBar::audio_route_popup_items(
+            &[],
+            &[crate::services::controls::AudioRouteInfo {
+                id: "77".to_string(),
+                name: "WH-1000XM5 a2dp-sink".to_string(),
+                origin: crate::services::controls::AudioRouteOrigin::Bluetooth,
+            }],
+            None,
+            "SOURCE",
+            "No input routes discovered",
+        );
 
         assert_eq!(
             items,
@@ -5504,7 +5623,9 @@ mod tests {
                 origin_label: "N/A",
                 profile_label: "N/A",
                 status_label: "UNAVAILABLE",
-                detail: "SOURCE unavailable on current runtime".to_string(),
+                warning_label: Some("WHY"),
+                detail: "SOURCE unavailable: Bluetooth media profile hides microphone path"
+                    .to_string(),
                 is_default: false,
                 available: false,
             }]
@@ -5519,6 +5640,7 @@ mod tests {
                 name: "WH-1000XM5 a2dp-sink".to_string(),
                 origin: crate::services::controls::AudioRouteOrigin::Bluetooth,
             }],
+            &[],
             None,
             "SINK",
             "No output routes discovered",
@@ -5528,9 +5650,32 @@ mod tests {
         assert_eq!(items[0].origin_label, "BT");
         assert_eq!(items[0].profile_label, "A2DP");
         assert_eq!(items[0].status_label, "AVAILABLE");
+        assert_eq!(items[0].warning_label, Some("NO MIC"));
         assert_eq!(
             items[0].detail,
-            "Bluetooth route • Higher-latency media path"
+            "Bluetooth route • Higher-latency media path • microphone path unavailable"
+        );
+    }
+
+    #[test]
+    fn audio_route_popup_items_surface_call_profile_conflict() {
+        let items = ThinkPadBar::audio_route_popup_items(
+            &[crate::services::controls::AudioRouteInfo {
+                id: "80".to_string(),
+                name: "WH-1000XM5 handsfree-head-unit".to_string(),
+                origin: crate::services::controls::AudioRouteOrigin::Bluetooth,
+            }],
+            &[],
+            Some("WH-1000XM5 handsfree-head-unit"),
+            "SOURCE",
+            "No input routes discovered",
+        );
+
+        assert_eq!(items[0].profile_label, "HFP");
+        assert_eq!(items[0].warning_label, Some("LOW FIDELITY"));
+        assert_eq!(
+            items[0].detail,
+            "Bluetooth route • Low-latency call path • reduced media quality"
         );
     }
 
@@ -5545,6 +5690,7 @@ mod tests {
                 origin_label: "BT",
                 profile_label: "BT",
                 status_label: "ACTIVE",
+                warning_label: None,
                 detail: "Bluetooth route".to_string(),
                 is_default: true,
                 available: true,
@@ -5557,6 +5703,7 @@ mod tests {
                 origin_label: "BT",
                 profile_label: "BT",
                 status_label: "AVAILABLE",
+                warning_label: None,
                 detail: "Bluetooth route".to_string(),
                 is_default: false,
                 available: true,
@@ -5569,6 +5716,7 @@ mod tests {
                 origin_label: "USB",
                 profile_label: "USB",
                 status_label: "AVAILABLE",
+                warning_label: None,
                 detail: "USB route".to_string(),
                 is_default: false,
                 available: true,
@@ -5604,7 +5752,7 @@ mod tests {
                 Some("WH-1000XM5"),
                 "No output route selected"
             ),
-            "WH-1000XM5 • BT • Wireless path"
+            "WH-1000XM5 • Bluetooth route • Wireless path"
         );
         assert_eq!(
             ThinkPadBar::current_audio_route_summary(&routes, None, "No output route selected"),
@@ -5883,6 +6031,7 @@ mod tests {
             super::BluetoothScanState::Completed {
                 total_devices: 2,
                 newly_discovered_addresses: vec!["11:22:33:44:55:66".to_string()],
+                remaining_secs: super::BLUETOOTH_SCAN_RESULT_WINDOW_SECS,
             }
         );
         assert!(ThinkPadBar::bluetooth_device_is_new(
@@ -5891,7 +6040,7 @@ mod tests {
         ));
         assert_eq!(
             ThinkPadBar::bluetooth_scan_status_summary(&bar.bluetooth_scan_state),
-            "2 devices known; 1 newly discovered"
+            "2 devices known; 1 newly discovered • idle in 8s"
         );
     }
 
@@ -5899,7 +6048,7 @@ mod tests {
     fn bluetooth_scan_status_summary_counts_down_and_finishes() {
         assert_eq!(
             ThinkPadBar::bluetooth_scan_status_summary(&super::BluetoothScanState::Scanning {
-                remaining_secs: 5,
+                remaining_secs: super::BLUETOOTH_SCAN_WINDOW_SECS,
                 baseline_addresses: vec![],
             }),
             "Scanning (5s left)"
@@ -5910,6 +6059,14 @@ mod tests {
                 baseline_addresses: vec![],
             }),
             "Finishing scan..."
+        );
+        assert_eq!(
+            ThinkPadBar::bluetooth_scan_status_summary(&super::BluetoothScanState::Completed {
+                total_devices: 2,
+                newly_discovered_addresses: vec!["11:22:33:44:55:66".to_string()],
+                remaining_secs: super::BLUETOOTH_SCAN_RESULT_WINDOW_SECS,
+            }),
+            "2 devices known; 1 newly discovered • idle in 8s"
         );
     }
 
@@ -5927,8 +6084,31 @@ mod tests {
                 Some("WH-1000XM5 a2dp-sink"),
                 "No output route selected"
             ),
-            "WH-1000XM5 a2dp-sink • A2DP • Higher-latency media path"
+            "WH-1000XM5 a2dp-sink • Bluetooth route • Higher-latency media path • microphone path unavailable"
         );
+    }
+
+    #[test]
+    fn completed_bluetooth_scan_returns_to_idle_after_timeout() {
+        let mut bar = hermetic_bar();
+        bar.bluetooth_scan_state = super::BluetoothScanState::Completed {
+            total_devices: 1,
+            newly_discovered_addresses: vec!["11:22:33:44:55:66".to_string()],
+            remaining_secs: 2,
+        };
+
+        let _ = bar.update(Message::Tick(chrono::Local::now()));
+        assert_eq!(
+            bar.bluetooth_scan_state,
+            super::BluetoothScanState::Completed {
+                total_devices: 1,
+                newly_discovered_addresses: vec!["11:22:33:44:55:66".to_string()],
+                remaining_secs: 1,
+            }
+        );
+
+        let _ = bar.update(Message::Tick(chrono::Local::now()));
+        assert_eq!(bar.bluetooth_scan_state, super::BluetoothScanState::Idle);
     }
 
     #[test]
