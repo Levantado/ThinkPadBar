@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.16] - 2026-03-27
+
+### Changed
+- Deepened the dedicated `Bluetooth Devices` popup from a bare scan button to a clearer lightweight pairing flow:
+  - added a typed UI scan state with `Idle`, `Scanning`, and completed scan results;
+  - the popup now surfaces explicit `Scan Status` feedback while a bounded Bluetooth discovery run is in progress and after it completes;
+  - newly discovered device addresses are tracked across the post-scan refresh and highlighted with a `NEW` badge in the popup cards.
+- Polished `Audio Routes` popup organization and active-device clarity:
+  - route rows are now grouped by route family (`BT`, `USB`, `INTERNAL`, etc.) instead of a flat mixed list;
+  - active route summaries are now framed as `Active Output Device` / `Active Input Device`, which reads better for Bluetooth headsets vs internal speakers/microphones;
+  - route rows keep the new icon/status model and now present family grouping without adding polling or runtime overhead.
+
+### Quality
+- Added regression coverage for:
+  - route-family grouping preserving stable order;
+  - Bluetooth scan state transitions from `Scanning` to completed results;
+  - `NEW` device emphasis derived from post-scan Bluetooth refresh data.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.15] - 2026-03-27
 
 ### Changed

@@ -7,6 +7,7 @@ use iced::{
     window::Id,
     Alignment, Color, Element, Length, Padding, Task, Theme,
 };
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::time::Duration;
 use tracing::info;
@@ -73,6 +74,17 @@ struct AudioRoutePopupItem {
     available: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum BluetoothScanState {
+    #[default]
+    Idle,
+    Scanning,
+    Completed {
+        total_devices: usize,
+        newly_discovered_addresses: Vec<String>,
+    },
+}
+
 pub struct ThinkPadBar {
     config: crate::config::Config,
     dbus_conn: Option<zbus::Connection>,
@@ -93,6 +105,7 @@ pub struct ThinkPadBar {
     session_service: crate::services::session::SessionService,
     system_info_service: crate::services::system_info::SystemInfoService,
     tray_ui_service: crate::services::tray_ui::TrayUiService,
+    bluetooth_scan_state: BluetoothScanState,
     controls_coalescing: ControlsCoalescing,
     controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer<
         crate::services::controls::ControlsRefreshKind,
@@ -826,6 +839,55 @@ impl ThinkPadBar {
         }
     }
 
+    fn group_audio_route_popup_items_by_origin(
+        items: &[AudioRoutePopupItem],
+    ) -> Vec<(&'static str, Vec<AudioRoutePopupItem>)> {
+        let mut groups: Vec<(&'static str, Vec<AudioRoutePopupItem>)> = Vec::new();
+        for item in items {
+            if let Some((_, grouped_items)) = groups
+                .iter_mut()
+                .find(|(origin_label, _)| *origin_label == item.origin_label)
+            {
+                grouped_items.push(item.clone());
+            } else {
+                groups.push((item.origin_label, vec![item.clone()]));
+            }
+        }
+        groups
+    }
+
+    fn bluetooth_scan_status_summary(state: &BluetoothScanState) -> String {
+        match state {
+            BluetoothScanState::Idle => "Idle".to_string(),
+            BluetoothScanState::Scanning => "Scanning for 5 seconds".to_string(),
+            BluetoothScanState::Completed {
+                total_devices,
+                newly_discovered_addresses,
+            } => {
+                if newly_discovered_addresses.is_empty() {
+                    format!("{total_devices} devices known; no new devices")
+                } else {
+                    format!(
+                        "{total_devices} devices known; {} newly discovered",
+                        newly_discovered_addresses.len()
+                    )
+                }
+            }
+        }
+    }
+
+    fn bluetooth_device_is_new(scan_state: &BluetoothScanState, address: &str) -> bool {
+        match scan_state {
+            BluetoothScanState::Completed {
+                newly_discovered_addresses,
+                ..
+            } => newly_discovered_addresses
+                .iter()
+                .any(|candidate| candidate == address),
+            _ => false,
+        }
+    }
+
     fn audio_route_popup_actions() -> Vec<(&'static str, &'static str, Popup)> {
         vec![
             ("󰍹", "Controls", Popup::ControlCenter),
@@ -1195,6 +1257,7 @@ impl ThinkPadBar {
                 session_service,
                 system_info_service,
                 tray_ui_service,
+                bluetooth_scan_state: BluetoothScanState::default(),
                 controls_coalescing: ControlsCoalescing::default(),
                 controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(
                 ),
@@ -1242,8 +1305,32 @@ impl ThinkPadBar {
                 );
             }
             Message::ControlsRefreshed(kind, refresh) => {
+                let previous_bluetooth_devices = (kind
+                    == crate::services::controls::ControlsRefreshKind::Bluetooth)
+                    .then(|| self.controls.bluetooth_devices.device_details.clone());
                 self.controls_service.apply_refresh(*refresh);
                 self.controls = self.controls_service.snapshot().clone();
+                if kind == crate::services::controls::ControlsRefreshKind::Bluetooth
+                    && matches!(self.bluetooth_scan_state, BluetoothScanState::Scanning)
+                {
+                    let previous: HashSet<String> = previous_bluetooth_devices
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|device| device.address)
+                        .collect();
+                    let newly_discovered_addresses = self
+                        .controls
+                        .bluetooth_devices
+                        .device_details
+                        .iter()
+                        .map(|device| device.address.clone())
+                        .filter(|address| !previous.contains(address))
+                        .collect::<Vec<_>>();
+                    self.bluetooth_scan_state = BluetoothScanState::Completed {
+                        total_devices: self.controls.bluetooth_devices.device_details.len(),
+                        newly_discovered_addresses,
+                    };
+                }
                 self.sync_control_summary_strings();
                 if self.controls_refresh_coalescing.complete(&kind) {
                     return self.spawn_controls_refresh(kind);
@@ -1409,13 +1496,20 @@ impl ThinkPadBar {
                     self.tray_ui_service.close_transient_ui();
                     self.session_service.close_transient_ui();
                     self.network_service.close_transient_ui();
+                    if target == Popup::BluetoothDevices {
+                        self.bluetooth_scan_state = BluetoothScanState::Idle;
+                    }
                     if target == Popup::Calendar {
                         self.calendar_offset = 0;
                     }
                     tasks.extend(self.popup_hide_tasks());
                 } else {
                     let is_calendar = target == Popup::Calendar;
+                    let is_bluetooth = target == Popup::BluetoothDevices;
                     self.popup = target.clone();
+                    if is_bluetooth {
+                        self.bluetooth_scan_state = BluetoothScanState::Idle;
+                    }
                     if is_calendar {
                         self.calendar_offset = 0;
                     }
@@ -1608,6 +1702,7 @@ impl ThinkPadBar {
                 return self.execute_controls_command(command);
             }
             Message::ScanBluetoothDevices => {
+                self.bluetooth_scan_state = BluetoothScanState::Scanning;
                 return self.execute_controls_command(
                     crate::services::controls::ControlsCommand::ScanBluetoothDevices,
                 );
@@ -2611,8 +2706,18 @@ impl ThinkPadBar {
                         }
                     }));
                 } else {
-                    for item in items {
-                        column = column.push(route_button(item, is_output));
+                    for (origin_label, grouped_items) in
+                        Self::group_audio_route_popup_items_by_origin(&items)
+                    {
+                        column =
+                            column.push(text(format!("{origin_label} family")).size(11).style(
+                                |_| iced::widget::text::Style {
+                                    color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
+                                },
+                            ));
+                        for item in grouped_items {
+                            column = column.push(route_button(item, is_output));
+                        }
                     }
                 }
 
@@ -2641,7 +2746,7 @@ impl ThinkPadBar {
                 )
                 .push(action_row)
                 .push(summary_item(
-                    "Current Output",
+                    "Active Output Device",
                     Self::current_audio_route_summary(
                         &self.controls.audio_devices.output_routes,
                         self.controls.audio_devices.output_route.as_deref(),
@@ -2649,7 +2754,7 @@ impl ThinkPadBar {
                     ),
                 ))
                 .push(summary_item(
-                    "Current Input",
+                    "Active Input Device",
                     Self::current_audio_route_summary(
                         &self.controls.audio_devices.input_routes,
                         self.controls.audio_devices.input_route.as_deref(),
@@ -2775,6 +2880,10 @@ impl ThinkPadBar {
                 )
                 .push(action_row)
                 .push(item("Bluetooth Adapter", adapter_summary))
+                .push(item(
+                    "Scan Status",
+                    Self::bluetooth_scan_status_summary(&self.bluetooth_scan_state),
+                ))
                 .push(
                     button(
                         Row::new()
@@ -2826,6 +2935,9 @@ impl ThinkPadBar {
                     let mut badges_row = Row::new().spacing(6);
                     for badge_label in device.badges {
                         badges_row = badges_row.push(badge(badge_label));
+                    }
+                    if Self::bluetooth_device_is_new(&self.bluetooth_scan_state, &device.address) {
+                        badges_row = badges_row.push(badge("NEW".to_string()));
                     }
 
                     let connect_action = if device.connected {
@@ -4637,6 +4749,7 @@ mod tests {
                 crate::modules::system::SysData::default(),
             ),
             tray_ui_service: crate::services::tray_ui::TrayUiService::new(),
+            bluetooth_scan_state: super::BluetoothScanState::default(),
             controls_coalescing: ControlsCoalescing::default(),
             controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(),
             slow_tick_coalescing: crate::services::coalescing::ValueCoalescer::default(),
@@ -5268,6 +5381,52 @@ mod tests {
     }
 
     #[test]
+    fn route_popup_items_group_by_origin_family_in_stable_order() {
+        let items = vec![
+            super::AudioRoutePopupItem {
+                id: "1".to_string(),
+                label: "WH-1000XM5".to_string(),
+                icon: "󰂯",
+                capability_label: "SINK",
+                origin_label: "BT",
+                status_label: "ACTIVE",
+                detail: "Bluetooth route".to_string(),
+                is_default: true,
+                available: true,
+            },
+            super::AudioRoutePopupItem {
+                id: "2".to_string(),
+                label: "MX Keys".to_string(),
+                icon: "󰂯",
+                capability_label: "SOURCE",
+                origin_label: "BT",
+                status_label: "AVAILABLE",
+                detail: "Bluetooth route".to_string(),
+                is_default: false,
+                available: true,
+            },
+            super::AudioRoutePopupItem {
+                id: "3".to_string(),
+                label: "USB DAC".to_string(),
+                icon: "󰕓",
+                capability_label: "SINK",
+                origin_label: "USB",
+                status_label: "AVAILABLE",
+                detail: "USB route".to_string(),
+                is_default: false,
+                available: true,
+            },
+        ];
+
+        let groups = ThinkPadBar::group_audio_route_popup_items_by_origin(&items);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "BT");
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].0, "USB");
+        assert_eq!(groups[1].1.len(), 1);
+    }
+
+    #[test]
     fn current_audio_route_summary_prefers_route_origin_when_known() {
         let routes = vec![
             crate::services::controls::AudioRouteInfo {
@@ -5500,6 +5659,80 @@ mod tests {
         assert!(bar
             .controls_refresh_coalescing
             .is_inflight(&crate::services::controls::ControlsRefreshKind::Bluetooth));
+    }
+
+    #[test]
+    fn bluetooth_scan_state_transitions_to_completed_and_marks_new_devices() {
+        let mut bar = hermetic_bar();
+        bar.controls.bluetooth_devices = crate::services::controls::BluetoothDeviceSummary {
+            connected_devices: vec!["WH-1000XM5".to_string()],
+            device_details: vec![crate::services::controls::BluetoothConnectedDevice {
+                address: "AA:BB:CC:DD:EE:FF".to_string(),
+                name: "WH-1000XM5".to_string(),
+                connected: true,
+                paired: true,
+                trusted: true,
+                battery_percent: Some(90),
+                audio_profiles: vec!["A2DP".to_string()],
+            }],
+        };
+        bar.controls_service = crate::services::controls::ControlsService::with_snapshot_for_tests(
+            bar.controls.clone(),
+        );
+
+        let _ = bar.update(Message::ScanBluetoothDevices);
+        assert_eq!(
+            bar.bluetooth_scan_state,
+            super::BluetoothScanState::Scanning
+        );
+
+        let refresh = crate::services::controls::ControlsRefresh {
+            bluetooth_devices: Some(crate::services::controls::BluetoothDeviceSummary {
+                connected_devices: vec!["WH-1000XM5".to_string()],
+                device_details: vec![
+                    crate::services::controls::BluetoothConnectedDevice {
+                        address: "AA:BB:CC:DD:EE:FF".to_string(),
+                        name: "WH-1000XM5".to_string(),
+                        connected: true,
+                        paired: true,
+                        trusted: true,
+                        battery_percent: Some(90),
+                        audio_profiles: vec!["A2DP".to_string()],
+                    },
+                    crate::services::controls::BluetoothConnectedDevice {
+                        address: "11:22:33:44:55:66".to_string(),
+                        name: "New Keyboard".to_string(),
+                        connected: false,
+                        paired: false,
+                        trusted: false,
+                        battery_percent: None,
+                        audio_profiles: vec![],
+                    },
+                ],
+            }),
+            ..crate::services::controls::ControlsRefresh::default()
+        };
+
+        let _ = bar.update(Message::ControlsRefreshed(
+            crate::services::controls::ControlsRefreshKind::Bluetooth,
+            Box::new(refresh),
+        ));
+
+        assert_eq!(
+            bar.bluetooth_scan_state,
+            super::BluetoothScanState::Completed {
+                total_devices: 2,
+                newly_discovered_addresses: vec!["11:22:33:44:55:66".to_string()],
+            }
+        );
+        assert!(ThinkPadBar::bluetooth_device_is_new(
+            &bar.bluetooth_scan_state,
+            "11:22:33:44:55:66"
+        ));
+        assert_eq!(
+            ThinkPadBar::bluetooth_scan_status_summary(&bar.bluetooth_scan_state),
+            "2 devices known; 1 newly discovered"
+        );
     }
 
     #[test]
