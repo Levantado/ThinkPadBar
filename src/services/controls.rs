@@ -28,6 +28,7 @@ pub struct AudioDeviceSummary {
 pub struct BluetoothConnectedDevice {
     pub address: String,
     pub name: String,
+    pub connected: bool,
     pub battery_percent: Option<u8>,
     pub audio_profiles: Vec<String>,
 }
@@ -222,15 +223,17 @@ pub struct ControlsRefresh {
 pub enum ControlsCommand {
     SetVolume(u32),
     ToggleAudioMute,
-    CycleAudioOutputRoute,
+    SetAudioOutputRoute(String),
     SetMicVolume(u32),
     ToggleMicMute,
-    CycleAudioInputRoute,
+    SetAudioInputRoute(String),
     SetBrightness(u32),
     SetFanLevel(String),
     SetPowerProfile(String),
     ApplyBatteryThresholdPreset(BatteryThresholdPreset),
     ToggleBluetooth(bool),
+    ConnectBluetoothDevice(String),
+    DisconnectBluetoothDevice(String),
     OpenOverskride,
 }
 
@@ -346,20 +349,16 @@ impl ControlsService {
             ControlsCommand::SetVolume(volume) => {
                 self.snapshot.audio.volume = *volume;
             }
-            ControlsCommand::CycleAudioOutputRoute => {
-                self.snapshot.audio_devices.output_route = cycle_route_name(
-                    &self.snapshot.audio_devices.output_routes,
-                    self.snapshot.audio_devices.output_route.as_deref(),
-                );
+            ControlsCommand::SetAudioOutputRoute(route_id) => {
+                self.snapshot.audio_devices.output_route =
+                    select_route_name(&self.snapshot.audio_devices.output_routes, route_id);
             }
             ControlsCommand::SetMicVolume(volume) => {
                 self.snapshot.mic.volume = *volume;
             }
-            ControlsCommand::CycleAudioInputRoute => {
-                self.snapshot.audio_devices.input_route = cycle_route_name(
-                    &self.snapshot.audio_devices.input_routes,
-                    self.snapshot.audio_devices.input_route.as_deref(),
-                );
+            ControlsCommand::SetAudioInputRoute(route_id) => {
+                self.snapshot.audio_devices.input_route =
+                    select_route_name(&self.snapshot.audio_devices.input_routes, route_id);
             }
             ControlsCommand::SetBrightness(percent) => {
                 self.snapshot.brightness = BrightnessSnapshot::from_percent(*percent);
@@ -377,6 +376,20 @@ impl ControlsService {
             }
             ControlsCommand::ToggleBluetooth(enabled) => {
                 self.snapshot.bluetooth_enabled = *enabled;
+            }
+            ControlsCommand::ConnectBluetoothDevice(address) => {
+                update_bluetooth_device_connection_state(
+                    &mut self.snapshot.bluetooth_devices,
+                    address,
+                    true,
+                );
+            }
+            ControlsCommand::DisconnectBluetoothDevice(address) => {
+                update_bluetooth_device_connection_state(
+                    &mut self.snapshot.bluetooth_devices,
+                    address,
+                    false,
+                );
             }
             ControlsCommand::ToggleAudioMute
             | ControlsCommand::ToggleMicMute
@@ -435,8 +448,8 @@ impl ControlsService {
                 self.audio_backend.toggle_audio_mute().await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
-            ControlsCommand::CycleAudioOutputRoute => {
-                let _ = self.audio_backend.cycle_output_route().await;
+            ControlsCommand::SetAudioOutputRoute(route_id) => {
+                let _ = self.audio_backend.set_output_route(route_id).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
             ControlsCommand::SetMicVolume(volume) => {
@@ -447,8 +460,8 @@ impl ControlsService {
                 self.audio_backend.toggle_mic_mute().await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
-            ControlsCommand::CycleAudioInputRoute => {
-                let _ = self.audio_backend.cycle_input_route().await;
+            ControlsCommand::SetAudioInputRoute(route_id) => {
+                let _ = self.audio_backend.set_input_route(route_id).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
             ControlsCommand::SetBrightness(percent) => {
@@ -473,6 +486,14 @@ impl ControlsService {
                 let _ = self.bluetooth_backend.toggle(enabled);
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
             }
+            ControlsCommand::ConnectBluetoothDevice(address) => {
+                let _ = self.bluetooth_backend.connect_device(address).await;
+                ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
+            }
+            ControlsCommand::DisconnectBluetoothDevice(address) => {
+                let _ = self.bluetooth_backend.disconnect_device(address).await;
+                ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
+            }
             ControlsCommand::OpenOverskride => {
                 let _ = self.bluetooth_backend.open_overskride();
                 ControlsFollowUp::RefreshCompositor
@@ -485,17 +506,30 @@ impl ControlsService {
     }
 }
 
-fn cycle_route_name(routes: &[AudioRouteInfo], current: Option<&str>) -> Option<String> {
-    if routes.is_empty() {
-        return current.map(ToOwned::to_owned);
+fn select_route_name(routes: &[AudioRouteInfo], route_id: &str) -> Option<String> {
+    routes
+        .iter()
+        .find(|route| route.id == route_id)
+        .map(|route| route.name.clone())
+}
+
+fn update_bluetooth_device_connection_state(
+    summary: &mut BluetoothDeviceSummary,
+    address: &str,
+    connected: bool,
+) {
+    for device in &mut summary.device_details {
+        if device.address == address {
+            device.connected = connected;
+        }
     }
 
-    let next_index = current
-        .and_then(|current| routes.iter().position(|route| route.name == current))
-        .map(|index| (index + 1) % routes.len())
-        .unwrap_or(0);
-
-    Some(routes[next_index].name.clone())
+    summary.connected_devices = summary
+        .device_details
+        .iter()
+        .filter(|device| device.connected)
+        .map(|device| device.name.clone())
+        .collect();
 }
 
 impl Default for ControlsService {
@@ -543,7 +577,10 @@ impl crate::services::controls_backends::AudioBackend for NoopAudioBackend {
         Box::pin(async {})
     }
 
-    fn cycle_output_route(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+    fn set_output_route(
+        &self,
+        _id: String,
+    ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
         Box::pin(async { false })
     }
 
@@ -558,7 +595,10 @@ impl crate::services::controls_backends::AudioBackend for NoopAudioBackend {
         Box::pin(async {})
     }
 
-    fn cycle_input_route(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+    fn set_input_route(
+        &self,
+        _id: String,
+    ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
         Box::pin(async { false })
     }
 
@@ -604,6 +644,20 @@ impl crate::services::controls_backends::BluetoothBackend for NoopBluetoothBacke
 
     fn toggle(&self, _enable: bool) -> bool {
         true
+    }
+
+    fn connect_device(
+        &self,
+        _address: String,
+    ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
+    fn disconnect_device(
+        &self,
+        _address: String,
+    ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        Box::pin(async { true })
     }
 
     fn open_overskride(&self) -> bool {
@@ -658,6 +712,7 @@ mod tests {
     type SharedU32Calls = Arc<Mutex<Vec<u32>>>;
     type SharedBoolCalls = Arc<Mutex<Vec<bool>>>;
     type SharedCount = Arc<Mutex<u32>>;
+    type SharedBluetoothCommandCalls = Arc<Mutex<Vec<String>>>;
 
     #[derive(Clone)]
     struct MockAudioBackend {
@@ -701,12 +756,13 @@ mod tests {
             })
         }
 
-        fn cycle_output_route(
+        fn set_output_route(
             &self,
+            id: String,
         ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
             let calls = self.calls.clone();
             Box::pin(async move {
-                calls.lock().unwrap().push("cycle_output_route".to_string());
+                calls.lock().unwrap().push(format!("set_output_route:{id}"));
                 true
             })
         }
@@ -731,10 +787,13 @@ mod tests {
             })
         }
 
-        fn cycle_input_route(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        fn set_input_route(
+            &self,
+            id: String,
+        ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
             let calls = self.calls.clone();
             Box::pin(async move {
-                calls.lock().unwrap().push("cycle_input_route".to_string());
+                calls.lock().unwrap().push(format!("set_input_route:{id}"));
                 true
             })
         }
@@ -769,6 +828,7 @@ mod tests {
         enabled: bool,
         devices: BluetoothDeviceSummary,
         toggle_calls: SharedBoolCalls,
+        command_calls: SharedBluetoothCommandCalls,
         overskride_calls: SharedCount,
     }
 
@@ -788,6 +848,34 @@ mod tests {
         fn toggle(&self, enable: bool) -> bool {
             self.toggle_calls.lock().unwrap().push(enable);
             true
+        }
+
+        fn connect_device(
+            &self,
+            address: String,
+        ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+            let command_calls = self.command_calls.clone();
+            Box::pin(async move {
+                command_calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("connect:{address}"));
+                true
+            })
+        }
+
+        fn disconnect_device(
+            &self,
+            address: String,
+        ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+            let command_calls = self.command_calls.clone();
+            Box::pin(async move {
+                command_calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("disconnect:{address}"));
+                true
+            })
         }
 
         fn open_overskride(&self) -> bool {
@@ -845,6 +933,7 @@ mod tests {
         SharedStringCalls,
         SharedU32Calls,
         SharedBoolCalls,
+        SharedBluetoothCommandCalls,
         SharedCount,
         SharedStringCalls,
     );
@@ -853,6 +942,7 @@ mod tests {
         let audio_calls = Arc::new(Mutex::new(Vec::new()));
         let brightness_calls = Arc::new(Mutex::new(Vec::new()));
         let bluetooth_calls = Arc::new(Mutex::new(Vec::new()));
+        let bluetooth_command_calls = Arc::new(Mutex::new(Vec::new()));
         let overskride_calls = Arc::new(Mutex::new(0));
         let power_calls = Arc::new(Mutex::new(Vec::new()));
 
@@ -903,11 +993,13 @@ mod tests {
                     device_details: vec![BluetoothConnectedDevice {
                         address: "AA:BB:CC:DD:EE:FF".to_string(),
                         name: "WH-1000XM5".to_string(),
+                        connected: true,
                         battery_percent: Some(90),
                         audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
                     }],
                 },
                 toggle_calls: bluetooth_calls.clone(),
+                command_calls: bluetooth_command_calls.clone(),
                 overskride_calls: overskride_calls.clone(),
             }),
             Arc::new(MockPowerBackend {
@@ -921,6 +1013,7 @@ mod tests {
             audio_calls,
             brightness_calls,
             bluetooth_calls,
+            bluetooth_command_calls,
             overskride_calls,
             power_calls,
         )
@@ -983,6 +1076,7 @@ mod tests {
                 enabled: false,
                 devices: BluetoothDeviceSummary::default(),
                 toggle_calls: Arc::new(Mutex::new(Vec::new())),
+                command_calls: Arc::new(Mutex::new(Vec::new())),
                 overskride_calls: Arc::new(Mutex::new(0)),
             }),
             power_backend: Arc::new(MockPowerBackend {
@@ -991,9 +1085,15 @@ mod tests {
             }),
         };
         service.preview_command(&ControlsCommand::SetVolume(73));
-        service.preview_command(&ControlsCommand::CycleAudioOutputRoute);
+        service.preview_command(&ControlsCommand::SetAudioOutputRoute("77".to_string()));
         service.preview_command(&ControlsCommand::SetBrightness(64));
-        service.preview_command(&ControlsCommand::CycleAudioInputRoute);
+        service.preview_command(&ControlsCommand::SetAudioInputRoute("80".to_string()));
+        service.preview_command(&ControlsCommand::ConnectBluetoothDevice(
+            "AA:BB:CC:DD:EE:FF".to_string(),
+        ));
+        service.preview_command(&ControlsCommand::DisconnectBluetoothDevice(
+            "AA:BB:CC:DD:EE:FF".to_string(),
+        ));
         service.preview_command(&ControlsCommand::SetPowerProfile("performance".to_string()));
         service.preview_command(&ControlsCommand::ApplyBatteryThresholdPreset(
             BatteryThresholdPreset::Care,
@@ -1038,6 +1138,7 @@ mod tests {
                 enabled: false,
                 devices: BluetoothDeviceSummary::default(),
                 toggle_calls: Arc::new(Mutex::new(Vec::new())),
+                command_calls: Arc::new(Mutex::new(Vec::new())),
                 overskride_calls: Arc::new(Mutex::new(0)),
             }),
             power_backend: Arc::new(MockPowerBackend {
@@ -1102,6 +1203,7 @@ mod tests {
             audio_calls,
             brightness_calls,
             bluetooth_calls,
+            bluetooth_command_calls,
             overskride_calls,
             power_calls,
         ) = test_service();
@@ -1113,11 +1215,13 @@ mod tests {
         );
         let _ = service.execute(ControlsCommand::ToggleAudioMute).await;
         let _ = service
-            .execute(ControlsCommand::CycleAudioOutputRoute)
+            .execute(ControlsCommand::SetAudioOutputRoute("77".to_string()))
             .await;
         let _ = service.execute(ControlsCommand::SetMicVolume(22)).await;
         let _ = service.execute(ControlsCommand::ToggleMicMute).await;
-        let _ = service.execute(ControlsCommand::CycleAudioInputRoute).await;
+        let _ = service
+            .execute(ControlsCommand::SetAudioInputRoute("80".to_string()))
+            .await;
         let _ = service.execute(ControlsCommand::SetBrightness(31)).await;
         let _ = service
             .execute(ControlsCommand::SetPowerProfile("balanced".to_string()))
@@ -1130,6 +1234,16 @@ mod tests {
         let _ = service
             .execute(ControlsCommand::ToggleBluetooth(false))
             .await;
+        let _ = service
+            .execute(ControlsCommand::ConnectBluetoothDevice(
+                "AA:BB:CC:DD:EE:FF".to_string(),
+            ))
+            .await;
+        let _ = service
+            .execute(ControlsCommand::DisconnectBluetoothDevice(
+                "AA:BB:CC:DD:EE:FF".to_string(),
+            ))
+            .await;
         let overskride_follow_up = service.execute(ControlsCommand::OpenOverskride).await;
 
         assert_eq!(
@@ -1137,10 +1251,10 @@ mod tests {
             [
                 "set_volume:77",
                 "toggle_audio_mute",
-                "cycle_output_route",
+                "set_output_route:77",
                 "set_mic_volume:22",
                 "toggle_mic_mute",
-                "cycle_input_route",
+                "set_input_route:80",
             ]
         );
         assert_eq!(brightness_calls.lock().unwrap().as_slice(), [31]);
@@ -1149,6 +1263,10 @@ mod tests {
             ["balanced", "thresholds:60-90"]
         );
         assert_eq!(bluetooth_calls.lock().unwrap().as_slice(), [false]);
+        assert_eq!(
+            bluetooth_command_calls.lock().unwrap().as_slice(),
+            ["connect:AA:BB:CC:DD:EE:FF", "disconnect:AA:BB:CC:DD:EE:FF",]
+        );
         assert_eq!(*overskride_calls.lock().unwrap(), 1);
         assert_eq!(
             battery_follow_up,

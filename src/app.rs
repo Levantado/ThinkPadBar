@@ -15,6 +15,7 @@ use tracing::info;
 pub enum Popup {
     None,
     ControlCenter,
+    AudioRoutes,
     SystemMonitor,
     Displays,
     Calendar,
@@ -48,9 +49,18 @@ struct ControlCenterDeviceItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BluetoothDeviceCard {
+    address: String,
     label: String,
     summary: String,
     detail: Option<String>,
+    connected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioRoutePopupItem {
+    id: String,
+    label: String,
+    is_default: bool,
 }
 
 pub struct ThinkPadBar {
@@ -125,9 +135,9 @@ pub enum Message {
     SwitchWorkspace(i32, String),
     TogglePopup(Popup),
     SetVolume(u32),
-    CycleAudioOutputRoute,
+    SetAudioOutputRoute(String),
     SetMicVolume(u32),
-    CycleAudioInputRoute,
+    SetAudioInputRoute(String),
     SetFanLevel(String),
     SetBrightness(u32),
     FlushCoalescedControl(CoalescedControlKind, u64),
@@ -138,6 +148,8 @@ pub enum Message {
     NetworkCommand(crate::services::network::NetworkCommand),
     NetworkEvent(crate::services::network::NetworkEvent),
     ToggleBluetooth(bool),
+    ConnectBluetoothDevice(String),
+    DisconnectBluetoothDevice(String),
     ToggleIdleInhibitor,
     NextKeyboardLayout,
     TogglePowerMenu,
@@ -294,6 +306,7 @@ impl ThinkPadBar {
         match popup {
             Popup::None => crate::services::popup_anchor::PopupSurfaceKind::Hidden,
             Popup::ControlCenter => crate::services::popup_anchor::PopupSurfaceKind::ControlCenter,
+            Popup::AudioRoutes => crate::services::popup_anchor::PopupSurfaceKind::AudioRoutes,
             Popup::SystemMonitor => crate::services::popup_anchor::PopupSurfaceKind::SystemMonitor,
             Popup::Displays => crate::services::popup_anchor::PopupSurfaceKind::Displays,
             Popup::Calendar => crate::services::popup_anchor::PopupSurfaceKind::Calendar,
@@ -675,10 +688,12 @@ impl ThinkPadBar {
             .device_details
             .iter()
             .map(|device| {
-                let summary = device
-                    .battery_percent
-                    .map(|percent| format!("Battery {percent}%"))
-                    .unwrap_or_else(|| "Connected".to_string());
+                let summary = match (device.connected, device.battery_percent) {
+                    (true, Some(percent)) => format!("Connected • Battery {percent}%"),
+                    (true, None) => "Connected".to_string(),
+                    (false, Some(percent)) => format!("Disconnected • Battery {percent}%"),
+                    (false, None) => "Disconnected".to_string(),
+                };
                 let detail = if device.audio_profiles.is_empty() {
                     None
                 } else {
@@ -686,12 +701,35 @@ impl ThinkPadBar {
                 };
 
                 BluetoothDeviceCard {
+                    address: device.address.clone(),
                     label: device.name.clone(),
                     summary,
                     detail,
+                    connected: device.connected,
                 }
             })
             .collect()
+    }
+
+    fn audio_route_popup_items(
+        routes: &[crate::services::controls::AudioRouteInfo],
+        current: Option<&str>,
+    ) -> Vec<AudioRoutePopupItem> {
+        routes
+            .iter()
+            .map(|route| AudioRoutePopupItem {
+                id: route.id.clone(),
+                label: route.name.clone(),
+                is_default: current == Some(route.name.as_str()),
+            })
+            .collect()
+    }
+
+    fn audio_route_popup_actions() -> Vec<(&'static str, &'static str, Popup)> {
+        vec![
+            ("󰍹", "Controls", Popup::ControlCenter),
+            ("󰅖", "Close", Popup::AudioRoutes),
+        ]
     }
 
     fn display_popup_actions() -> Vec<(&'static str, &'static str, Popup)> {
@@ -1228,10 +1266,14 @@ impl ThinkPadBar {
 
                 // Refresh fast-changing control-center surfaces on open so the popup does not
                 // rely on an arbitrary slow-tick snapshot.
-                if target == Popup::ControlCenter && self.popup != target {
+                if (target == Popup::ControlCenter || target == Popup::AudioRoutes)
+                    && self.popup != target
+                {
                     tasks.push(self.request_controls_refresh(
                         crate::services::controls::ControlsRefreshKind::AudioMic,
                     ));
+                }
+                if target == Popup::ControlCenter && self.popup != target {
                     tasks.push(self.request_controls_refresh(
                         crate::services::controls::ControlsRefreshKind::BatteryPower,
                     ));
@@ -1277,8 +1319,9 @@ impl ThinkPadBar {
                     crate::services::controls::ControlsCommand::ToggleAudioMute,
                 );
             }
-            Message::CycleAudioOutputRoute => {
-                let command = crate::services::controls::ControlsCommand::CycleAudioOutputRoute;
+            Message::SetAudioOutputRoute(route_id) => {
+                let command =
+                    crate::services::controls::ControlsCommand::SetAudioOutputRoute(route_id);
                 self.controls_service.preview_command(&command);
                 self.controls = self.controls_service.snapshot().clone();
                 return self.execute_controls_command(command);
@@ -1300,8 +1343,9 @@ impl ThinkPadBar {
                     crate::services::controls::ControlsCommand::ToggleMicMute,
                 );
             }
-            Message::CycleAudioInputRoute => {
-                let command = crate::services::controls::ControlsCommand::CycleAudioInputRoute;
+            Message::SetAudioInputRoute(route_id) => {
+                let command =
+                    crate::services::controls::ControlsCommand::SetAudioInputRoute(route_id);
                 self.controls_service.preview_command(&command);
                 self.controls = self.controls_service.snapshot().clone();
                 return self.execute_controls_command(command);
@@ -1423,6 +1467,20 @@ impl ThinkPadBar {
             }
             Message::ToggleBluetooth(enable) => {
                 let command = crate::services::controls::ControlsCommand::ToggleBluetooth(enable);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
+            }
+            Message::ConnectBluetoothDevice(address) => {
+                let command =
+                    crate::services::controls::ControlsCommand::ConnectBluetoothDevice(address);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
+            }
+            Message::DisconnectBluetoothDevice(address) => {
+                let command =
+                    crate::services::controls::ControlsCommand::DisconnectBluetoothDevice(address);
                 self.controls_service.preview_command(&command);
                 self.controls = self.controls_service.snapshot().clone();
                 return self.execute_controls_command(command);
@@ -2218,6 +2276,179 @@ impl ThinkPadBar {
                         }),
                 )
                 .push(outputs_col);
+
+            return container(
+                container(scrollable(content))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding(Padding::from([20, 24]))
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(Color {
+                            a: self.config.appearance.opacity,
+                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
+                        })),
+                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                        border: iced::Border {
+                            radius: 12.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        }
+
+        if self.popup == Popup::AudioRoutes {
+            let output_routes = Self::audio_route_popup_items(
+                &self.controls.audio_devices.output_routes,
+                self.controls.audio_devices.output_route.as_deref(),
+            );
+            let input_routes = Self::audio_route_popup_items(
+                &self.controls.audio_devices.input_routes,
+                self.controls.audio_devices.input_route.as_deref(),
+            );
+            let popup_actions = Self::audio_route_popup_actions();
+
+            let action_button = |icon: &'static str,
+                                 label: &'static str,
+                                 target: Popup|
+             -> Element<'_, Message> {
+                button(
+                    Row::new()
+                        .spacing(6)
+                        .align_y(Alignment::Center)
+                        .push(text(icon).size(14))
+                        .push(text(label).size(12)),
+                )
+                .padding(Padding::from([8, 10]))
+                .width(Length::FillPortion(1))
+                .on_press(Message::TogglePopup(target))
+                .style(|_, _| iced::widget::button::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                    border: iced::Border {
+                        radius: 10.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+            };
+
+            let route_button = |item: AudioRoutePopupItem, is_output: bool| {
+                let message = if is_output {
+                    Message::SetAudioOutputRoute(item.id.clone())
+                } else {
+                    Message::SetAudioInputRoute(item.id.clone())
+                };
+                button(
+                    Column::new()
+                        .spacing(4)
+                        .push(
+                            Row::new()
+                                .spacing(6)
+                                .align_y(Alignment::Center)
+                                .push(text(item.label.clone()).size(13))
+                                .push_maybe(item.is_default.then(|| {
+                                    container(text("DEFAULT").size(9))
+                                        .padding(Padding::from([2, 6]))
+                                        .style(|_| container::Style {
+                                            background: Some(iced::Background::Color(
+                                                Color::from_rgb8(0x41, 0x48, 0x68),
+                                            )),
+                                            text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                                            border: iced::Border {
+                                                radius: 999.0.into(),
+                                                ..Default::default()
+                                            },
+                                            ..Default::default()
+                                        })
+                                }))
+                                .push(Space::with_width(Length::Fill))
+                                .push(text(format!("#{}", item.id)).size(10).style(|_| {
+                                    iced::widget::text::Style {
+                                        color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
+                                    }
+                                })),
+                        )
+                        .push(
+                            text(if item.is_default {
+                                "Selected"
+                            } else {
+                                "Set default"
+                            })
+                            .size(11)
+                            .style(|_| iced::widget::text::Style {
+                                color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                            }),
+                        ),
+                )
+                .width(Length::Fill)
+                .padding(12)
+                .on_press_maybe((!item.is_default).then_some(message))
+                .style(|_, _| iced::widget::button::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
+                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
+                    border: iced::Border {
+                        radius: 10.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            };
+
+            let route_section = |title: &'static str,
+                                 icon: &'static str,
+                                 items: Vec<AudioRoutePopupItem>,
+                                 is_output: bool| {
+                let mut column = Column::new().spacing(8).push(
+                    Row::new()
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .push(text(icon).size(16))
+                        .push(text(title).size(14)),
+                );
+
+                if items.is_empty() {
+                    column = column.push(text("No routes discovered").size(12).style(|_| {
+                        iced::widget::text::Style {
+                            color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
+                        }
+                    }));
+                } else {
+                    for item in items {
+                        column = column.push(route_button(item, is_output));
+                    }
+                }
+
+                container(column).padding(16).style(|_| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb8(0x21, 0x26, 0x38))),
+                    border: iced::Border {
+                        radius: 12.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            };
+
+            let mut action_row = Row::new().spacing(8);
+            for (icon, label, target) in popup_actions {
+                action_row = action_row.push(action_button(icon, label, target));
+            }
+
+            let content = Column::new()
+                .spacing(14)
+                .push(
+                    Row::new()
+                        .align_y(Alignment::Center)
+                        .push(text("Audio Routes").size(18))
+                        .push(Space::with_width(Length::Fill)),
+                )
+                .push(action_row)
+                .push(route_section("Output Routes", "󰕾", output_routes, true))
+                .push(route_section("Input Routes", "", input_routes, false));
 
             return container(
                 container(scrollable(content))
@@ -3342,30 +3573,6 @@ impl ThinkPadBar {
                             },
                             Message::ToggleAudioMute,
                         ))
-                        .push(action_btn_maybe(
-                            "󰒓",
-                            if self.controls.audio_devices.output_routes.len() > 1 {
-                                "Next Output".to_string()
-                            } else {
-                                "Only Output".to_string()
-                            },
-                            (self.controls.audio_devices.output_routes.len() > 1)
-                                .then_some(Message::CycleAudioOutputRoute),
-                        ))
-                        .push(action_btn_maybe(
-                            "󰒔",
-                            if self.controls.audio_devices.input_routes.len() > 1 {
-                                "Next Input".to_string()
-                            } else {
-                                "Only Input".to_string()
-                            },
-                            (self.controls.audio_devices.input_routes.len() > 1)
-                                .then_some(Message::CycleAudioInputRoute),
-                        )),
-                )
-                .push(
-                    Row::new()
-                        .spacing(8)
                         .push(action_btn(
                             if self.controls.mic.muted {
                                 "󰍭"
@@ -3379,48 +3586,83 @@ impl ThinkPadBar {
                             },
                             Message::ToggleMicMute,
                         ))
-                        .push(action_btn("󰳋", "Overskride", Message::OpenOverskride)),
-                );
+                        .push(action_btn_maybe(
+                            "󰑓",
+                            if self.controls.audio_devices.output_routes.is_empty()
+                                && self.controls.audio_devices.input_routes.is_empty()
+                            {
+                                "No Routes".to_string()
+                            } else {
+                                "Audio Routes".to_string()
+                            },
+                            (!self.controls.audio_devices.output_routes.is_empty()
+                                || !self.controls.audio_devices.input_routes.is_empty())
+                            .then_some(Message::TogglePopup(Popup::AudioRoutes)),
+                        )),
+                )
+                .push(action_btn("󰳋", "Overskride", Message::OpenOverskride));
 
             if !bluetooth_device_cards.is_empty() {
                 for device in &bluetooth_device_cards {
-                    device_column = device_column.push(
-                        container(
-                            Column::new()
-                                .spacing(3)
-                                .push(
-                                    Row::new()
-                                        .spacing(6)
-                                        .align_y(Alignment::Center)
-                                        .push(text("󰂯").size(13))
-                                        .push(text(device.label.clone()).size(12)),
-                                )
-                                .push(text(device.summary.clone()).size(11).style(|_| {
-                                    iced::widget::text::Style {
-                                        color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                                    }
-                                }))
-                                .push_maybe(device.detail.as_ref().map(|detail| {
-                                    text(detail.clone()).size(11).style(|_| {
+                    device_column =
+                        device_column.push(
+                            container(
+                                Column::new()
+                                    .spacing(3)
+                                    .push(
+                                        Row::new()
+                                            .spacing(6)
+                                            .align_y(Alignment::Center)
+                                            .push(text("󰂯").size(13))
+                                            .push(text(device.label.clone()).size(12))
+                                            .push(Space::with_width(Length::Fill))
+                                            .push(
+                                                button(
+                                                    text(if device.connected {
+                                                        "Disconnect"
+                                                    } else {
+                                                        "Connect"
+                                                    })
+                                                    .size(10),
+                                                )
+                                                .padding(Padding::from([4, 8]))
+                                                .on_press(if device.connected {
+                                                    Message::DisconnectBluetoothDevice(
+                                                        device.address.clone(),
+                                                    )
+                                                } else {
+                                                    Message::ConnectBluetoothDevice(
+                                                        device.address.clone(),
+                                                    )
+                                                }),
+                                            ),
+                                    )
+                                    .push(text(device.summary.clone()).size(11).style(|_| {
                                         iced::widget::text::Style {
-                                            color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                                            color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
                                         }
-                                    })
-                                })),
-                        )
-                        .width(Length::Fill)
-                        .padding(10)
-                        .style(|_| container::Style {
-                            background: Some(iced::Background::Color(Color::from_rgb8(
-                                0x21, 0x26, 0x38,
-                            ))),
-                            border: iced::Border {
-                                radius: 10.0.into(),
+                                    }))
+                                    .push_maybe(device.detail.as_ref().map(|detail| {
+                                        text(detail.clone()).size(11).style(|_| {
+                                            iced::widget::text::Style {
+                                                color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                                            }
+                                        })
+                                    })),
+                            )
+                            .width(Length::Fill)
+                            .padding(10)
+                            .style(|_| container::Style {
+                                background: Some(iced::Background::Color(Color::from_rgb8(
+                                    0x21, 0x26, 0x38,
+                                ))),
+                                border: iced::Border {
+                                    radius: 10.0.into(),
+                                    ..Default::default()
+                                },
                                 ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
-                    );
+                            }),
+                        );
                 }
             }
 
@@ -4455,12 +4697,14 @@ mod tests {
                         crate::services::controls::BluetoothConnectedDevice {
                             address: "AA:BB:CC:DD:EE:FF".to_string(),
                             name: "WH-1000XM5".to_string(),
+                            connected: true,
                             battery_percent: Some(90),
                             audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
                         },
                         crate::services::controls::BluetoothConnectedDevice {
                             address: "11:22:33:44:55:66".to_string(),
                             name: "MX Master 3S".to_string(),
+                            connected: true,
                             battery_percent: Some(55),
                             audio_profiles: Vec::new(),
                         },
@@ -4502,6 +4746,7 @@ mod tests {
                 device_details: vec![crate::services::controls::BluetoothConnectedDevice {
                     address: "AA:BB:CC:DD:EE:FF".to_string(),
                     name: "WH-1000XM5".to_string(),
+                    connected: true,
                     battery_percent: Some(90),
                     audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
                 }],
@@ -4511,10 +4756,45 @@ mod tests {
         assert_eq!(
             cards,
             vec![super::BluetoothDeviceCard {
+                address: "AA:BB:CC:DD:EE:FF".to_string(),
                 label: "WH-1000XM5".to_string(),
-                summary: "Battery 90%".to_string(),
+                summary: "Connected • Battery 90%".to_string(),
                 detail: Some("A2DP • AVRCP".to_string()),
+                connected: true,
             }]
+        );
+    }
+
+    #[test]
+    fn audio_route_popup_items_mark_current_default() {
+        let items = ThinkPadBar::audio_route_popup_items(
+            &[
+                crate::services::controls::AudioRouteInfo {
+                    id: "52".to_string(),
+                    name: "Built-in Audio".to_string(),
+                },
+                crate::services::controls::AudioRouteInfo {
+                    id: "77".to_string(),
+                    name: "USB DAC".to_string(),
+                },
+            ],
+            Some("USB DAC"),
+        );
+
+        assert_eq!(
+            items,
+            vec![
+                super::AudioRoutePopupItem {
+                    id: "52".to_string(),
+                    label: "Built-in Audio".to_string(),
+                    is_default: false,
+                },
+                super::AudioRoutePopupItem {
+                    id: "77".to_string(),
+                    label: "USB DAC".to_string(),
+                    is_default: true,
+                },
+            ]
         );
     }
 

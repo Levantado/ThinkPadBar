@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.12] - 2026-03-27
+
+### Changed
+- Replaced the last coarse audio-route UX with an explicit `Audio Routes` popup:
+  - control-center now opens a dedicated route picker instead of cycling blindly through sinks and sources;
+  - output and input routes are listed explicitly with `DEFAULT` badges and stable route ids;
+  - selecting a route now drives a deterministic `wpctl set-default` path through `ControlsService`.
+- Deepened the Bluetooth device surface from passive summaries to per-device actions:
+  - the Bluetooth backend now inventories known devices from `bluetoothctl devices`, enriches them with `Connected`, battery, and audio-profile info from `bluetoothctl info`, and carries that typed state in `ControlsSnapshot`;
+  - control-center Bluetooth cards now show connection state explicitly and expose `Connect` / `Disconnect` actions per device.
+- Removed the now-dead route-cycling command path from the UI/controls command surface, keeping the product behavior aligned with the explicit popup model.
+
+### Quality
+- Added regression coverage for:
+  - audio route popup item labeling and current-route selection;
+  - Bluetooth device cards surfacing connection state, battery, and profiles;
+  - `ControlsService` preview/dispatch for explicit route selection and Bluetooth connect/disconnect actions;
+  - dedicated popup anchoring for the new audio-routes surface.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.11] - 2026-03-27
 
 ### Changed

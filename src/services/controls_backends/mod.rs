@@ -17,10 +17,10 @@ pub trait AudioBackend: Send + Sync {
     fn device_summary(&self) -> crate::services::controls::AudioDeviceSummary;
     fn set_volume(&self, percent: u32) -> BackendFuture<'_, ()>;
     fn toggle_audio_mute(&self) -> BackendFuture<'_, ()>;
-    fn cycle_output_route(&self) -> BackendFuture<'_, bool>;
+    fn set_output_route(&self, id: String) -> BackendFuture<'_, bool>;
     fn set_mic_volume(&self, percent: u32) -> BackendFuture<'_, ()>;
     fn toggle_mic_mute(&self) -> BackendFuture<'_, ()>;
-    fn cycle_input_route(&self) -> BackendFuture<'_, bool>;
+    fn set_input_route(&self, id: String) -> BackendFuture<'_, bool>;
     fn subscription(&self) -> iced::Subscription<crate::services::controls::ControlsEvent>;
 }
 
@@ -35,6 +35,8 @@ pub trait BluetoothBackend: Send + Sync {
     fn enabled(&self) -> bool;
     fn device_summary(&self) -> crate::services::controls::BluetoothDeviceSummary;
     fn toggle(&self, enable: bool) -> bool;
+    fn connect_device(&self, address: String) -> BackendFuture<'_, bool>;
+    fn disconnect_device(&self, address: String) -> BackendFuture<'_, bool>;
     fn open_overskride(&self) -> bool;
 }
 

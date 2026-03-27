@@ -91,6 +91,32 @@ impl super::BluetoothBackend for BluetoothCtlBackend {
         false
     }
 
+    fn connect_device(&self, address: String) -> super::BackendFuture<'_, bool> {
+        Box::pin(async move {
+            tokio::process::Command::new("bluetoothctl")
+                .args(["connect", &address])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|status| status.success())
+                .unwrap_or(false)
+        })
+    }
+
+    fn disconnect_device(&self, address: String) -> super::BackendFuture<'_, bool> {
+        Box::pin(async move {
+            tokio::process::Command::new("bluetoothctl")
+                .args(["disconnect", &address])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|status| status.success())
+                .unwrap_or(false)
+        })
+    }
+
     fn open_overskride(&self) -> bool {
         let direct = Command::new("overskride")
             .stdout(Stdio::null())
@@ -126,7 +152,7 @@ fn sysfs_bluetooth_state() -> Option<bool> {
 
 fn connected_device_summary() -> crate::services::controls::BluetoothDeviceSummary {
     let device_briefs = Command::new("bluetoothctl")
-        .args(["devices", "Connected"])
+        .arg("devices")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
@@ -146,7 +172,7 @@ fn connected_device_summary() -> crate::services::controls::BluetoothDeviceSumma
                 .ok()
                 .and_then(|output| String::from_utf8(output.stdout).ok());
 
-            let (battery_percent, audio_profiles) = info_output
+            let (connected, battery_percent, audio_profiles) = info_output
                 .as_deref()
                 .map(parse_bluetooth_device_info)
                 .unwrap_or_default();
@@ -154,17 +180,21 @@ fn connected_device_summary() -> crate::services::controls::BluetoothDeviceSumma
             crate::services::controls::BluetoothConnectedDevice {
                 address: device.address.clone(),
                 name: device.name.clone(),
+                connected,
                 battery_percent,
                 audio_profiles,
             }
         })
         .collect::<Vec<_>>();
 
+    let connected_devices = device_details
+        .iter()
+        .filter(|device| device.connected)
+        .map(|device| device.name.clone())
+        .collect();
+
     crate::services::controls::BluetoothDeviceSummary {
-        connected_devices: device_briefs
-            .into_iter()
-            .map(|device| device.name)
-            .collect(),
+        connected_devices,
         device_details,
     }
 }
@@ -213,12 +243,17 @@ pub(crate) fn parse_powered_from_bluetoothctl(output: &str) -> Option<bool> {
     None
 }
 
-pub(crate) fn parse_bluetooth_device_info(output: &str) -> (Option<u8>, Vec<String>) {
+pub(crate) fn parse_bluetooth_device_info(output: &str) -> (bool, Option<u8>, Vec<String>) {
+    let mut connected = false;
     let mut battery_percent = None;
     let mut audio_profiles = Vec::new();
 
     for line in output.lines() {
         let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("Connected:") {
+            connected = value.trim().eq_ignore_ascii_case("yes");
+            continue;
+        }
         if let Some(value) = trimmed.strip_prefix("Battery Percentage:") {
             battery_percent = parse_bluetooth_battery_percent(value);
             continue;
@@ -238,7 +273,7 @@ pub(crate) fn parse_bluetooth_device_info(output: &str) -> (Option<u8>, Vec<Stri
         }
     }
 
-    (battery_percent, audio_profiles)
+    (connected, battery_percent, audio_profiles)
 }
 
 fn parse_bluetooth_battery_percent(value: &str) -> Option<u8> {
@@ -315,11 +350,13 @@ mod tests {
     #[test]
     fn parse_bluetooth_device_info_extracts_battery_and_audio_profiles() {
         let sample = "Device AA:BB:CC:DD:EE:FF\n\
+                      \tConnected: yes\n\
                       \tBattery Percentage: 0x5A (90)\n\
                       \tUUID: Audio Sink                (0000110b-0000-1000-8000-00805f9b34fb)\n\
                       \tUUID: Handsfree                 (0000111e-0000-1000-8000-00805f9b34fb)\n\
                       \tUUID: A/V_Remote Control        (0000110e-0000-1000-8000-00805f9b34fb)\n";
-        let (battery, profiles) = parse_bluetooth_device_info(sample);
+        let (connected, battery, profiles) = parse_bluetooth_device_info(sample);
+        assert!(connected);
         assert_eq!(battery, Some(90));
         assert_eq!(
             profiles,

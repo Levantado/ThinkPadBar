@@ -222,8 +222,8 @@ impl super::AudioBackend for WpctlAudioBackend {
         })
     }
 
-    fn cycle_output_route(&self) -> super::BackendFuture<'_, bool> {
-        Box::pin(async move { cycle_audio_route(AudioRouteSection::Sinks).await })
+    fn set_output_route(&self, id: String) -> super::BackendFuture<'_, bool> {
+        Box::pin(async move { set_audio_route(id).await })
     }
 
     fn set_mic_volume(&self, percent: u32) -> super::BackendFuture<'_, ()> {
@@ -249,8 +249,8 @@ impl super::AudioBackend for WpctlAudioBackend {
         })
     }
 
-    fn cycle_input_route(&self) -> super::BackendFuture<'_, bool> {
-        Box::pin(async move { cycle_audio_route(AudioRouteSection::Sources).await })
+    fn set_input_route(&self, id: String) -> super::BackendFuture<'_, bool> {
+        Box::pin(async move { set_audio_route(id).await })
     }
 
     fn subscription(&self) -> iced::Subscription<crate::services::controls::ControlsEvent> {
@@ -747,52 +747,15 @@ fn parse_wpctl_route_entry_line(line: &str) -> Option<ParsedWpctlRoute> {
     })
 }
 
-async fn cycle_audio_route(section: AudioRouteSection) -> bool {
-    let summary = Command::new("wpctl")
-        .arg("status")
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|stdout| parse_wpctl_route_summary(&stdout))
-        .unwrap_or_default();
-
-    let routes = match section {
-        AudioRouteSection::Sinks => &summary.output_routes,
-        AudioRouteSection::Sources => &summary.input_routes,
-    };
-    let current = match section {
-        AudioRouteSection::Sinks => summary.output_route.as_deref(),
-        AudioRouteSection::Sources => summary.input_route.as_deref(),
-    };
-
-    let Some(next_route) = next_audio_route(routes, current) else {
-        return false;
-    };
-
+async fn set_audio_route(id: String) -> bool {
     tokio::process::Command::new("wpctl")
-        .args(["set-default", &next_route.id])
+        .args(["set-default", &id])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .await
         .map(|status| status.success())
         .unwrap_or(false)
-}
-
-fn next_audio_route<'a>(
-    routes: &'a [crate::services::controls::AudioRouteInfo],
-    current: Option<&str>,
-) -> Option<&'a crate::services::controls::AudioRouteInfo> {
-    if routes.is_empty() {
-        return None;
-    }
-
-    let next_index = current
-        .and_then(|current| routes.iter().position(|route| route.name == current))
-        .map(|index| (index + 1) % routes.len())
-        .unwrap_or(0);
-
-    routes.get(next_index)
 }
 
 #[cfg(test)]

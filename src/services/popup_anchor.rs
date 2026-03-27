@@ -4,6 +4,7 @@ use iced::platform_specific::shell::commands::layer_surface::Anchor;
 pub enum PopupSurfaceKind {
     Hidden,
     ControlCenter,
+    AudioRoutes,
     SystemMonitor,
     Displays,
     Calendar,
@@ -51,6 +52,12 @@ impl PopupAnchorService {
             },
             PopupSurfaceKind::SystemMonitor => PopupSurfacePlan {
                 width: 400,
+                height: 520,
+                anchor: Anchor::TOP | Anchor::RIGHT,
+                margin: (self.bar_height, 8, 0, 0),
+            },
+            PopupSurfaceKind::AudioRoutes => PopupSurfacePlan {
+                width: 460,
                 height: 520,
                 anchor: Anchor::TOP | Anchor::RIGHT,
                 margin: (self.bar_height, 8, 0, 0),
@@ -117,6 +124,15 @@ mod tests {
     fn displays_plan_uses_dedicated_surface_size() {
         let service = PopupAnchorService::new(24);
         let plan = service.plan(PopupSurfaceKind::Displays, None, None);
+        assert_eq!(plan.width, 460);
+        assert_eq!(plan.height, 520);
+        assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
+    }
+
+    #[test]
+    fn audio_routes_plan_uses_dedicated_surface_size() {
+        let service = PopupAnchorService::new(24);
+        let plan = service.plan(PopupSurfaceKind::AudioRoutes, None, None);
         assert_eq!(plan.width, 460);
         assert_eq!(plan.height, 520);
         assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
