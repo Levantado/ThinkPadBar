@@ -742,9 +742,46 @@ fn parse_wpctl_route_entry_line(line: &str) -> Option<ParsedWpctlRoute> {
         info: crate::services::controls::AudioRouteInfo {
             id: id.to_string(),
             name: name.to_string(),
+            origin: classify_audio_route_origin(name),
         },
         is_default,
     })
+}
+
+fn classify_audio_route_origin(name: &str) -> crate::services::controls::AudioRouteOrigin {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("bluez")
+        || lower.contains("bluetooth")
+        || lower.contains("a2dp")
+        || lower.contains("hfp")
+    {
+        crate::services::controls::AudioRouteOrigin::Bluetooth
+    } else if lower.contains("usb") || lower.contains("dac") {
+        crate::services::controls::AudioRouteOrigin::Usb
+    } else if lower.contains("hdmi")
+        || lower.contains("displayport")
+        || lower.contains("display port")
+        || lower.contains("dp ")
+    {
+        crate::services::controls::AudioRouteOrigin::Hdmi
+    } else if lower.contains("monitor")
+        || lower.contains("virtual")
+        || lower.contains("loopback")
+        || lower.contains("null")
+    {
+        crate::services::controls::AudioRouteOrigin::Virtual
+    } else if lower.contains("speaker")
+        || lower.contains("headphone")
+        || lower.contains("headset")
+        || lower.contains("microphone")
+        || lower.contains("mic")
+        || lower.contains("built-in")
+        || lower.contains("internal")
+    {
+        crate::services::controls::AudioRouteOrigin::Internal
+    } else {
+        crate::services::controls::AudioRouteOrigin::Unknown
+    }
 }
 
 async fn set_audio_route(id: String) -> bool {
@@ -762,9 +799,9 @@ async fn set_audio_route(id: String) -> bool {
 mod tests {
     use super::{
         audio_param_event_label, metadata_event_label, parse_wpctl_default_routes,
-        parse_wpctl_volume, should_emit_audio_metadata_property, should_emit_audio_node_info,
-        should_emit_audio_param, should_track_audio_metadata, should_track_audio_node,
-        AudioEventRuntimeDiagnostics, WpctlAudioBackend,
+        parse_wpctl_route_summary, parse_wpctl_volume, should_emit_audio_metadata_property,
+        should_emit_audio_node_info, should_emit_audio_param, should_track_audio_metadata,
+        should_track_audio_node, AudioEventRuntimeDiagnostics, WpctlAudioBackend,
     };
 
     #[test]
@@ -915,6 +952,57 @@ mod tests {
             )
             .unwrap()
             .contains("stopped")
+        );
+    }
+
+    #[test]
+    fn parse_wpctl_default_routes_classifies_route_origins() {
+        let sample = r#"Audio
+ ├─ Sinks:
+ │  * 52. Built-in Audio Analog Stereo [vol: 0.60]
+ │    77. WH-1000XM5 a2dp-sink [vol: 0.42]
+ │    88. USB Audio DAC [vol: 0.55]
+ ├─ Sources:
+ │  * 63. Built-in Microphone [vol: 0.70]
+ │    91. USB Audio CODEC Mono [vol: 0.33]
+"#;
+
+        let routes = parse_wpctl_route_summary(sample);
+
+        assert_eq!(
+            routes.output_routes,
+            vec![
+                crate::services::controls::AudioRouteInfo {
+                    id: "52".to_string(),
+                    name: "Built-in Audio Analog Stereo".to_string(),
+                    origin: crate::services::controls::AudioRouteOrigin::Internal,
+                },
+                crate::services::controls::AudioRouteInfo {
+                    id: "77".to_string(),
+                    name: "WH-1000XM5 a2dp-sink".to_string(),
+                    origin: crate::services::controls::AudioRouteOrigin::Bluetooth,
+                },
+                crate::services::controls::AudioRouteInfo {
+                    id: "88".to_string(),
+                    name: "USB Audio DAC".to_string(),
+                    origin: crate::services::controls::AudioRouteOrigin::Usb,
+                },
+            ]
+        );
+        assert_eq!(
+            routes.input_routes,
+            vec![
+                crate::services::controls::AudioRouteInfo {
+                    id: "63".to_string(),
+                    name: "Built-in Microphone".to_string(),
+                    origin: crate::services::controls::AudioRouteOrigin::Internal,
+                },
+                crate::services::controls::AudioRouteInfo {
+                    id: "91".to_string(),
+                    name: "USB Audio CODEC Mono".to_string(),
+                    origin: crate::services::controls::AudioRouteOrigin::Usb,
+                },
+            ]
         );
     }
 }

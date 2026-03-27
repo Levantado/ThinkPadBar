@@ -10,10 +10,46 @@ pub struct AudioInfo {
     pub muted: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioRouteOrigin {
+    Bluetooth,
+    Usb,
+    Internal,
+    Hdmi,
+    Virtual,
+    #[default]
+    Unknown,
+}
+
+impl AudioRouteOrigin {
+    pub fn badge_label(self) -> &'static str {
+        match self {
+            Self::Bluetooth => "BT",
+            Self::Usb => "USB",
+            Self::Internal => "INTERNAL",
+            Self::Hdmi => "HDMI",
+            Self::Virtual => "VIRTUAL",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+
+    pub fn summary_label(self) -> &'static str {
+        match self {
+            Self::Bluetooth => "Bluetooth route",
+            Self::Usb => "USB route",
+            Self::Internal => "Internal route",
+            Self::Hdmi => "Display/HDMI route",
+            Self::Virtual => "Virtual route",
+            Self::Unknown => "Unclassified route",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AudioRouteInfo {
     pub id: String,
     pub name: String,
+    pub origin: AudioRouteOrigin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -29,6 +65,8 @@ pub struct BluetoothConnectedDevice {
     pub address: String,
     pub name: String,
     pub connected: bool,
+    pub paired: bool,
+    pub trusted: bool,
     pub battery_percent: Option<u8>,
     pub audio_profiles: Vec<String>,
 }
@@ -234,6 +272,9 @@ pub enum ControlsCommand {
     ToggleBluetooth(bool),
     ConnectBluetoothDevice(String),
     DisconnectBluetoothDevice(String),
+    PairBluetoothDevice(String),
+    TrustBluetoothDevice(String),
+    RemoveBluetoothDevice(String),
     OpenOverskride,
 }
 
@@ -391,6 +432,23 @@ impl ControlsService {
                     false,
                 );
             }
+            ControlsCommand::PairBluetoothDevice(address) => {
+                update_bluetooth_device_pair_state(
+                    &mut self.snapshot.bluetooth_devices,
+                    address,
+                    true,
+                );
+            }
+            ControlsCommand::TrustBluetoothDevice(address) => {
+                update_bluetooth_device_trust_state(
+                    &mut self.snapshot.bluetooth_devices,
+                    address,
+                    true,
+                );
+            }
+            ControlsCommand::RemoveBluetoothDevice(address) => {
+                remove_bluetooth_device(&mut self.snapshot.bluetooth_devices, address);
+            }
             ControlsCommand::ToggleAudioMute
             | ControlsCommand::ToggleMicMute
             | ControlsCommand::OpenOverskride => {}
@@ -494,6 +552,18 @@ impl ControlsService {
                 let _ = self.bluetooth_backend.disconnect_device(address).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
             }
+            ControlsCommand::PairBluetoothDevice(address) => {
+                let _ = self.bluetooth_backend.pair_device(address).await;
+                ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
+            }
+            ControlsCommand::TrustBluetoothDevice(address) => {
+                let _ = self.bluetooth_backend.trust_device(address).await;
+                ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
+            }
+            ControlsCommand::RemoveBluetoothDevice(address) => {
+                let _ = self.bluetooth_backend.remove_device(address).await;
+                ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
+            }
             ControlsCommand::OpenOverskride => {
                 let _ = self.bluetooth_backend.open_overskride();
                 ControlsFollowUp::RefreshCompositor
@@ -524,6 +594,42 @@ fn update_bluetooth_device_connection_state(
         }
     }
 
+    summary.connected_devices = summary
+        .device_details
+        .iter()
+        .filter(|device| device.connected)
+        .map(|device| device.name.clone())
+        .collect();
+}
+
+fn update_bluetooth_device_pair_state(
+    summary: &mut BluetoothDeviceSummary,
+    address: &str,
+    paired: bool,
+) {
+    for device in &mut summary.device_details {
+        if device.address == address {
+            device.paired = paired;
+        }
+    }
+}
+
+fn update_bluetooth_device_trust_state(
+    summary: &mut BluetoothDeviceSummary,
+    address: &str,
+    trusted: bool,
+) {
+    for device in &mut summary.device_details {
+        if device.address == address {
+            device.trusted = trusted;
+        }
+    }
+}
+
+fn remove_bluetooth_device(summary: &mut BluetoothDeviceSummary, address: &str) {
+    summary
+        .device_details
+        .retain(|device| device.address != address);
     summary.connected_devices = summary
         .device_details
         .iter()
@@ -660,6 +766,27 @@ impl crate::services::controls_backends::BluetoothBackend for NoopBluetoothBacke
         Box::pin(async { true })
     }
 
+    fn pair_device(
+        &self,
+        _address: String,
+    ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
+    fn trust_device(
+        &self,
+        _address: String,
+    ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
+    fn remove_device(
+        &self,
+        _address: String,
+    ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
     fn open_overskride(&self) -> bool {
         true
     }
@@ -701,9 +828,9 @@ impl crate::services::controls_backends::PowerBackend for NoopPowerBackend {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioDeviceSummary, AudioInfo, AudioRouteInfo, BatteryThresholdPreset, BatteryThresholds,
-        BluetoothConnectedDevice, BluetoothDeviceSummary, BrightnessSnapshot, ControlsCommand,
-        ControlsRefresh, ControlsRefreshKind, ControlsService, ControlsSnapshot,
+        AudioDeviceSummary, AudioInfo, AudioRouteInfo, AudioRouteOrigin, BatteryThresholdPreset,
+        BatteryThresholds, BluetoothConnectedDevice, BluetoothDeviceSummary, BrightnessSnapshot,
+        ControlsCommand, ControlsRefresh, ControlsRefreshKind, ControlsService, ControlsSnapshot,
     };
     use crate::modules::mic::MicInfo;
     use std::sync::{Arc, Mutex};
@@ -878,6 +1005,48 @@ mod tests {
             })
         }
 
+        fn pair_device(
+            &self,
+            address: String,
+        ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+            let command_calls = self.command_calls.clone();
+            Box::pin(async move {
+                command_calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("pair:{address}"));
+                true
+            })
+        }
+
+        fn trust_device(
+            &self,
+            address: String,
+        ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+            let command_calls = self.command_calls.clone();
+            Box::pin(async move {
+                command_calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("trust:{address}"));
+                true
+            })
+        }
+
+        fn remove_device(
+            &self,
+            address: String,
+        ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+            let command_calls = self.command_calls.clone();
+            Box::pin(async move {
+                command_calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("remove:{address}"));
+                true
+            })
+        }
+
         fn open_overskride(&self) -> bool {
             let mut calls = self.overskride_calls.lock().unwrap();
             *calls += 1;
@@ -959,20 +1128,24 @@ mod tests {
                         AudioRouteInfo {
                             id: "52".to_string(),
                             name: "Built-in Audio".to_string(),
+                            origin: AudioRouteOrigin::Internal,
                         },
                         AudioRouteInfo {
                             id: "77".to_string(),
                             name: "USB Audio DAC".to_string(),
+                            origin: AudioRouteOrigin::Usb,
                         },
                     ],
                     input_routes: vec![
                         AudioRouteInfo {
                             id: "54".to_string(),
                             name: "Internal Microphone".to_string(),
+                            origin: AudioRouteOrigin::Internal,
                         },
                         AudioRouteInfo {
                             id: "80".to_string(),
                             name: "USB Microphone".to_string(),
+                            origin: AudioRouteOrigin::Usb,
                         },
                     ],
                 },
@@ -994,6 +1167,8 @@ mod tests {
                         address: "AA:BB:CC:DD:EE:FF".to_string(),
                         name: "WH-1000XM5".to_string(),
                         connected: true,
+                        paired: true,
+                        trusted: true,
                         battery_percent: Some(90),
                         audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
                     }],
@@ -1037,22 +1212,38 @@ mod tests {
                         AudioRouteInfo {
                             id: "52".to_string(),
                             name: "Built-in Audio".to_string(),
+                            origin: AudioRouteOrigin::Internal,
                         },
                         AudioRouteInfo {
                             id: "77".to_string(),
                             name: "USB Audio DAC".to_string(),
+                            origin: AudioRouteOrigin::Usb,
                         },
                     ],
                     input_routes: vec![
                         AudioRouteInfo {
                             id: "54".to_string(),
                             name: "Internal Microphone".to_string(),
+                            origin: AudioRouteOrigin::Internal,
                         },
                         AudioRouteInfo {
                             id: "80".to_string(),
                             name: "USB Microphone".to_string(),
+                            origin: AudioRouteOrigin::Usb,
                         },
                     ],
+                },
+                bluetooth_devices: BluetoothDeviceSummary {
+                    connected_devices: vec!["WH-1000XM5".to_string()],
+                    device_details: vec![BluetoothConnectedDevice {
+                        address: "AA:BB:CC:DD:EE:FF".to_string(),
+                        name: "WH-1000XM5".to_string(),
+                        connected: true,
+                        paired: false,
+                        trusted: false,
+                        battery_percent: Some(90),
+                        audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
+                    }],
                 },
                 ..ControlsSnapshot::default()
             },
@@ -1094,6 +1285,12 @@ mod tests {
         service.preview_command(&ControlsCommand::DisconnectBluetoothDevice(
             "AA:BB:CC:DD:EE:FF".to_string(),
         ));
+        service.preview_command(&ControlsCommand::PairBluetoothDevice(
+            "AA:BB:CC:DD:EE:FF".to_string(),
+        ));
+        service.preview_command(&ControlsCommand::TrustBluetoothDevice(
+            "AA:BB:CC:DD:EE:FF".to_string(),
+        ));
         service.preview_command(&ControlsCommand::SetPowerProfile("performance".to_string()));
         service.preview_command(&ControlsCommand::ApplyBatteryThresholdPreset(
             BatteryThresholdPreset::Care,
@@ -1112,12 +1309,28 @@ mod tests {
         assert_eq!(service.snapshot().power_profile, "performance");
         assert_eq!(service.snapshot().battery.charge_start_threshold, Some(40));
         assert_eq!(service.snapshot().battery.charge_end_threshold, Some(80));
+        assert!(service.snapshot().bluetooth_devices.device_details[0].paired);
+        assert!(service.snapshot().bluetooth_devices.device_details[0].trusted);
     }
 
     #[test]
     fn apply_refresh_replaces_audio_and_mic_state() {
         let mut service = ControlsService {
-            snapshot: ControlsSnapshot::default(),
+            snapshot: ControlsSnapshot {
+                bluetooth_devices: BluetoothDeviceSummary {
+                    connected_devices: vec!["WH-1000XM5".to_string()],
+                    device_details: vec![BluetoothConnectedDevice {
+                        address: "AA:BB:CC:DD:EE:FF".to_string(),
+                        name: "WH-1000XM5".to_string(),
+                        connected: true,
+                        paired: false,
+                        trusted: false,
+                        battery_percent: Some(90),
+                        audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
+                    }],
+                },
+                ..ControlsSnapshot::default()
+            },
             audio_backend: Arc::new(MockAudioBackend {
                 audio: AudioInfo {
                     volume: 0,
@@ -1244,6 +1457,21 @@ mod tests {
                 "AA:BB:CC:DD:EE:FF".to_string(),
             ))
             .await;
+        let _ = service
+            .execute(ControlsCommand::PairBluetoothDevice(
+                "AA:BB:CC:DD:EE:FF".to_string(),
+            ))
+            .await;
+        let _ = service
+            .execute(ControlsCommand::TrustBluetoothDevice(
+                "AA:BB:CC:DD:EE:FF".to_string(),
+            ))
+            .await;
+        let _ = service
+            .execute(ControlsCommand::RemoveBluetoothDevice(
+                "AA:BB:CC:DD:EE:FF".to_string(),
+            ))
+            .await;
         let overskride_follow_up = service.execute(ControlsCommand::OpenOverskride).await;
 
         assert_eq!(
@@ -1265,7 +1493,13 @@ mod tests {
         assert_eq!(bluetooth_calls.lock().unwrap().as_slice(), [false]);
         assert_eq!(
             bluetooth_command_calls.lock().unwrap().as_slice(),
-            ["connect:AA:BB:CC:DD:EE:FF", "disconnect:AA:BB:CC:DD:EE:FF",]
+            [
+                "connect:AA:BB:CC:DD:EE:FF",
+                "disconnect:AA:BB:CC:DD:EE:FF",
+                "pair:AA:BB:CC:DD:EE:FF",
+                "trust:AA:BB:CC:DD:EE:FF",
+                "remove:AA:BB:CC:DD:EE:FF",
+            ]
         );
         assert_eq!(*overskride_calls.lock().unwrap(), 1);
         assert_eq!(

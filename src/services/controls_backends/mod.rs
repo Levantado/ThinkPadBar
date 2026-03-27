@@ -37,6 +37,9 @@ pub trait BluetoothBackend: Send + Sync {
     fn toggle(&self, enable: bool) -> bool;
     fn connect_device(&self, address: String) -> BackendFuture<'_, bool>;
     fn disconnect_device(&self, address: String) -> BackendFuture<'_, bool>;
+    fn pair_device(&self, address: String) -> BackendFuture<'_, bool>;
+    fn trust_device(&self, address: String) -> BackendFuture<'_, bool>;
+    fn remove_device(&self, address: String) -> BackendFuture<'_, bool>;
     fn open_overskride(&self) -> bool;
 }
 

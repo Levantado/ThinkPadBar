@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.14] - 2026-03-27
+
+### Changed
+- Deepened the dedicated `Bluetooth Devices` popup from simple connect/disconnect controls to fuller device management:
+  - device cards now surface `PAIRED` and `TRUSTED` state alongside the existing connection and battery badges;
+  - per-device `Pair`, `Trust`, and `Remove` actions were added through typed `ControlsCommand` paths and the existing Bluetooth backend;
+  - the local controls snapshot now previews Bluetooth trust/pair state and device removal before the backend refresh lands.
+- Made the `Audio Routes` popup more informative instead of just listing raw route names:
+  - current default output and input summaries are surfaced at the top of the popup;
+  - each route now carries an explicit origin/type badge (`BT`, `USB`, `INTERNAL`, `HDMI`, `VIRTUAL`, `UNKNOWN`) in addition to its `SINK`/`SOURCE` capability badge;
+  - route detail text is now typed from route origin classification instead of a generic availability label.
+
+### Quality
+- Added regression coverage for:
+  - Bluetooth device info parsing with `Paired` and `Trusted` state;
+  - audio route origin classification from `wpctl status`;
+  - audio current-route summaries preferring typed route origin detail;
+  - updated popup-item and device-card expectations for the richer UI state.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.13] - 2026-03-27
 
 ### Changed

@@ -56,6 +56,8 @@ struct BluetoothDeviceCard {
     detail: Option<String>,
     badges: Vec<String>,
     connected: bool,
+    paired: bool,
+    trusted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +65,7 @@ struct AudioRoutePopupItem {
     id: String,
     label: String,
     capability_label: &'static str,
+    origin_label: &'static str,
     detail: String,
     is_default: bool,
     available: bool,
@@ -155,6 +158,9 @@ pub enum Message {
     ToggleBluetooth(bool),
     ConnectBluetoothDevice(String),
     DisconnectBluetoothDevice(String),
+    PairBluetoothDevice(String),
+    TrustBluetoothDevice(String),
+    RemoveBluetoothDevice(String),
     ToggleIdleInhibitor,
     NextKeyboardLayout,
     TogglePowerMenu,
@@ -726,6 +732,12 @@ impl ThinkPadBar {
                 } else {
                     "DISCONNECTED".to_string()
                 }];
+                if device.paired {
+                    badges.push("PAIRED".to_string());
+                }
+                if device.trusted {
+                    badges.push("TRUSTED".to_string());
+                }
                 if let Some(percent) = device.battery_percent {
                     badges.push(format!("BAT {percent}%"));
                 }
@@ -737,6 +749,8 @@ impl ThinkPadBar {
                     detail,
                     badges,
                     connected: device.connected,
+                    paired: device.paired,
+                    trusted: device.trusted,
                 }
             })
             .collect()
@@ -753,6 +767,7 @@ impl ThinkPadBar {
                 id: String::new(),
                 label: unavailable_label.to_string(),
                 capability_label,
+                origin_label: "N/A",
                 detail: format!("{capability_label} unavailable on current runtime"),
                 is_default: false,
                 available: false,
@@ -765,11 +780,27 @@ impl ThinkPadBar {
                 id: route.id.clone(),
                 label: route.name.clone(),
                 capability_label,
-                detail: "Available route".to_string(),
+                origin_label: route.origin.badge_label(),
+                detail: route.origin.summary_label().to_string(),
                 is_default: current == Some(route.name.as_str()),
                 available: true,
             })
             .collect()
+    }
+
+    fn current_audio_route_summary(
+        routes: &[crate::services::controls::AudioRouteInfo],
+        current: Option<&str>,
+        empty_label: &'static str,
+    ) -> String {
+        match current {
+            Some(current_name) => routes
+                .iter()
+                .find(|route| route.name == current_name)
+                .map(|route| format!("{} • {}", route.name, route.origin.summary_label()))
+                .unwrap_or_else(|| format!("{current_name} • Active default")),
+            None => empty_label.to_string(),
+        }
     }
 
     fn audio_route_popup_actions() -> Vec<(&'static str, &'static str, Popup)> {
@@ -1549,6 +1580,27 @@ impl ThinkPadBar {
             Message::DisconnectBluetoothDevice(address) => {
                 let command =
                     crate::services::controls::ControlsCommand::DisconnectBluetoothDevice(address);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
+            }
+            Message::PairBluetoothDevice(address) => {
+                let command =
+                    crate::services::controls::ControlsCommand::PairBluetoothDevice(address);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
+            }
+            Message::TrustBluetoothDevice(address) => {
+                let command =
+                    crate::services::controls::ControlsCommand::TrustBluetoothDevice(address);
+                self.controls_service.preview_command(&command);
+                self.controls = self.controls_service.snapshot().clone();
+                return self.execute_controls_command(command);
+            }
+            Message::RemoveBluetoothDevice(address) => {
+                let command =
+                    crate::services::controls::ControlsCommand::RemoveBluetoothDevice(address);
                 self.controls_service.preview_command(&command);
                 self.controls = self.controls_service.snapshot().clone();
                 return self.execute_controls_command(command);
@@ -2409,6 +2461,39 @@ impl ThinkPadBar {
                 .into()
             };
 
+            let summary_item =
+                |label: &str, val: String| -> Element<'_, Message, Theme, iced::Renderer> {
+                    Row::new()
+                        .spacing(12)
+                        .align_y(Alignment::Center)
+                        .push(
+                            text(label.to_string())
+                                .size(13)
+                                .width(Length::FillPortion(2)),
+                        )
+                        .push(
+                            text(val)
+                                .size(13)
+                                .width(Length::FillPortion(3))
+                                .align_x(iced::alignment::Horizontal::Right),
+                        )
+                        .into()
+                };
+
+            let route_badge = |label: &'static str, bg: Color, fg: Color| {
+                container(text(label).size(9))
+                    .padding(Padding::from([2, 6]))
+                    .style(move |_| container::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        text_color: Some(fg),
+                        border: iced::Border {
+                            radius: 999.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+            };
+
             let route_button = |item: AudioRoutePopupItem, is_output: bool| {
                 let message = if is_output {
                     Message::SetAudioOutputRoute(item.id.clone())
@@ -2428,50 +2513,29 @@ impl ThinkPadBar {
                                 .spacing(6)
                                 .align_y(Alignment::Center)
                                 .push(text(item.label.clone()).size(13))
-                                .push(
-                                    container(text(item.capability_label).size(9))
-                                        .padding(Padding::from([2, 6]))
-                                        .style(|_| container::Style {
-                                            background: Some(iced::Background::Color(
-                                                Color::from_rgb8(0x36, 0x3d, 0x59),
-                                            )),
-                                            text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                                            border: iced::Border {
-                                                radius: 999.0.into(),
-                                                ..Default::default()
-                                            },
-                                            ..Default::default()
-                                        }),
-                                )
+                                .push(route_badge(
+                                    item.capability_label,
+                                    Color::from_rgb8(0x36, 0x3d, 0x59),
+                                    Color::from_rgb8(0xc0, 0xca, 0xf5),
+                                ))
+                                .push(route_badge(
+                                    item.origin_label,
+                                    Color::from_rgb8(0x2f, 0x43, 0x52),
+                                    Color::from_rgb8(0xc8, 0xdf, 0xf8),
+                                ))
                                 .push_maybe(item.is_default.then(|| {
-                                    container(text("DEFAULT").size(9))
-                                        .padding(Padding::from([2, 6]))
-                                        .style(|_| container::Style {
-                                            background: Some(iced::Background::Color(
-                                                Color::from_rgb8(0x41, 0x48, 0x68),
-                                            )),
-                                            text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                                            border: iced::Border {
-                                                radius: 999.0.into(),
-                                                ..Default::default()
-                                            },
-                                            ..Default::default()
-                                        })
+                                    route_badge(
+                                        "DEFAULT",
+                                        Color::from_rgb8(0x41, 0x48, 0x68),
+                                        Color::from_rgb8(0xc0, 0xca, 0xf5),
+                                    )
                                 }))
                                 .push_maybe((!item.available).then(|| {
-                                    container(text("UNAVAILABLE").size(9))
-                                        .padding(Padding::from([2, 6]))
-                                        .style(|_| container::Style {
-                                            background: Some(iced::Background::Color(
-                                                Color::from_rgb8(0x53, 0x31, 0x31),
-                                            )),
-                                            text_color: Some(Color::from_rgb8(0xf7, 0xc0, 0xc0)),
-                                            border: iced::Border {
-                                                radius: 999.0.into(),
-                                                ..Default::default()
-                                            },
-                                            ..Default::default()
-                                        })
+                                    route_badge(
+                                        "UNAVAILABLE",
+                                        Color::from_rgb8(0x53, 0x31, 0x31),
+                                        Color::from_rgb8(0xf7, 0xc0, 0xc0),
+                                    )
                                 }))
                                 .push(Space::with_width(Length::Fill))
                                 .push_maybe((!item.id.is_empty()).then(|| {
@@ -2548,6 +2612,22 @@ impl ThinkPadBar {
                         .push(Space::with_width(Length::Fill)),
                 )
                 .push(action_row)
+                .push(summary_item(
+                    "Current Output",
+                    Self::current_audio_route_summary(
+                        &self.controls.audio_devices.output_routes,
+                        self.controls.audio_devices.output_route.as_deref(),
+                        "No output route selected",
+                    ),
+                ))
+                .push(summary_item(
+                    "Current Input",
+                    Self::current_audio_route_summary(
+                        &self.controls.audio_devices.input_routes,
+                        self.controls.audio_devices.input_route.as_deref(),
+                        "No input route selected",
+                    ),
+                ))
                 .push(route_section("Output Routes", "󰕾", output_routes, true))
                 .push(route_section("Input Routes", "", input_routes, false));
 
@@ -2705,13 +2785,28 @@ impl ThinkPadBar {
                         badges_row = badges_row.push(badge(badge_label));
                     }
 
-                    let action = if device.connected {
+                    let connect_action = if device.connected {
                         Message::DisconnectBluetoothDevice(device.address.clone())
                     } else {
                         Message::ConnectBluetoothDevice(device.address.clone())
                     };
 
                     let can_press = self.controls.bluetooth_enabled || device.connected;
+                    let pair_action = (!device.paired && self.controls.bluetooth_enabled)
+                        .then(|| Message::PairBluetoothDevice(device.address.clone()));
+                    let trust_action =
+                        (device.paired && !device.trusted && self.controls.bluetooth_enabled)
+                            .then(|| Message::TrustBluetoothDevice(device.address.clone()));
+                    let remove_action = (!device.connected)
+                        .then(|| Message::RemoveBluetoothDevice(device.address.clone()));
+
+                    let action_button =
+                        |label: &'static str, message: Option<Message>| -> Element<'_, Message> {
+                            button(text(label).size(10))
+                                .padding(Padding::from([4, 8]))
+                                .on_press_maybe(message)
+                                .into()
+                        };
 
                     let card = Column::new()
                         .spacing(8)
@@ -2722,18 +2817,14 @@ impl ThinkPadBar {
                                 .push(text("󰂯").size(13))
                                 .push(text(device.label.clone()).size(13))
                                 .push(Space::with_width(Length::Fill))
-                                .push(
-                                    button(
-                                        text(if device.connected {
-                                            "Disconnect"
-                                        } else {
-                                            "Connect"
-                                        })
-                                        .size(10),
-                                    )
-                                    .padding(Padding::from([4, 8]))
-                                    .on_press_maybe(can_press.then_some(action)),
-                                ),
+                                .push(action_button(
+                                    if device.connected {
+                                        "Disconnect"
+                                    } else {
+                                        "Connect"
+                                    },
+                                    can_press.then_some(connect_action),
+                                )),
                         )
                         .push(badges_row)
                         .push(text(device.summary.clone()).size(11).style(|_| {
@@ -2747,7 +2838,14 @@ impl ThinkPadBar {
                                 .style(|_| iced::widget::text::Style {
                                     color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
                                 })
-                        }));
+                        }))
+                        .push(
+                            Row::new()
+                                .spacing(8)
+                                .push(action_button("Pair", pair_action))
+                                .push(action_button("Trust", trust_action))
+                                .push(action_button("Remove", remove_action)),
+                        );
 
                     content =
                         content.push(container(card).padding(12).style(|_| container::Style {
@@ -4904,20 +5002,24 @@ mod tests {
                         crate::services::controls::AudioRouteInfo {
                             id: "52".to_string(),
                             name: "Built-in Audio".to_string(),
+                            origin: crate::services::controls::AudioRouteOrigin::Internal,
                         },
                         crate::services::controls::AudioRouteInfo {
                             id: "77".to_string(),
                             name: "USB DAC".to_string(),
+                            origin: crate::services::controls::AudioRouteOrigin::Usb,
                         },
                     ],
                     input_routes: vec![
                         crate::services::controls::AudioRouteInfo {
                             id: "54".to_string(),
                             name: "Internal Microphone".to_string(),
+                            origin: crate::services::controls::AudioRouteOrigin::Internal,
                         },
                         crate::services::controls::AudioRouteInfo {
                             id: "81".to_string(),
                             name: "USB Mic".to_string(),
+                            origin: crate::services::controls::AudioRouteOrigin::Usb,
                         },
                     ],
                 },
@@ -4952,6 +5054,8 @@ mod tests {
                             address: "AA:BB:CC:DD:EE:FF".to_string(),
                             name: "WH-1000XM5".to_string(),
                             connected: true,
+                            paired: true,
+                            trusted: true,
                             battery_percent: Some(90),
                             audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
                         },
@@ -4959,6 +5063,8 @@ mod tests {
                             address: "11:22:33:44:55:66".to_string(),
                             name: "MX Master 3S".to_string(),
                             connected: true,
+                            paired: true,
+                            trusted: false,
                             battery_percent: Some(55),
                             audio_profiles: Vec::new(),
                         },
@@ -5001,6 +5107,8 @@ mod tests {
                     address: "AA:BB:CC:DD:EE:FF".to_string(),
                     name: "WH-1000XM5".to_string(),
                     connected: true,
+                    paired: true,
+                    trusted: true,
                     battery_percent: Some(90),
                     audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
                 }],
@@ -5014,8 +5122,15 @@ mod tests {
                 label: "WH-1000XM5".to_string(),
                 summary: "Connected • Battery 90%".to_string(),
                 detail: Some("AA:BB:CC:DD:EE:FF • A2DP • AVRCP".to_string()),
-                badges: vec!["CONNECTED".to_string(), "BAT 90%".to_string()],
+                badges: vec![
+                    "CONNECTED".to_string(),
+                    "PAIRED".to_string(),
+                    "TRUSTED".to_string(),
+                    "BAT 90%".to_string(),
+                ],
                 connected: true,
+                paired: true,
+                trusted: true,
             }]
         );
     }
@@ -5027,10 +5142,12 @@ mod tests {
                 crate::services::controls::AudioRouteInfo {
                     id: "52".to_string(),
                     name: "Built-in Audio".to_string(),
+                    origin: crate::services::controls::AudioRouteOrigin::Internal,
                 },
                 crate::services::controls::AudioRouteInfo {
                     id: "77".to_string(),
                     name: "USB DAC".to_string(),
+                    origin: crate::services::controls::AudioRouteOrigin::Usb,
                 },
             ],
             Some("USB DAC"),
@@ -5045,7 +5162,8 @@ mod tests {
                     id: "52".to_string(),
                     label: "Built-in Audio".to_string(),
                     capability_label: "SINK",
-                    detail: "Available route".to_string(),
+                    origin_label: "INTERNAL",
+                    detail: "Internal route".to_string(),
                     is_default: false,
                     available: true,
                 },
@@ -5053,7 +5171,8 @@ mod tests {
                     id: "77".to_string(),
                     label: "USB DAC".to_string(),
                     capability_label: "SINK",
-                    detail: "Available route".to_string(),
+                    origin_label: "USB",
+                    detail: "USB route".to_string(),
                     is_default: true,
                     available: true,
                 },
@@ -5072,10 +5191,40 @@ mod tests {
                 id: String::new(),
                 label: "No input routes discovered".to_string(),
                 capability_label: "SOURCE",
+                origin_label: "N/A",
                 detail: "SOURCE unavailable on current runtime".to_string(),
                 is_default: false,
                 available: false,
             }]
+        );
+    }
+
+    #[test]
+    fn current_audio_route_summary_prefers_route_origin_when_known() {
+        let routes = vec![
+            crate::services::controls::AudioRouteInfo {
+                id: "52".to_string(),
+                name: "Built-in Audio".to_string(),
+                origin: crate::services::controls::AudioRouteOrigin::Internal,
+            },
+            crate::services::controls::AudioRouteInfo {
+                id: "77".to_string(),
+                name: "WH-1000XM5".to_string(),
+                origin: crate::services::controls::AudioRouteOrigin::Bluetooth,
+            },
+        ];
+
+        assert_eq!(
+            ThinkPadBar::current_audio_route_summary(
+                &routes,
+                Some("WH-1000XM5"),
+                "No output route selected"
+            ),
+            "WH-1000XM5 • Bluetooth route"
+        );
+        assert_eq!(
+            ThinkPadBar::current_audio_route_summary(&routes, None, "No output route selected"),
+            "No output route selected"
         );
     }
 
@@ -5090,6 +5239,7 @@ mod tests {
         controls.audio_devices.output_routes = vec![crate::services::controls::AudioRouteInfo {
             id: "52".to_string(),
             name: "Built-in Audio".to_string(),
+            origin: crate::services::controls::AudioRouteOrigin::Internal,
         }];
         assert_eq!(
             ThinkPadBar::audio_route_button_label(&controls),
@@ -5099,6 +5249,7 @@ mod tests {
         controls.audio_devices.input_routes = vec![crate::services::controls::AudioRouteInfo {
             id: "54".to_string(),
             name: "Internal Microphone".to_string(),
+            origin: crate::services::controls::AudioRouteOrigin::Internal,
         }];
         assert_eq!(
             ThinkPadBar::audio_route_button_label(&controls),

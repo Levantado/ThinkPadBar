@@ -117,6 +117,45 @@ impl super::BluetoothBackend for BluetoothCtlBackend {
         })
     }
 
+    fn pair_device(&self, address: String) -> super::BackendFuture<'_, bool> {
+        Box::pin(async move {
+            tokio::process::Command::new("bluetoothctl")
+                .args(["pair", &address])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|status| status.success())
+                .unwrap_or(false)
+        })
+    }
+
+    fn trust_device(&self, address: String) -> super::BackendFuture<'_, bool> {
+        Box::pin(async move {
+            tokio::process::Command::new("bluetoothctl")
+                .args(["trust", &address])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|status| status.success())
+                .unwrap_or(false)
+        })
+    }
+
+    fn remove_device(&self, address: String) -> super::BackendFuture<'_, bool> {
+        Box::pin(async move {
+            tokio::process::Command::new("bluetoothctl")
+                .args(["remove", &address])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|status| status.success())
+                .unwrap_or(false)
+        })
+    }
+
     fn open_overskride(&self) -> bool {
         let direct = Command::new("overskride")
             .stdout(Stdio::null())
@@ -172,7 +211,7 @@ fn connected_device_summary() -> crate::services::controls::BluetoothDeviceSumma
                 .ok()
                 .and_then(|output| String::from_utf8(output.stdout).ok());
 
-            let (connected, battery_percent, audio_profiles) = info_output
+            let info = info_output
                 .as_deref()
                 .map(parse_bluetooth_device_info)
                 .unwrap_or_default();
@@ -180,9 +219,11 @@ fn connected_device_summary() -> crate::services::controls::BluetoothDeviceSumma
             crate::services::controls::BluetoothConnectedDevice {
                 address: device.address.clone(),
                 name: device.name.clone(),
-                connected,
-                battery_percent,
-                audio_profiles,
+                connected: info.connected,
+                paired: info.paired,
+                trusted: info.trusted,
+                battery_percent: info.battery_percent,
+                audio_profiles: info.audio_profiles,
             }
         })
         .collect::<Vec<_>>();
@@ -243,19 +284,34 @@ pub(crate) fn parse_powered_from_bluetoothctl(output: &str) -> Option<bool> {
     None
 }
 
-pub(crate) fn parse_bluetooth_device_info(output: &str) -> (bool, Option<u8>, Vec<String>) {
-    let mut connected = false;
-    let mut battery_percent = None;
-    let mut audio_profiles = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct BluetoothDeviceInfo {
+    pub connected: bool,
+    pub paired: bool,
+    pub trusted: bool,
+    pub battery_percent: Option<u8>,
+    pub audio_profiles: Vec<String>,
+}
+
+pub(crate) fn parse_bluetooth_device_info(output: &str) -> BluetoothDeviceInfo {
+    let mut info = BluetoothDeviceInfo::default();
 
     for line in output.lines() {
         let trimmed = line.trim();
         if let Some(value) = trimmed.strip_prefix("Connected:") {
-            connected = value.trim().eq_ignore_ascii_case("yes");
+            info.connected = value.trim().eq_ignore_ascii_case("yes");
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("Paired:") {
+            info.paired = value.trim().eq_ignore_ascii_case("yes");
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("Trusted:") {
+            info.trusted = value.trim().eq_ignore_ascii_case("yes");
             continue;
         }
         if let Some(value) = trimmed.strip_prefix("Battery Percentage:") {
-            battery_percent = parse_bluetooth_battery_percent(value);
+            info.battery_percent = parse_bluetooth_battery_percent(value);
             continue;
         }
 
@@ -267,13 +323,17 @@ pub(crate) fn parse_bluetooth_device_info(output: &str) -> (bool, Option<u8>, Ve
             continue;
         };
         if let Some(profile) = normalize_audio_profile_name(name.trim()) {
-            if !audio_profiles.iter().any(|existing| existing == profile) {
-                audio_profiles.push(profile.to_string());
+            if !info
+                .audio_profiles
+                .iter()
+                .any(|existing| existing == profile)
+            {
+                info.audio_profiles.push(profile.to_string());
             }
         }
     }
 
-    (connected, battery_percent, audio_profiles)
+    info
 }
 
 fn parse_bluetooth_battery_percent(value: &str) -> Option<u8> {
@@ -351,15 +411,19 @@ mod tests {
     fn parse_bluetooth_device_info_extracts_battery_and_audio_profiles() {
         let sample = "Device AA:BB:CC:DD:EE:FF\n\
                       \tConnected: yes\n\
+                      \tPaired: yes\n\
+                      \tTrusted: yes\n\
                       \tBattery Percentage: 0x5A (90)\n\
                       \tUUID: Audio Sink                (0000110b-0000-1000-8000-00805f9b34fb)\n\
                       \tUUID: Handsfree                 (0000111e-0000-1000-8000-00805f9b34fb)\n\
                       \tUUID: A/V_Remote Control        (0000110e-0000-1000-8000-00805f9b34fb)\n";
-        let (connected, battery, profiles) = parse_bluetooth_device_info(sample);
-        assert!(connected);
-        assert_eq!(battery, Some(90));
+        let info = parse_bluetooth_device_info(sample);
+        assert!(info.connected);
+        assert!(info.paired);
+        assert!(info.trusted);
+        assert_eq!(info.battery_percent, Some(90));
         assert_eq!(
-            profiles,
+            info.audio_profiles,
             vec!["A2DP".to_string(), "HFP".to_string(), "AVRCP".to_string()]
         );
     }
