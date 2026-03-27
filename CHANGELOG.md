@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.3] - 2026-03-27
+
+### Changed
+- Fixed the local install workflow documentation for pinned git dependencies:
+  - the recommended source build path now uses `cargo build --release --locked`;
+  - the recommended local install path now copies the already-built binary with `install -Dm755 target/release/thinkpadbar ~/.local/bin/thinkpadbar`;
+  - `cargo install` is now documented only as `cargo install --path . --locked --force`.
+- Documented why plain `cargo install --path .` is unsafe for this project: it can resolve a fresh dependency graph and pull newer incompatible git revisions of transitive dependencies like `cosmic-text` instead of the versions pinned in `Cargo.lock`.
+
+### Quality
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.2] - 2026-03-27
 
 ### Changed

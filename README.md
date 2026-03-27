@@ -7,19 +7,21 @@ A lightweight, high-performance status bar and control center for ThinkPads on H
 ### 1. Build from source
 Ensure you have Rust and Cargo installed. Then run:
 ```bash
-cargo build --release
+cargo build --release --locked
 ```
 
 ### 2. Install the binary
-You can copy the binary to your local bin directory:
+Recommended local install path: copy the already-built locked binary to your local bin directory:
 ```bash
-mkdir -p ~/.local/bin
-cp target/release/thinkpadbar ~/.local/bin/
+install -Dm755 target/release/thinkpadbar ~/.local/bin/thinkpadbar
 ```
-*Alternatively, use cargo:*
+
+If you prefer `cargo install`, keep it locked to the repository dependency graph:
 ```bash
-cargo install --path .
+cargo install --path . --locked --force
 ```
+
+Do not use plain `cargo install --path .` here. It resolves a fresh dependency graph, which can pull newer incompatible git revisions of transitive dependencies like `cosmic-text` instead of the pinned versions in `Cargo.lock`.
 
 ### 3. Autostart in Hyprland
 Add the following line to your `~/.config/hypr/hyprland.conf`:
