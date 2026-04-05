@@ -70,6 +70,20 @@ impl IdleInhibitorSnapshot {
     pub fn debug_summary(&self) -> String {
         self.diagnostics.summary(self.available, self.enabled)
     }
+
+    pub fn capability_status(&self) -> crate::services::capabilities::CapabilityStatus {
+        crate::services::capabilities::CapabilityStatus {
+            key: "idl",
+            label: "Idle Inhibitor",
+            mode: if self.available {
+                crate::services::capabilities::CapabilityMode::Native
+            } else {
+                crate::services::capabilities::CapabilityMode::Unavailable
+            },
+            provider: self.diagnostics.backend_label().to_string(),
+            detail: self.diagnostics.unavailable_reason.clone(),
+        }
+    }
 }
 
 trait IdleInhibitorBackend {
@@ -325,6 +339,10 @@ impl IdleInhibitorService {
         self.snapshot.clone()
     }
 
+    pub fn capability_status(&self) -> crate::services::capabilities::CapabilityStatus {
+        self.snapshot.capability_status()
+    }
+
     #[cfg(test)]
     pub fn unavailable_for_tests() -> Self {
         let mut service = Self {
@@ -572,6 +590,23 @@ mod tests {
         assert_eq!(
             service.snapshot().debug_summary(),
             "none avail:false enabled:false req:false surf:false cmp:- idle:- why:wayland connection unavailable"
+        );
+    }
+
+    #[test]
+    fn capability_status_reports_unavailable_runtime() {
+        let service = IdleInhibitorService::unavailable_for_tests();
+        let status = service.capability_status();
+
+        assert_eq!(status.key, "idl");
+        assert_eq!(
+            status.mode,
+            crate::services::capabilities::CapabilityMode::Unavailable
+        );
+        assert_eq!(status.provider, "none");
+        assert_eq!(
+            status.detail.as_deref(),
+            Some("wayland connection unavailable")
         );
     }
 }

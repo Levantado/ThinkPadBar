@@ -131,6 +131,24 @@ impl CompositorService {
         }
     }
 
+    pub fn capability_status(&self) -> crate::services::capabilities::CapabilityStatus {
+        crate::services::capabilities::CapabilityStatus {
+            key: "cmp",
+            label: "Compositor",
+            mode: if self.snapshot.configured_backend == self.snapshot.active_backend {
+                crate::services::capabilities::CapabilityMode::Native
+            } else {
+                crate::services::capabilities::CapabilityMode::Fallback
+            },
+            provider: format!(
+                "{:?}->{:?}",
+                self.snapshot.configured_backend, self.snapshot.active_backend
+            ),
+            detail: (self.snapshot.configured_backend != self.snapshot.active_backend)
+                .then(|| "configured backend falls back to active runtime backend".to_string()),
+        }
+    }
+
     fn collect_snapshot(&self) -> CompositorSnapshot {
         CompositorSnapshot {
             workspaces: self.backend.get_workspaces(),
@@ -291,5 +309,26 @@ mod tests {
         });
 
         assert_eq!(service.diagnostics().last_refresh_ms, Some(17));
+    }
+
+    #[test]
+    fn capability_status_reports_backend_fallback() {
+        let service = CompositorService::hermetic_for_tests(
+            CompositorBackendKind::Niri,
+            CompositorBackendKind::Hyprland,
+        );
+
+        let status = service.capability_status();
+
+        assert_eq!(status.key, "cmp");
+        assert_eq!(
+            status.mode,
+            crate::services::capabilities::CapabilityMode::Fallback
+        );
+        assert_eq!(status.provider, "Niri->Hyprland");
+        assert_eq!(
+            status.detail.as_deref(),
+            Some("configured backend falls back to active runtime backend")
+        );
     }
 }

@@ -2,6 +2,261 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.38] - 2026-04-06
+
+### Changed
+- Started `S1 Theme Tokens + UI Decomposition` foundation:
+  - added `src/ui/theme.rs` with shared `ThemeTokens`;
+  - added `src/ui/chrome.rs` and moved popup header/navigation chrome out of `app.rs`;
+  - rewired popup navigation/header tests to target the extracted UI layer directly.
+- Started `S2 Capability Model + Backend Honesty` foundation:
+  - added `src/services/capabilities.rs` with explicit runtime capability modes (`native`, `hybrid`, `fallback`, `read-only`, `unavailable`);
+  - added capability reporting for compositor, network, controls, idle inhibitor, session actions, and Wayland runtime;
+  - replaced old fake `Built-in Modules` / `Runtime Contract` observability rows in System Info with real runtime capability summaries and degradation reporting.
+- Removed obsolete compiled stubs for `modules::capabilities` and `modules::runtime` from the module graph so the runtime/debug surface now reflects real service state only.
+
+### Quality
+- Added regression coverage for extracted popup chrome mapping and for capability-status reporting across compositor, network, controls, idle inhibitor, session, and Wayland runtime paths.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features`, `cargo test --workspace --all-features`.
+
+## [1.0.37] - 2026-04-05
+
+### Fixed
+- Removed a runtime panic in the power-profile path (`Cannot start a runtime from within a runtime`) by eliminating blocking D-Bus profile reads on tokio worker threads.
+- Power profile reads now use `powerprofilesctl get` with canonical normalization and sysfs fallback, while async D-Bus remains for `ActiveProfile` writes and event subscription.
+- Stats/Domain popups are no longer force-closed by compositor `active_window` title churn (for example while terminal jobs are updating titles rapidly).
+
+### Quality
+- Added regression test `services::controls_backends::power::tests::current_profile_is_safe_inside_tokio_runtime`.
+- Added regression test `app::tests::compositor_refresh_does_not_close_open_popup_on_active_window_title_change`.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features` (222 passed).
+
+## [1.0.36] - 2026-04-05
+
+### Changed
+- Migrated the power-profile runtime from legacy TLP-oriented flow to `power-profiles-daemon`:
+  - `ControlsService` now uses `PowerProfilesDaemonBackend` as the default power backend;
+  - profile read/write goes through `powerprofilesctl` with canonical mapping (`low-power`, `balanced`, `performance`);
+  - backend keeps a guarded fallback to `platform_profile` when `powerprofilesctl` is unavailable.
+- Removed app-side battery-threshold control actions from the power popup:
+  - `Battery Care` section is now explicitly system-managed/read-only;
+  - old threshold preset command/model plumbing was removed from controls backend contracts and test doubles.
+- Updated power UI semantics after TLP removal:
+  - removed `auto-tlp` profile option from active profile controls;
+  - section label changed from `Power Profiles (TLP)` to `Power Profiles (PPD)`.
+
+### Quality
+- Added/updated regression coverage for post-migration power-profile visual mapping behavior.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features`.
+
+## [1.0.35] - 2026-03-28
+
+### Changed
+- Hardened `Stats` popup rendering against intermittent value disappearance on layered/transparent Wayland setups:
+  - added explicit `stats_row_value(...)` normalization so rendered row values are always non-empty (`--` fallback) after trim;
+  - switched `Stats` row layout to a stable right-aligned value container (`Space::Fill` + fixed value slot) to avoid right-column ambiguity;
+  - forced an opaque top-level `Stats` popup surface clear color in addition to inner card styling to eliminate potential frame bleed from underlying content.
+
+### Quality
+- Added regression test coverage for `stats_row_value(...)` blank-value normalization.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.34] - 2026-03-28
+
+### Changed
+- `Stats` popup background is now fully opaque (alpha `1.0`) to eliminate value/readability interference from underlying windows.
+- Added an explicit regression test that locks `Stats` popup background alpha to opaque behavior.
+
+### Quality
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.33] - 2026-03-28
+
+### Changed
+- Clarified `Battery Care` threshold actions in the power popup:
+  - replaced ambiguous preset labels (`CARE/BAL/FULL`) with explicit two-line action labels:
+    - `Care Mode / 40-80%`
+    - `Balanced / 60-90%`
+    - `Top-Off / 80-100%`
+    - `Full Charge / 0-100%`.
+- Improved vertical centering consistency for `Power Profiles (TLP)` and `Fan Control` buttons.
+- Updated connectivity pill Bluetooth summary to hide standalone `BT` text:
+  - when adapter is on without connected devices, show icon-only;
+  - when devices are connected, show only connected count next to the icon.
+
+### Quality
+- Added regression coverage for actionable battery-threshold preset button text mapping.
+- Updated Bluetooth pill summary regression expectations for icon-only enabled state and numeric connected-count summary.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.32] - 2026-03-28
+
+### Changed
+- Fixed `Stats` popup readability issues where values could look clipped/overlapped:
+  - row layout now uses full-width rows with a stable right value column, preventing right-side value collapse for CPU/Memory/Temperature/Fan rows;
+  - empty values now render as `--` instead of disappearing.
+- Increased `Stats` popup background opacity floor to reduce visual bleed-through from underlying windows/content.
+- Reduced `Stats` popup height from `320` to `280` for a tighter fit with current content.
+
+### Quality
+- Updated popup-anchor regression expectations for the compact `Stats` surface sizing.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.31] - 2026-03-28
+
+### Changed
+- Reworked the top-bar controls area into a single compact `Controls` pill while keeping scroll-wheel control routing per segment:
+  - brightness segment scroll adjusts brightness,
+  - output segment scroll adjusts output volume,
+  - microphone segment scroll adjusts microphone volume.
+- Improved visual cohesion of the combined controls pill by tightening spacing and using subtle separators between segments.
+- Updated `Power Profiles` buttons in the popup to include explicit semantic labels next to icons (`LOW`, `BAL`, `HIGH`, `AUTO`) for faster recognition.
+- Refined battery-pill profile glyph alignment so the profile indicator sits centered relative to adjacent battery text.
+
+### Quality
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.30] - 2026-03-28
+
+### Changed
+- Updated power profile visuals to speedometer-based glyphs with profile color coding:
+  - `low-power` -> green slow speedometer;
+  - `balanced` -> yellow medium speedometer;
+  - `performance` -> red speedometer;
+  - `auto-tlp` -> white `A` + medium speedometer (`A󰾅`).
+- Split the previous combined controls summary into dedicated top-bar pills for:
+  - brightness,
+  - output volume,
+  - microphone volume.
+- Added wheel-scroll behavior on each dedicated controls pill:
+  - brightness pill scroll adjusts brightness,
+  - volume pill scroll adjusts output volume,
+  - microphone pill scroll adjusts mic volume.
+- Added explicit volume percentages for both output and microphone in the controls popup slider rows.
+
+### Quality
+- Added regression tests for speedometer profile labels/colors and wheel delta/step clamp behavior.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.29] - 2026-03-28
+
+### Changed
+- Calendar navigation glyphs were normalized to simple chevrons (`<` and `>`) so previous-month navigation is visually unambiguous.
+
+### Quality
+- Added regression coverage for calendar navigation labels.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.28] - 2026-03-27
+
+### Changed
+- Refined top-bar pill semantics to remove duplication:
+  - merged `Power` profile + `Idle Inhibitor` badge into the `Battery` pill;
+  - removed the separate `Power` pill from the bar row, keeping a single power/battery entry point.
+- Replaced the `Power` domain lock icon with a lightning icon in domain navigation and bar power semantics.
+- Restored `CPU` visibility in the `Stats` pill (`CPU% + Temperature + Fan`) and hardened CPU value formatting fallback.
+- Made `Stats` popup more compact for its current content by reducing the dedicated popup surface size.
+- Normalized the `Power` quick-action row layout so `Idle`, `System Info`, and `Displays` buttons use consistent width distribution.
+
+### Quality
+- Added regression coverage for CPU summary fallback behavior.
+- Updated popup-anchor regression expectations for the compact `Stats` surface sizing.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.27] - 2026-03-27
+
+### Changed
+- Bar information architecture updated per UX feedback:
+  - removed the top `Displays` pill (`Laptop`/monitor summary) to free horizontal space;
+  - moved battery status into a dedicated pill placed next to the keyboard layout pill;
+  - connectivity pill no longer renders `BT off` text when Bluetooth is disabled (crossed Bluetooth icon only).
+- Restored `Stats` popup readability:
+  - added explicit metric icons for CPU, Memory, Temperature, and Fan rows;
+  - added value fallbacks so rows do not appear empty if a string snapshot is temporarily missing;
+  - opening `Stats` and `System Info` now triggers an immediate fast system-info refresh.
+
+### Quality
+- Added regression coverage for Bluetooth pill text behavior and fast refresh on opening `Stats` / `System Info`.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.26] - 2026-03-27
+
+### Changed
+- Continued `Variant A` rollout with `UX-A7`: simplified detail-popup chrome to reduce duplicated navigation and visual weight.
+- Removed redundant detail action rows from `Audio Routes`, `Bluetooth Devices`, and `Displays`; domain tabs now remain the single primary cross-domain navigation surface inside detail views.
+- Added a shared compact detail header with explicit `Close` action for all detail popups, plus one contextual quick-action where it is most useful (`Displays -> System Info`).
+
+### Quality
+- Replaced legacy display-action regression with focused coverage for typed detail-header action mapping.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.25] - 2026-03-27
+
+### Changed
+- Continued `Variant A` rollout with `UX-A6`: extended in-popup domain switcher coverage to detail popups (`Audio Routes`, `Bluetooth Devices`, `Displays`, `System Info`).
+- Added typed domain-focus mapping for detail surfaces so each popup highlights the relevant primary domain tab:
+  - `Audio Routes` and `Displays` -> `Controls`
+  - `Bluetooth Devices` -> `Connectivity`
+  - `System Info` -> `Stats`
+- This keeps navigation consistent across both primary and detail popup layers without returning to the bar.
+
+### Quality
+- Added regression coverage for detail-popup -> domain-focus mapping.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.24] - 2026-03-27
+
+### Changed
+- Continued `Variant A` rollout with `UX-A5`: added an in-popup domain switcher for fast navigation between `Stats`, `Power`, `Controls`, and `Connectivity`.
+- Domain tabs are now rendered inside the `Stats` popup and inside the shared `Power/Controls/Connectivity` popup surface, reducing context switching back to bar pills.
+- Active domain tab is highlighted and non-active tabs navigate directly to the target domain popup.
+
+### Quality
+- Added regression coverage for domain-tab mapping and active-state shaping.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.23] - 2026-03-27
+
+### Changed
+- Continued `Variant A` rollout with `UX-A4`: removed legacy `ControlCenter` popup mode from runtime flow and kept only domain-first popups.
+- Retired `Popup::ControlCenter` and its dedicated popup-surface kind, so popup routing now stays strictly in domain surfaces (`Stats`, `Power`, `Controls`, `Connectivity`) plus focused detail surfaces.
+- Simplified control-domain rendering path by removing legacy-branch conditions and keeping a single modern layout path for `Power`, `Controls`, and `Connectivity`.
+
+### Quality
+- Updated regression coverage to validate domain-state behavior without legacy control-center mode.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.22] - 2026-03-27
+
+### Changed
+- Continued `Variant A` rollout with `UX-A3`: converted legacy `Popup::ControlCenter` into a compact compatibility router instead of a heavy merged content surface.
+- Legacy control-center now navigates users directly into domain popups (`Stats`, `Power`, `Controls`, `Connectivity`) and key detail popups (`Audio Routes`, `Bluetooth Devices`, `Displays`, `System Info`).
+- Opening legacy `Popup::ControlCenter` no longer triggers domain data refreshes; refreshes now happen only when opening the target domain/detail popup.
+- Reduced legacy control-center surface height in `PopupAnchorService` to match its new compact routing role.
+
+### Quality
+- Added regression coverage for:
+  - legacy `ControlCenter` no longer requesting `AudioMic` / `Bluetooth` / `BatteryPower` refreshes on open;
+  - legacy popup-domain mapping behaving as navigation shell (not a domain content popup);
+  - compact legacy `ControlCenter` surface plan sizing in `PopupAnchorService`.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
+## [1.0.21] - 2026-03-27
+
+### Changed
+- Continued `Variant A` split by fully isolating the `Power` domain from legacy `ControlCenter` fallback:
+  - `Power` refresh is now requested only when opening `Popup::Power`;
+  - opening legacy `Popup::ControlCenter` now requests only `AudioMic` + `Bluetooth` refreshes.
+- Added explicit popup-domain state mapping to make domain ownership deterministic and testable:
+  - `Power` is now strictly `Power`-only;
+  - legacy `ControlCenter` is now a compatibility surface for `Controls + Connectivity` only.
+
+### Quality
+- Added regression coverage for:
+  - legacy `ControlCenter` domain mapping excluding `Power`;
+  - legacy popup open refresh path excluding `BatteryPower`.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`.
+
 ## [1.0.20] - 2026-03-27
 
 ### Changed

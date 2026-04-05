@@ -62,6 +62,16 @@ impl SessionService {
         self.snapshot
     }
 
+    pub fn capability_status(&self) -> crate::services::capabilities::CapabilityStatus {
+        crate::services::capabilities::CapabilityStatus {
+            key: "ses",
+            label: "Session Actions",
+            mode: crate::services::capabilities::CapabilityMode::Fallback,
+            provider: "rofi+systemctl+hyprctl".to_string(),
+            detail: Some("process-spawn providers".to_string()),
+        }
+    }
+
     pub fn toggle_power_menu(&mut self) {
         self.snapshot.power_menu_open = !self.snapshot.power_menu_open;
     }
@@ -208,5 +218,18 @@ mod tests {
             &*calls.lock().unwrap(),
             &[("hyprlock".to_string(), Vec::<String>::new())]
         );
+    }
+
+    #[test]
+    fn capability_status_reports_process_runner_fallback() {
+        let status = SessionService::new().capability_status();
+
+        assert_eq!(status.key, "ses");
+        assert_eq!(
+            status.mode,
+            crate::services::capabilities::CapabilityMode::Fallback
+        );
+        assert_eq!(status.provider, "rofi+systemctl+hyprctl");
+        assert_eq!(status.detail.as_deref(), Some("process-spawn providers"));
     }
 }

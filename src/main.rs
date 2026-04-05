@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod modules;
 mod services;
+mod ui;
 
 use app::ThinkPadBar;
 use iced::Font;

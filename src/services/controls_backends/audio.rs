@@ -179,6 +179,10 @@ impl super::AudioBackend for WpctlAudioBackend {
         "wpctl+pipewire"
     }
 
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+        crate::services::capabilities::CapabilityMode::Hybrid
+    }
+
     fn diagnostics_summary(&self) -> Option<String> {
         lock_diagnostics(&self.diagnostics)
             .map(|diagnostics| diagnostics.summary())

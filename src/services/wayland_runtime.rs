@@ -255,6 +255,29 @@ impl WaylandRuntimeSnapshot {
         }
         (!missing.is_empty()).then(|| missing.join(", "))
     }
+
+    pub fn capability_status(&self) -> crate::services::capabilities::CapabilityStatus {
+        let detail = if self.available {
+            self.missing_capabilities()
+                .map(|missing| format!("missing protocols: {missing}"))
+        } else {
+            self.unavailable_reason.clone()
+        };
+
+        crate::services::capabilities::CapabilityStatus {
+            key: "way",
+            label: "Wayland Runtime",
+            mode: if !self.available {
+                crate::services::capabilities::CapabilityMode::Unavailable
+            } else if detail.is_some() {
+                crate::services::capabilities::CapabilityMode::Hybrid
+            } else {
+                crate::services::capabilities::CapabilityMode::Native
+            },
+            provider: "wayland".to_string(),
+            detail,
+        }
+    }
 }
 
 fn version_or_dash(version: Option<u32>) -> String {
@@ -292,6 +315,10 @@ impl WaylandRuntimeService {
 
     pub fn snapshot(&self) -> &WaylandRuntimeSnapshot {
         &self.snapshot
+    }
+
+    pub fn capability_status(&self) -> crate::services::capabilities::CapabilityStatus {
+        self.snapshot.capability_status()
     }
 
     pub fn apply_snapshot(&mut self, snapshot: WaylandRuntimeSnapshot) {
@@ -681,6 +708,37 @@ mod tests {
             Some(
                 "wl_compositor, wl_shm, wl_output, xdg_wm_base, zwlr_layer_shell_v1, zwp_idle_inhibit_manager_v1"
             )
+        );
+    }
+
+    #[test]
+    fn capability_status_surfaces_missing_protocols_as_hybrid() {
+        let service = WaylandRuntimeService::with_snapshot_for_tests(WaylandRuntimeSnapshot {
+            available: true,
+            compositor_version: Some(6),
+            shm_version: Some(1),
+            xdg_wm_base_version: Some(4),
+            layer_shell_version: Some(5),
+            idle_inhibit_version: None,
+            outputs: vec![WaylandOutputInfo {
+                global_name: 1,
+                version: 4,
+                name: Some("eDP-1".to_string()),
+                ..WaylandOutputInfo::default()
+            }],
+            unavailable_reason: None,
+        });
+
+        let status = service.capability_status();
+
+        assert_eq!(status.key, "way");
+        assert_eq!(
+            status.mode,
+            crate::services::capabilities::CapabilityMode::Hybrid
+        );
+        assert_eq!(
+            status.detail.as_deref(),
+            Some("missing protocols: zwp_idle_inhibit_manager_v1")
         );
     }
 }

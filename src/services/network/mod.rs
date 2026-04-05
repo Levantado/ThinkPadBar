@@ -126,6 +126,24 @@ impl NetworkService {
         }
     }
 
+    pub fn capability_status(&self) -> crate::services::capabilities::CapabilityStatus {
+        crate::services::capabilities::CapabilityStatus {
+            key: "net",
+            label: "Network",
+            mode: if self.snapshot.configured_backend == self.snapshot.active_backend {
+                crate::services::capabilities::CapabilityMode::Native
+            } else {
+                crate::services::capabilities::CapabilityMode::Fallback
+            },
+            provider: format!(
+                "{:?}->{:?}",
+                self.snapshot.configured_backend, self.snapshot.active_backend
+            ),
+            detail: (self.snapshot.configured_backend != self.snapshot.active_backend)
+                .then(|| "configured backend is not implemented at runtime".to_string()),
+        }
+    }
+
     pub fn handle_command(
         &mut self,
         command: NetworkCommand,
@@ -445,6 +463,29 @@ mod tests {
         assert_eq!(
             diagnostics.last_error.as_deref(),
             Some("D-Bus недоступен: не удалось открыть system bus")
+        );
+    }
+
+    #[test]
+    fn capability_status_reports_runtime_backend_fallback() {
+        let cfg = crate::config::NetworkConfig {
+            backend: "networkmanager".to_string(),
+            adapter_path: "/a".to_string(),
+            station_path: "/b".to_string(),
+        };
+        let service = NetworkService::new(&cfg);
+
+        let status = service.capability_status();
+
+        assert_eq!(status.key, "net");
+        assert_eq!(
+            status.mode,
+            crate::services::capabilities::CapabilityMode::Fallback
+        );
+        assert_eq!(status.provider, "NetworkManager->Iwd");
+        assert_eq!(
+            status.detail.as_deref(),
+            Some("configured backend is not implemented at runtime")
         );
     }
 }

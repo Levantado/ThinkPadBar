@@ -9,6 +9,7 @@ pub type BackendFuture<'a, T = ()> = Pin<Box<dyn Future<Output = T> + Send + 'a>
 
 pub trait AudioBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode;
     fn diagnostics_summary(&self) -> Option<String> {
         None
     }
@@ -26,12 +27,14 @@ pub trait AudioBackend: Send + Sync {
 
 pub trait BrightnessBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode;
     fn snapshot(&self) -> crate::services::controls::BrightnessSnapshot;
     fn set_brightness(&self, percent: u32);
 }
 
 pub trait BluetoothBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode;
     fn enabled(&self) -> bool;
     fn device_summary(&self) -> crate::services::controls::BluetoothDeviceSummary;
     fn toggle(&self, enable: bool) -> bool;
@@ -47,13 +50,13 @@ pub trait BluetoothBackend: Send + Sync {
 
 pub trait PowerBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode;
     fn diagnostics_summary(&self) -> Option<String> {
         None
     }
     fn profile(&self) -> String;
     fn set_profile(&self, profile: String) -> BackendFuture<'_, ()>;
-    fn set_battery_thresholds(
-        &self,
-        thresholds: crate::services::controls::BatteryThresholds,
-    ) -> BackendFuture<'_, ()>;
+    fn subscription(&self) -> iced::Subscription<crate::services::controls::ControlsEvent> {
+        iced::Subscription::none()
+    }
 }

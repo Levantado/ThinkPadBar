@@ -10,6 +10,10 @@ impl super::BluetoothBackend for BluetoothCtlBackend {
         "bluetoothctl+rfkill+sysfs"
     }
 
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+        crate::services::capabilities::CapabilityMode::Fallback
+    }
+
     fn enabled(&self) -> bool {
         if let Ok(output) = Command::new("bluetoothctl")
             .arg("show")

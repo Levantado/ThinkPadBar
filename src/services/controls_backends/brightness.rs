@@ -10,6 +10,10 @@ impl super::BrightnessBackend for SysfsBrightnessBackend {
         "sysfs+brightnessctl+light"
     }
 
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+        crate::services::capabilities::CapabilityMode::Fallback
+    }
+
     fn snapshot(&self) -> crate::services::controls::BrightnessSnapshot {
         crate::services::controls::BrightnessSnapshot::from_percent(
             read_backlight_percent().unwrap_or(0),

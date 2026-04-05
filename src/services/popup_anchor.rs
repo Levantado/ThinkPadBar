@@ -7,7 +7,6 @@ pub enum PopupSurfaceKind {
     Power,
     Controls,
     Connectivity,
-    ControlCenter,
     AudioRoutes,
     BluetoothDevices,
     SystemMonitor,
@@ -56,8 +55,8 @@ impl PopupAnchorService {
                 margin: (self.bar_height, 8, 0, 0),
             },
             PopupSurfaceKind::Stats => PopupSurfacePlan {
-                width: 420,
-                height: 420,
+                width: 400,
+                height: 280,
                 anchor: Anchor::TOP | Anchor::RIGHT,
                 margin: (self.bar_height, 8, 0, 0),
             },
@@ -100,12 +99,6 @@ impl PopupAnchorService {
             PopupSurfaceKind::Displays => PopupSurfacePlan {
                 width: 460,
                 height: 520,
-                anchor: Anchor::TOP | Anchor::RIGHT,
-                margin: (self.bar_height, 8, 0, 0),
-            },
-            PopupSurfaceKind::ControlCenter => PopupSurfacePlan {
-                width: 420,
-                height: 760,
                 anchor: Anchor::TOP | Anchor::RIGHT,
                 margin: (self.bar_height, 8, 0, 0),
             },
@@ -168,8 +161,8 @@ mod tests {
     fn stats_plan_uses_compact_surface_size() {
         let service = PopupAnchorService::new(24);
         let plan = service.plan(PopupSurfaceKind::Stats, None, None);
-        assert_eq!(plan.width, 420);
-        assert_eq!(plan.height, 420);
+        assert_eq!(plan.width, 400);
+        assert_eq!(plan.height, 280);
         assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
     }
 

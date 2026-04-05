@@ -1,3 +1,4 @@
+pub mod capabilities;
 pub mod coalescing;
 pub mod compositor;
 pub mod controls;

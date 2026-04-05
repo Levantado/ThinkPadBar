@@ -105,59 +105,6 @@ impl BrightnessSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BatteryThresholds {
-    pub start: u8,
-    pub end: u8,
-}
-
-impl BatteryThresholds {
-    pub fn new(start: u8, end: u8) -> Self {
-        let start = start.min(100);
-        let end = end.min(100);
-        if start <= end {
-            Self { start, end }
-        } else {
-            Self {
-                start: end,
-                end: start,
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BatteryThresholdPreset {
-    Care,
-    Balanced,
-    FullCharge,
-}
-
-impl BatteryThresholdPreset {
-    pub const ALL: [Self; 3] = [Self::Care, Self::Balanced, Self::FullCharge];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Care => "CARE",
-            Self::Balanced => "BAL",
-            Self::FullCharge => "FULL",
-        }
-    }
-
-    pub fn thresholds(self) -> BatteryThresholds {
-        match self {
-            Self::Care => BatteryThresholds::new(40, 80),
-            Self::Balanced => BatteryThresholds::new(60, 90),
-            Self::FullCharge => BatteryThresholds::new(0, 100),
-        }
-    }
-
-    pub fn summary(self) -> String {
-        let thresholds = self.thresholds();
-        format!("{}-{}", thresholds.start, thresholds.end)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlsSnapshot {
     pub brightness: BrightnessSnapshot,
@@ -231,6 +178,7 @@ impl Default for ControlsSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlsEvent {
     AudioServerChanged,
+    PowerProfileChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -268,7 +216,6 @@ pub enum ControlsCommand {
     SetBrightness(u32),
     SetFanLevel(String),
     SetPowerProfile(String),
-    ApplyBatteryThresholdPreset(BatteryThresholdPreset),
     ToggleBluetooth(bool),
     ScanBluetoothDevices,
     StopBluetoothScan,
@@ -301,7 +248,7 @@ impl ControlsService {
             Arc::new(crate::services::controls_backends::audio::WpctlAudioBackend::default()),
             Arc::new(crate::services::controls_backends::brightness::SysfsBrightnessBackend),
             Arc::new(crate::services::controls_backends::bluetooth::BluetoothCtlBackend),
-            Arc::new(crate::services::controls_backends::power::PlatformProfilePowerBackend),
+            Arc::new(crate::services::controls_backends::power::PowerProfilesDaemonBackend),
         )
     }
 
@@ -354,6 +301,72 @@ impl ControlsService {
             power_backend: self.power_backend.backend_name(),
             power_runtime: self.power_backend.diagnostics_summary(),
         }
+    }
+
+    pub fn capability_statuses(&self) -> Vec<crate::services::capabilities::CapabilityStatus> {
+        let mut statuses = vec![
+            crate::services::capabilities::CapabilityStatus {
+                key: "aud",
+                label: "Audio",
+                mode: self.audio_backend.capability_mode(),
+                provider: self.audio_backend.backend_name().to_string(),
+                detail: self.audio_backend.diagnostics_summary(),
+            },
+            crate::services::capabilities::CapabilityStatus {
+                key: "bri",
+                label: "Brightness",
+                mode: self.brightness_backend.capability_mode(),
+                provider: self.brightness_backend.backend_name().to_string(),
+                detail: None,
+            },
+            crate::services::capabilities::CapabilityStatus {
+                key: "bt",
+                label: "Bluetooth",
+                mode: self.bluetooth_backend.capability_mode(),
+                provider: self.bluetooth_backend.backend_name().to_string(),
+                detail: Some("cli/rfkill/sysfs control path".to_string()),
+            },
+            crate::services::capabilities::CapabilityStatus {
+                key: "pwr",
+                label: "Power Profile",
+                mode: self.power_backend.capability_mode(),
+                provider: self.power_backend.backend_name().to_string(),
+                detail: self.power_backend.diagnostics_summary(),
+            },
+        ];
+
+        let fan_available = std::path::Path::new("/proc/acpi/ibm/fan").exists();
+        statuses.push(crate::services::capabilities::CapabilityStatus {
+            key: "fan",
+            label: "Fan Control",
+            mode: if fan_available {
+                crate::services::capabilities::CapabilityMode::Fallback
+            } else {
+                crate::services::capabilities::CapabilityMode::Unavailable
+            },
+            provider: "procfs+pkexec".to_string(),
+            detail: (!fan_available).then(|| "thinkpad_acpi fan interface missing".to_string()),
+        });
+
+        let battery_care_exposed = self.snapshot.battery.charge_start_threshold.is_some()
+            || self.snapshot.battery.charge_end_threshold.is_some();
+        statuses.push(crate::services::capabilities::CapabilityStatus {
+            key: "bat",
+            label: "Battery Care",
+            mode: if battery_care_exposed {
+                crate::services::capabilities::CapabilityMode::ReadOnly
+            } else {
+                crate::services::capabilities::CapabilityMode::Unavailable
+            },
+            provider: "power_supply sysfs".to_string(),
+            detail: if battery_care_exposed {
+                Some("system-managed thresholds".to_string())
+            } else {
+                Some("threshold files unavailable".to_string())
+            },
+        });
+
+        statuses
     }
 
     pub fn apply_refresh(&mut self, refresh: ControlsRefresh) {
@@ -411,11 +424,6 @@ impl ControlsService {
             }
             ControlsCommand::SetPowerProfile(profile) => {
                 self.snapshot.power_profile = profile.clone();
-            }
-            ControlsCommand::ApplyBatteryThresholdPreset(preset) => {
-                let thresholds = preset.thresholds();
-                self.snapshot.battery.charge_start_threshold = Some(thresholds.start);
-                self.snapshot.battery.charge_end_threshold = Some(thresholds.end);
             }
             ControlsCommand::ToggleBluetooth(enabled) => {
                 self.snapshot.bluetooth_enabled = *enabled;
@@ -537,12 +545,6 @@ impl ControlsService {
                 self.power_backend.set_profile(profile).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Power)
             }
-            ControlsCommand::ApplyBatteryThresholdPreset(preset) => {
-                self.power_backend
-                    .set_battery_thresholds(preset.thresholds())
-                    .await;
-                ControlsFollowUp::Refresh(ControlsRefreshKind::BatteryPower)
-            }
             ControlsCommand::ToggleBluetooth(enabled) => {
                 let _ = self.bluetooth_backend.toggle(enabled);
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
@@ -583,7 +585,10 @@ impl ControlsService {
     }
 
     pub fn subscription(&self) -> iced::Subscription<ControlsEvent> {
-        self.audio_backend.subscription()
+        iced::Subscription::batch([
+            self.audio_backend.subscription(),
+            self.power_backend.subscription(),
+        ])
     }
 }
 
@@ -665,6 +670,10 @@ impl crate::services::controls_backends::AudioBackend for NoopAudioBackend {
         "noop-audio"
     }
 
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+        crate::services::capabilities::CapabilityMode::Unavailable
+    }
+
     fn audio_info(&self) -> AudioInfo {
         AudioInfo {
             volume: 0,
@@ -734,6 +743,10 @@ impl crate::services::controls_backends::BrightnessBackend for NoopBrightnessBac
         "noop-brightness"
     }
 
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+        crate::services::capabilities::CapabilityMode::Unavailable
+    }
+
     fn snapshot(&self) -> BrightnessSnapshot {
         BrightnessSnapshot::default()
     }
@@ -749,6 +762,10 @@ struct NoopBluetoothBackend;
 impl crate::services::controls_backends::BluetoothBackend for NoopBluetoothBackend {
     fn backend_name(&self) -> &'static str {
         "noop-bluetooth"
+    }
+
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+        crate::services::capabilities::CapabilityMode::Unavailable
     }
 
     fn enabled(&self) -> bool {
@@ -821,6 +838,10 @@ impl crate::services::controls_backends::PowerBackend for NoopPowerBackend {
         "noop-power"
     }
 
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+        crate::services::capabilities::CapabilityMode::Unavailable
+    }
+
     fn diagnostics_summary(&self) -> Option<String> {
         None
     }
@@ -835,21 +856,14 @@ impl crate::services::controls_backends::PowerBackend for NoopPowerBackend {
     ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
         Box::pin(async {})
     }
-
-    fn set_battery_thresholds(
-        &self,
-        _thresholds: BatteryThresholds,
-    ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
-        Box::pin(async {})
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioDeviceSummary, AudioInfo, AudioRouteInfo, AudioRouteOrigin, BatteryThresholdPreset,
-        BatteryThresholds, BluetoothConnectedDevice, BluetoothDeviceSummary, BrightnessSnapshot,
-        ControlsCommand, ControlsRefresh, ControlsRefreshKind, ControlsService, ControlsSnapshot,
+        AudioDeviceSummary, AudioInfo, AudioRouteInfo, AudioRouteOrigin, BluetoothConnectedDevice,
+        BluetoothDeviceSummary, BrightnessSnapshot, ControlsCommand, ControlsRefresh,
+        ControlsRefreshKind, ControlsService, ControlsSnapshot,
     };
     use crate::modules::mic::MicInfo;
     use std::sync::{Arc, Mutex};
@@ -871,6 +885,10 @@ mod tests {
     impl crate::services::controls_backends::AudioBackend for MockAudioBackend {
         fn backend_name(&self) -> &'static str {
             "mock-audio"
+        }
+
+        fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+            crate::services::capabilities::CapabilityMode::Hybrid
         }
 
         fn audio_info(&self) -> AudioInfo {
@@ -960,6 +978,10 @@ mod tests {
             "mock-brightness"
         }
 
+        fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+            crate::services::capabilities::CapabilityMode::Fallback
+        }
+
         fn snapshot(&self) -> BrightnessSnapshot {
             self.snapshot.clone()
         }
@@ -981,6 +1003,10 @@ mod tests {
     impl crate::services::controls_backends::BluetoothBackend for MockBluetoothBackend {
         fn backend_name(&self) -> &'static str {
             "mock-bluetooth"
+        }
+
+        fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+            crate::services::capabilities::CapabilityMode::Fallback
         }
 
         fn enabled(&self) -> bool {
@@ -1100,6 +1126,10 @@ mod tests {
             "mock-power"
         }
 
+        fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+            crate::services::capabilities::CapabilityMode::Hybrid
+        }
+
         fn diagnostics_summary(&self) -> Option<String> {
             Some("mock-power-runtime".to_string())
         }
@@ -1115,19 +1145,6 @@ mod tests {
             let calls = self.calls.clone();
             Box::pin(async move {
                 calls.lock().unwrap().push(profile);
-            })
-        }
-
-        fn set_battery_thresholds(
-            &self,
-            thresholds: BatteryThresholds,
-        ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
-            let calls = self.calls.clone();
-            Box::pin(async move {
-                calls.lock().unwrap().push(format!(
-                    "thresholds:{}-{}",
-                    thresholds.start, thresholds.end
-                ));
             })
         }
     }
@@ -1329,9 +1346,6 @@ mod tests {
             "AA:BB:CC:DD:EE:FF".to_string(),
         ));
         service.preview_command(&ControlsCommand::SetPowerProfile("performance".to_string()));
-        service.preview_command(&ControlsCommand::ApplyBatteryThresholdPreset(
-            BatteryThresholdPreset::Care,
-        ));
 
         assert_eq!(service.snapshot().audio.volume, 73);
         assert_eq!(
@@ -1344,8 +1358,6 @@ mod tests {
             Some("USB Microphone")
         );
         assert_eq!(service.snapshot().power_profile, "performance");
-        assert_eq!(service.snapshot().battery.charge_start_threshold, Some(40));
-        assert_eq!(service.snapshot().battery.charge_end_threshold, Some(80));
         assert!(service.snapshot().bluetooth_devices.device_details[0].paired);
         assert!(service.snapshot().bluetooth_devices.device_details[0].trusted);
     }
@@ -1476,11 +1488,6 @@ mod tests {
         let _ = service
             .execute(ControlsCommand::SetPowerProfile("balanced".to_string()))
             .await;
-        let battery_follow_up = service
-            .execute(ControlsCommand::ApplyBatteryThresholdPreset(
-                BatteryThresholdPreset::Balanced,
-            ))
-            .await;
         let _ = service
             .execute(ControlsCommand::ToggleBluetooth(false))
             .await;
@@ -1525,10 +1532,7 @@ mod tests {
             ]
         );
         assert_eq!(brightness_calls.lock().unwrap().as_slice(), [31]);
-        assert_eq!(
-            power_calls.lock().unwrap().as_slice(),
-            ["balanced", "thresholds:60-90"]
-        );
+        assert_eq!(power_calls.lock().unwrap().as_slice(), ["balanced"]);
         assert_eq!(bluetooth_calls.lock().unwrap().as_slice(), [false]);
         assert_eq!(
             bluetooth_command_calls.lock().unwrap().as_slice(),
@@ -1543,10 +1547,6 @@ mod tests {
             ]
         );
         assert_eq!(*overskride_calls.lock().unwrap(), 1);
-        assert_eq!(
-            battery_follow_up,
-            super::ControlsFollowUp::Refresh(ControlsRefreshKind::BatteryPower)
-        );
         assert_eq!(
             overskride_follow_up,
             super::ControlsFollowUp::RefreshCompositor
@@ -1568,5 +1568,27 @@ mod tests {
             Some("mock-power-runtime")
         );
         assert!(diagnostics.summary().contains("mock-audio"));
+    }
+
+    #[test]
+    fn capability_statuses_surface_read_only_battery_care() {
+        let mut snapshot = ControlsSnapshot::default();
+        snapshot.battery.charge_start_threshold = Some(80);
+        snapshot.battery.charge_end_threshold = Some(100);
+        let service = ControlsService::with_snapshot_for_tests(snapshot);
+
+        let statuses = service.capability_statuses();
+        let battery = statuses.iter().find(|status| status.key == "bat").unwrap();
+        let audio = statuses.iter().find(|status| status.key == "aud").unwrap();
+
+        assert_eq!(
+            battery.mode,
+            crate::services::capabilities::CapabilityMode::ReadOnly
+        );
+        assert_eq!(battery.detail.as_deref(), Some("system-managed thresholds"));
+        assert_eq!(
+            audio.mode,
+            crate::services::capabilities::CapabilityMode::Unavailable
+        );
     }
 }
