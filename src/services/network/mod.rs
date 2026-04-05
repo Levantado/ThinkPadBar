@@ -77,10 +77,7 @@ pub struct NetworkService {
 
 impl NetworkService {
     pub fn new(config: &crate::config::NetworkConfig) -> Self {
-        let configured_backend = match config.backend.trim().to_ascii_lowercase().as_str() {
-            "networkmanager" => NetworkBackendKind::NetworkManager,
-            _ => NetworkBackendKind::Iwd,
-        };
+        let configured_backend = NetworkBackendKind::Iwd;
         let backend = iwd::IwdBackend::new(config);
         let active_backend = backend.kind();
 
@@ -337,21 +334,6 @@ mod tests {
     }
 
     #[test]
-    fn networkmanager_config_falls_back_to_iwd_runtime() {
-        let cfg = crate::config::NetworkConfig {
-            backend: "networkmanager".to_string(),
-            adapter_path: "/a".to_string(),
-            station_path: "/b".to_string(),
-        };
-        let service = NetworkService::new(&cfg);
-        assert_eq!(
-            service.configured_backend(),
-            NetworkBackendKind::NetworkManager
-        );
-        assert_eq!(service.active_backend(), NetworkBackendKind::Iwd);
-    }
-
-    #[test]
     fn toggle_menu_requests_scan_when_dbus_available() {
         let mut service = NetworkService::new(&crate::config::NetworkConfig::default());
         assert_eq!(
@@ -436,26 +418,6 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_report_runtime_backend_fallback_reason() {
-        let cfg = crate::config::NetworkConfig {
-            backend: "networkmanager".to_string(),
-            adapter_path: "/a".to_string(),
-            station_path: "/b".to_string(),
-        };
-        let service = NetworkService::new(&cfg);
-        let diagnostics = service.diagnostics();
-        assert_eq!(
-            diagnostics.configured_backend,
-            NetworkBackendKind::NetworkManager
-        );
-        assert_eq!(diagnostics.active_backend, NetworkBackendKind::Iwd);
-        assert!(diagnostics
-            .unavailable_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("backend fallback active")));
-    }
-
-    #[test]
     fn diagnostics_surface_status_errors() {
         let mut service = NetworkService::new(&crate::config::NetworkConfig::default());
         let _ = service.handle_command(NetworkCommand::ToggleMenu, false);
@@ -463,29 +425,6 @@ mod tests {
         assert_eq!(
             diagnostics.last_error.as_deref(),
             Some("D-Bus недоступен: не удалось открыть system bus")
-        );
-    }
-
-    #[test]
-    fn capability_status_reports_runtime_backend_fallback() {
-        let cfg = crate::config::NetworkConfig {
-            backend: "networkmanager".to_string(),
-            adapter_path: "/a".to_string(),
-            station_path: "/b".to_string(),
-        };
-        let service = NetworkService::new(&cfg);
-
-        let status = service.capability_status();
-
-        assert_eq!(status.key, "net");
-        assert_eq!(
-            status.mode,
-            crate::services::capabilities::CapabilityMode::Fallback
-        );
-        assert_eq!(status.provider, "NetworkManager->Iwd");
-        assert_eq!(
-            status.detail.as_deref(),
-            Some("configured backend is not implemented at runtime")
         );
     }
 }

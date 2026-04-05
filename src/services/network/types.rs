@@ -14,7 +14,6 @@ pub struct WifiNetwork {
 pub enum NetworkBackendKind {
     #[default]
     Iwd,
-    NetworkManager,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

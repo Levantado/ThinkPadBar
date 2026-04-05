@@ -9,7 +9,6 @@ pub struct WorkspaceInfo {
 pub enum CompositorBackendKind {
     #[default]
     Hyprland,
-    Niri,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

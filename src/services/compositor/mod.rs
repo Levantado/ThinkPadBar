@@ -80,12 +80,9 @@ impl Default for CompositorService {
 
 impl CompositorService {
     fn resolve_backend_kinds(
-        config: &crate::config::CompositorConfig,
+        _config: &crate::config::CompositorConfig,
     ) -> (CompositorBackendKind, CompositorBackendKind) {
-        let configured_backend = match config.backend.trim().to_ascii_lowercase().as_str() {
-            "niri" => CompositorBackendKind::Niri,
-            _ => CompositorBackendKind::Hyprland,
-        };
+        let configured_backend = CompositorBackendKind::Hyprland;
         let active_backend = CompositorBackendKind::Hyprland;
         (configured_backend, active_backend)
     }
@@ -270,34 +267,6 @@ mod tests {
     }
 
     #[test]
-    fn backend_kind_resolution_falls_back_from_niri_config_to_hyprland_runtime() {
-        let (configured_backend, active_backend) =
-            CompositorService::resolve_backend_kinds(&crate::config::CompositorConfig {
-                backend: "niri".to_string(),
-            });
-        assert_eq!(configured_backend, CompositorBackendKind::Niri);
-        assert_eq!(active_backend, CompositorBackendKind::Hyprland);
-    }
-
-    #[test]
-    fn diagnostics_report_backend_fallback_and_refresh_state() {
-        let mut service = CompositorService::hermetic_for_tests(
-            CompositorBackendKind::Niri,
-            CompositorBackendKind::Hyprland,
-        );
-        assert!(service.request_refresh());
-        assert!(!service.request_refresh());
-
-        let diagnostics = service.diagnostics();
-        assert!(diagnostics.refresh_inflight);
-        assert!(diagnostics.refresh_queued);
-        assert_eq!(
-            diagnostics.unavailable_reason.as_deref(),
-            Some("configured Niri, runtime Hyprland: backend fallback active")
-        );
-    }
-
-    #[test]
     fn diagnostics_capture_last_refresh_elapsed_ms() {
         let mut service = CompositorService::hermetic_for_tests(
             CompositorBackendKind::Hyprland,
@@ -309,26 +278,5 @@ mod tests {
         });
 
         assert_eq!(service.diagnostics().last_refresh_ms, Some(17));
-    }
-
-    #[test]
-    fn capability_status_reports_backend_fallback() {
-        let service = CompositorService::hermetic_for_tests(
-            CompositorBackendKind::Niri,
-            CompositorBackendKind::Hyprland,
-        );
-
-        let status = service.capability_status();
-
-        assert_eq!(status.key, "cmp");
-        assert_eq!(
-            status.mode,
-            crate::services::capabilities::CapabilityMode::Fallback
-        );
-        assert_eq!(status.provider, "Niri->Hyprland");
-        assert_eq!(
-            status.detail.as_deref(),
-            Some("configured backend falls back to active runtime backend")
-        );
     }
 }
