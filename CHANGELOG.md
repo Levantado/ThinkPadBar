@@ -13,6 +13,12 @@ All notable changes to this project are documented in this file.
   - extracted the Bluetooth Devices detail popup into `src/ui/popups/bluetooth_devices.rs`;
   - `app.rs` now builds a typed `BluetoothDevicesPopupModel` and delegates Bluetooth popup rendering to the UI layer instead of holding the full widget tree inline.
 
+### Fixed
+- Tokio runtime panic in `BluezBluetoothBackend`:
+  - migrated `BluetoothBackend` trait and its `BlueZ` implementation to a fully asynchronous model;
+  - replaced `zbus` blocking connections and proxies with non-blocking async counterparts;
+  - updated `ControlsService::refresh` and `execute` to properly `await` backend methods.
+
 ### Quality
 - Added regression coverage for:
   - brightness watch-path discovery for runtime event wiring;

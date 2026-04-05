@@ -279,8 +279,8 @@ impl ControlsService {
                 fan: fan_backend.info(),
                 battery: crate::modules::battery::get_battery_info(),
                 power_profile: power_backend.profile(),
-                bluetooth_enabled: bluetooth_backend.enabled(),
-                bluetooth_devices: bluetooth_backend.device_summary(),
+                bluetooth_enabled: false,
+                bluetooth_devices: BluetoothDeviceSummary::default(),
             },
             audio_backend,
             brightness_backend,
@@ -501,16 +501,16 @@ impl ControlsService {
                 ..ControlsRefresh::default()
             },
             ControlsRefreshKind::Bluetooth => ControlsRefresh {
-                bluetooth_enabled: Some(self.bluetooth_backend.enabled()),
-                bluetooth_devices: Some(self.bluetooth_backend.device_summary()),
+                bluetooth_enabled: Some(self.bluetooth_backend.enabled().await),
+                bluetooth_devices: Some(self.bluetooth_backend.device_summary().await),
                 ..ControlsRefresh::default()
             },
             ControlsRefreshKind::Slow => ControlsRefresh {
                 brightness: Some(self.brightness_backend.snapshot()),
                 battery: Some(crate::modules::battery::get_battery_info()),
                 power_profile: Some(self.power_backend.profile()),
-                bluetooth_enabled: Some(self.bluetooth_backend.enabled()),
-                bluetooth_devices: Some(self.bluetooth_backend.device_summary()),
+                bluetooth_enabled: Some(self.bluetooth_backend.enabled().await),
+                bluetooth_devices: Some(self.bluetooth_backend.device_summary().await),
                 ..ControlsRefresh::default()
             },
         }
@@ -555,7 +555,7 @@ impl ControlsService {
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Power)
             }
             ControlsCommand::ToggleBluetooth(enabled) => {
-                let _ = self.bluetooth_backend.toggle(enabled);
+                let _ = self.bluetooth_backend.toggle(enabled).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Bluetooth)
             }
             ControlsCommand::ScanBluetoothDevices => {
@@ -810,16 +810,21 @@ impl crate::services::controls_backends::BluetoothBackend for NoopBluetoothBacke
         crate::services::capabilities::CapabilityMode::Unavailable
     }
 
-    fn enabled(&self) -> bool {
-        false
+    fn enabled(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        Box::pin(async { false })
     }
 
-    fn device_summary(&self) -> BluetoothDeviceSummary {
-        BluetoothDeviceSummary::default()
+    fn device_summary(
+        &self,
+    ) -> crate::services::controls_backends::BackendFuture<
+        '_,
+        crate::services::controls::BluetoothDeviceSummary,
+    > {
+        Box::pin(async { crate::services::controls::BluetoothDeviceSummary::default() })
     }
 
-    fn toggle(&self, _enable: bool) -> bool {
-        true
+    fn toggle(&self, _enable: bool) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+        Box::pin(async { true })
     }
 
     fn scan_devices(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
@@ -1092,17 +1097,27 @@ mod tests {
             crate::services::capabilities::CapabilityMode::Fallback
         }
 
-        fn enabled(&self) -> bool {
-            self.enabled
+        fn enabled(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {
+            let enabled = self.enabled;
+            Box::pin(async move { enabled })
         }
 
-        fn device_summary(&self) -> BluetoothDeviceSummary {
-            self.devices.clone()
+        fn device_summary(
+            &self,
+        ) -> crate::services::controls_backends::BackendFuture<
+            '_,
+            crate::services::controls::BluetoothDeviceSummary,
+        > {
+            let devices = self.devices.clone();
+            Box::pin(async move { devices })
         }
 
-        fn toggle(&self, enable: bool) -> bool {
+        fn toggle(
+            &self,
+            enable: bool,
+        ) -> crate::services::controls_backends::BackendFuture<'_, bool> {
             self.toggle_calls.lock().unwrap().push(enable);
-            true
+            Box::pin(async { true })
         }
 
         fn scan_devices(&self) -> crate::services::controls_backends::BackendFuture<'_, bool> {

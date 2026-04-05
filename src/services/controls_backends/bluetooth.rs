@@ -8,9 +8,6 @@ use std::{
 use iced::futures::{SinkExt, StreamExt};
 use tracing::{info, warn};
 use zbus::{
-    blocking::{
-        fdo::ObjectManagerProxy as BlockingObjectManagerProxy, Connection as BlockingConnection,
-    },
     fdo::ManagedObjects,
     message::{Message, Type},
     proxy,
@@ -71,7 +68,6 @@ pub struct BluezBackendDiagnostics {
 
 #[derive(Clone, Default)]
 pub struct BluezBluetoothBackend {
-    blocking_connection: Arc<Mutex<Option<Arc<BlockingConnection>>>>,
     async_connection: Arc<tokio::sync::Mutex<Option<Arc<Connection>>>>,
     diagnostics: Arc<Mutex<BluezBackendDiagnostics>>,
 }
@@ -89,10 +85,11 @@ impl super::BluetoothBackend for BluezBluetoothBackend {
     }
 
     fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
-        if self.blocking_adapter_state().is_some() {
-            crate::services::capabilities::CapabilityMode::Native
-        } else {
+        let diagnostics = self.diagnostics.lock().unwrap();
+        if diagnostics.unavailable_reason.is_some() {
             crate::services::capabilities::CapabilityMode::Unavailable
+        } else {
+            crate::services::capabilities::CapabilityMode::Native
         }
     }
 
@@ -107,49 +104,66 @@ impl super::BluetoothBackend for BluezBluetoothBackend {
         Some(BLUEZ_MODEL_DETAIL.to_string())
     }
 
-    fn enabled(&self) -> bool {
-        self.blocking_adapter_state()
-            .map(|(_path, powered)| powered)
-            .unwrap_or(false)
+    fn enabled(&self) -> super::BackendFuture<'_, bool> {
+        let backend = self.clone();
+        Box::pin(async move {
+            backend
+                .async_adapter_state()
+                .await
+                .map(|(_path, powered)| powered)
+                .unwrap_or(false)
+        })
     }
 
-    fn device_summary(&self) -> crate::services::controls::BluetoothDeviceSummary {
-        match self.blocking_managed_objects() {
-            Ok(objects) => {
-                self.clear_last_error();
-                device_summary_from_objects(&objects)
+    fn device_summary(
+        &self,
+    ) -> super::BackendFuture<'_, crate::services::controls::BluetoothDeviceSummary> {
+        let backend = self.clone();
+        Box::pin(async move {
+            match backend.async_managed_objects().await {
+                Ok(objects) => {
+                    backend.clear_last_error();
+                    device_summary_from_objects(&objects)
+                }
+                Err(error) => {
+                    backend.record_error(format!("managed objects query failed: {error}"));
+                    crate::services::controls::BluetoothDeviceSummary::default()
+                }
             }
-            Err(error) => {
-                self.record_error(format!("managed objects query failed: {error}"));
-                crate::services::controls::BluetoothDeviceSummary::default()
-            }
-        }
+        })
     }
 
-    fn toggle(&self, enable: bool) -> bool {
-        let Some(adapter_path) = self.blocking_adapter_path() else {
-            return false;
-        };
-        let Ok(connection) = self.blocking_connection() else {
-            return false;
-        };
+    fn toggle(&self, enable: bool) -> super::BackendFuture<'_, bool> {
+        let backend = self.clone();
+        Box::pin(async move {
+            let Some(adapter_path) = backend.async_adapter_path().await.ok() else {
+                return false;
+            };
+            let Ok(connection) = backend.async_connection().await else {
+                return false;
+            };
 
-        info!("Attempting to toggle bluetooth power via BlueZ: {}", enable);
-        let result = AdapterProxyBlocking::builder(connection.as_ref())
-            .path(adapter_path.as_str())
-            .and_then(|builder| builder.build())
-            .and_then(|proxy| proxy.set_powered(enable));
+            info!("Attempting to toggle bluetooth power via BlueZ: {}", enable);
+            let result = match AdapterProxy::builder(connection.as_ref()).path(adapter_path.as_str())
+            {
+                Ok(builder) => match builder.build().await {
+                    Ok(proxy) => proxy.set_powered(enable).await,
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
 
-        match result {
-            Ok(()) => {
-                self.clear_last_error();
-                true
+            match result {
+                Ok(()) => {
+                    backend.clear_last_error();
+                    true
+                }
+                Err(error) => {
+                    backend.record_error(format!("set bluetooth power failed: {error}"));
+                    false
+                }
             }
-            Err(error) => {
-                self.record_error(format!("set bluetooth power failed: {error}"));
-                false
-            }
-        }
+        })
     }
 
     fn scan_devices(&self) -> super::BackendFuture<'_, bool> {
@@ -404,17 +418,6 @@ impl super::BluetoothBackend for BluezBluetoothBackend {
 }
 
 impl BluezBluetoothBackend {
-    fn blocking_connection(&self) -> zbus::Result<Arc<BlockingConnection>> {
-        let mut guard = self.blocking_connection.lock().unwrap();
-        if let Some(connection) = guard.as_ref() {
-            return Ok(Arc::clone(connection));
-        }
-
-        let connection = Arc::new(BlockingConnection::system()?);
-        *guard = Some(Arc::clone(&connection));
-        Ok(connection)
-    }
-
     async fn async_connection(&self) -> zbus::Result<Arc<Connection>> {
         let mut guard = self.async_connection.lock().await;
         if let Some(connection) = guard.as_ref() {
@@ -424,21 +427,6 @@ impl BluezBluetoothBackend {
         let connection = Arc::new(Connection::system().await?);
         *guard = Some(Arc::clone(&connection));
         Ok(connection)
-    }
-
-    fn blocking_managed_objects(&self) -> zbus::Result<ManagedObjects> {
-        let connection = self.blocking_connection()?;
-        let proxy = BlockingObjectManagerProxy::builder(connection.as_ref())
-            .destination(BLUEZ_SERVICE)?
-            .path(ROOT_PATH)?
-            .build()?;
-        let managed = proxy.get_managed_objects()?;
-        if adapter_state_from_objects(&managed).is_some() {
-            self.clear_unavailable_reason();
-        } else {
-            self.record_unavailable("org.bluez adapter unavailable");
-        }
-        Ok(managed)
     }
 
     async fn async_managed_objects(&self) -> zbus::Result<ManagedObjects> {
@@ -457,8 +445,8 @@ impl BluezBluetoothBackend {
         Ok(managed)
     }
 
-    fn blocking_adapter_state(&self) -> Option<(OwnedObjectPath, bool)> {
-        match self.blocking_managed_objects() {
+    async fn async_adapter_state(&self) -> Option<(OwnedObjectPath, bool)> {
+        match self.async_managed_objects().await {
             Ok(objects) => {
                 let state = adapter_state_from_objects(&objects);
                 if state.is_none() {
@@ -471,10 +459,6 @@ impl BluezBluetoothBackend {
                 None
             }
         }
-    }
-
-    fn blocking_adapter_path(&self) -> Option<OwnedObjectPath> {
-        self.blocking_adapter_state().map(|(path, _powered)| path)
     }
 
     async fn async_adapter_path(&self) -> zbus::Result<OwnedObjectPath> {

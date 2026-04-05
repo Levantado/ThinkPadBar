@@ -52,8 +52,8 @@ pub fn normalize_value(value: impl Into<String>) -> String {
 
 pub fn view(theme: ThemeTokens, model: StatsPopupModel) -> Element<'static, Message> {
     let content = Column::new()
-        .width(Length::Fill)
-        .spacing(14)
+        .width(Length::Shrink)
+        .spacing(12)
         .push(
             Row::new()
                 .align_y(Alignment::Center)
@@ -68,31 +68,31 @@ pub fn view(theme: ThemeTokens, model: StatsPopupModel) -> Element<'static, Mess
         .push(chrome::domain_popup_nav_row(theme, &Popup::Stats))
         .push_rows(model.rows.into_iter().map(metric_row));
 
-    container(
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(Padding::from([20, 24]))
-            .style(move |_| iced::widget::container::Style {
-                background: Some(iced::Background::Color(Color {
-                    a: model.background_alpha,
-                    ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                })),
-                text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    ..Default::default()
-                },
+    let card = container(content)
+        .padding(Padding::from([16, 20]))
+        .max_width(420.0)
+        .style(move |_| iced::widget::container::Style {
+            background: Some(iced::Background::Color(Color {
+                a: model.background_alpha,
+                ..Color::from_rgb8(0x11, 0x12, 0x1d)
+            })),
+            text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+            border: iced::Border {
+                radius: 12.0.into(),
                 ..Default::default()
-            }),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .style(|_| iced::widget::container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb8(0x11, 0x12, 0x1d))),
-        ..Default::default()
-    })
-    .into()
+            },
+            ..Default::default()
+        });
+
+    container(card)
+        .padding(Padding::from([8, 12]))
+        .style(|_| iced::widget::container::Style {
+            background: None,
+            ..Default::default()
+        })
+        .width(Length::Shrink)
+        .height(Length::Shrink)
+        .into()
 }
 
 fn metric_row(metric: PopupMetricRow) -> Element<'static, Message> {
