@@ -8,6 +8,7 @@ pub mod idle_inhibitor;
 pub mod network;
 pub mod popup_anchor;
 pub mod session;
+pub mod session_backends;
 pub mod system_info;
 pub mod tray;
 pub mod tray_menu;

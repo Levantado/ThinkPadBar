@@ -1,4 +1,7 @@
 use std::sync::Arc;
+use crate::services::session_backends::{PowerSessionBackend, LauncherBackend};
+use crate::services::session_backends::hyprland::HyprlandSessionBackend;
+use crate::services::session_backends::rofi::RofiLauncherBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionCommand {
@@ -22,39 +25,19 @@ pub struct SessionSnapshot {
     pub power_menu_open: bool,
 }
 
-trait SessionRunner: Send + Sync {
-    fn spawn(&self, bin: &str, args: &[&str]);
-}
-
-#[derive(Debug, Default)]
-struct ProcessSessionRunner;
-
-impl SessionRunner for ProcessSessionRunner {
-    fn spawn(&self, bin: &str, args: &[&str]) {
-        if let Ok(mut child) = std::process::Command::new(bin)
-            .args(args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            std::mem::drop(std::thread::spawn(move || {
-                let _ = child.wait();
-            }));
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct SessionService {
     snapshot: SessionSnapshot,
-    runner: Arc<dyn SessionRunner>,
+    power: Arc<dyn PowerSessionBackend>,
+    launcher: Arc<dyn LauncherBackend>,
 }
 
 impl SessionService {
     pub fn new() -> Self {
         Self {
             snapshot: SessionSnapshot::default(),
-            runner: Arc::new(ProcessSessionRunner),
+            power: Arc::new(HyprlandSessionBackend),
+            launcher: Arc::new(RofiLauncherBackend),
         }
     }
 
@@ -66,9 +49,9 @@ impl SessionService {
         crate::services::capabilities::CapabilityStatus {
             key: "ses",
             label: "Session Actions",
-            mode: crate::services::capabilities::CapabilityMode::Fallback,
-            provider: "rofi+systemctl+hyprctl".to_string(),
-            detail: Some("process-spawn providers".to_string()),
+            mode: self.power.capability_mode(),
+            provider: format!("{}+{}", self.launcher.backend_name(), self.power.backend_name()),
+            detail: Some("provider-backed session service".to_string()),
         }
     }
 
@@ -83,48 +66,34 @@ impl SessionService {
     pub async fn execute(&self, command: SessionCommand) -> SessionFollowUp {
         match command {
             SessionCommand::OpenLauncher => {
-                let (bin, args) = Self::launcher_command();
-                self.runner.spawn(bin, args);
+                self.launcher.toggle_launcher();
                 SessionFollowUp::None
             }
             SessionCommand::Lock => {
-                self.spawn_shell_command("hyprlock");
+                self.power.lock();
                 SessionFollowUp::RefreshCompositor
             }
             SessionCommand::Sleep => {
-                self.spawn_shell_command("systemctl suspend");
+                self.power.suspend();
                 SessionFollowUp::RefreshCompositor
             }
             SessionCommand::Hibernate => {
-                self.spawn_shell_command("systemctl hibernate");
+                self.power.hibernate();
                 SessionFollowUp::RefreshCompositor
             }
             SessionCommand::Restart => {
-                self.spawn_shell_command("systemctl reboot");
+                self.power.reboot();
                 SessionFollowUp::RefreshCompositor
             }
             SessionCommand::Shutdown => {
-                self.spawn_shell_command("systemctl poweroff");
+                self.power.shutdown();
                 SessionFollowUp::RefreshCompositor
             }
             SessionCommand::Logout => {
-                self.spawn_shell_command("hyprctl dispatch exit");
+                self.power.logout();
                 SessionFollowUp::RefreshCompositor
             }
         }
-    }
-
-    pub fn launcher_command() -> (&'static str, &'static [&'static str]) {
-        ("rofi", &["-replace", "-show", "drun"])
-    }
-
-    fn spawn_shell_command(&self, raw: &str) {
-        let mut args = raw.split_whitespace();
-        let Some(bin) = args.next() else {
-            return;
-        };
-        let args: Vec<&str> = args.collect();
-        self.runner.spawn(bin, &args);
     }
 }
 
@@ -137,39 +106,47 @@ impl Default for SessionService {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
-
+    use crate::services::capabilities::CapabilityMode;
+    use crate::services::session_backends::{PowerSessionBackend, LauncherBackend};
     use super::{SessionCommand, SessionFollowUp, SessionService};
 
-    type RecordedCalls = Arc<Mutex<Vec<(String, Vec<String>)>>>;
-
     #[derive(Default)]
-    struct RecordingRunner {
-        calls: RecordedCalls,
+    struct MockPowerBackend {
+        calls: Arc<Mutex<Vec<String>>>,
     }
 
-    impl super::SessionRunner for RecordingRunner {
-        fn spawn(&self, bin: &str, args: &[&str]) {
-            self.calls.lock().unwrap().push((
-                bin.to_string(),
-                args.iter().map(|arg| (*arg).to_string()).collect(),
-            ));
+    impl PowerSessionBackend for MockPowerBackend {
+        fn backend_name(&self) -> &'static str { "mock-power" }
+        fn capability_mode(&self) -> CapabilityMode { CapabilityMode::Native }
+        fn lock(&self) { self.calls.lock().unwrap().push("lock".to_string()); }
+        fn logout(&self) { self.calls.lock().unwrap().push("logout".to_string()); }
+        fn suspend(&self) { self.calls.lock().unwrap().push("suspend".to_string()); }
+        fn hibernate(&self) { self.calls.lock().unwrap().push("hibernate".to_string()); }
+        fn reboot(&self) { self.calls.lock().unwrap().push("reboot".to_string()); }
+        fn shutdown(&self) { self.calls.lock().unwrap().push("shutdown".to_string()); }
+    }
+
+    #[derive(Default)]
+    struct MockLauncherBackend {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl LauncherBackend for MockLauncherBackend {
+        fn backend_name(&self) -> &'static str { "mock-launcher" }
+        fn toggle_launcher(&self) -> bool {
+            self.calls.lock().unwrap().push("toggle".to_string());
+            true
         }
     }
 
     impl SessionService {
-        fn with_runner(runner: Arc<dyn super::SessionRunner>) -> Self {
+        fn with_backends(power: Arc<dyn PowerSessionBackend>, launcher: Arc<dyn LauncherBackend>) -> Self {
             Self {
                 snapshot: super::SessionSnapshot::default(),
-                runner,
+                power,
+                launcher,
             }
         }
-    }
-
-    #[test]
-    fn launcher_command_points_to_rofi_replace_drun() {
-        let (bin, args) = SessionService::launcher_command();
-        assert_eq!(bin, "rofi");
-        assert_eq!(args, &["-replace", "-show", "drun"]);
     }
 
     #[test]
@@ -183,53 +160,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launcher_returns_no_follow_up_without_spawning_real_rofi() {
-        let runner = RecordingRunner::default();
-        let calls = runner.calls.clone();
-        let service = SessionService::with_runner(Arc::new(runner));
+    async fn launcher_command_routes_to_launcher_backend() {
+        let power_calls = Arc::new(Mutex::new(Vec::new()));
+        let launcher_calls = Arc::new(Mutex::new(Vec::new()));
+        
+        let power = Arc::new(MockPowerBackend { calls: power_calls.clone() });
+        let launcher = Arc::new(MockLauncherBackend { calls: launcher_calls.clone() });
+        let service = SessionService::with_backends(power, launcher);
+
         assert_eq!(
             service.execute(SessionCommand::OpenLauncher).await,
             SessionFollowUp::None
         );
-        assert_eq!(
-            &*calls.lock().unwrap(),
-            &[(
-                "rofi".to_string(),
-                vec![
-                    "-replace".to_string(),
-                    "-show".to_string(),
-                    "drun".to_string()
-                ],
-            )]
-        );
+        assert_eq!(*launcher_calls.lock().unwrap(), vec!["toggle".to_string()]);
+        assert!(power_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn lock_command_uses_runner_and_requests_refresh() {
-        let runner = RecordingRunner::default();
-        let calls = runner.calls.clone();
-        let service = SessionService::with_runner(Arc::new(runner));
+    async fn lock_command_routes_to_power_backend_and_requests_refresh() {
+        let power_calls = Arc::new(Mutex::new(Vec::new()));
+        let launcher_calls = Arc::new(Mutex::new(Vec::new()));
+        
+        let power = Arc::new(MockPowerBackend { calls: power_calls.clone() });
+        let launcher = Arc::new(MockLauncherBackend { calls: launcher_calls.clone() });
+        let service = SessionService::with_backends(power, launcher);
 
         assert_eq!(
             service.execute(SessionCommand::Lock).await,
             SessionFollowUp::RefreshCompositor
         );
-        assert_eq!(
-            &*calls.lock().unwrap(),
-            &[("hyprlock".to_string(), Vec::<String>::new())]
-        );
+        assert_eq!(*power_calls.lock().unwrap(), vec!["lock".to_string()]);
+        assert!(launcher_calls.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn capability_status_reports_process_runner_fallback() {
+    fn capability_status_reports_backend_names() {
         let status = SessionService::new().capability_status();
 
         assert_eq!(status.key, "ses");
         assert_eq!(
             status.mode,
-            crate::services::capabilities::CapabilityMode::Fallback
+            crate::services::capabilities::CapabilityMode::Native
         );
-        assert_eq!(status.provider, "rofi+systemctl+hyprctl");
-        assert_eq!(status.detail.as_deref(), Some("process-spawn providers"));
+        assert_eq!(status.provider, "rofi+hyprland");
+        assert_eq!(status.detail.as_deref(), Some("provider-backed session service"));
     }
 }
