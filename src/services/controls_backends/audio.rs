@@ -571,7 +571,7 @@ fn emit_audio_changed(
         state.event_count = state.event_count.saturating_add(1);
         state.last_event = Some(label.to_string());
     }
-    let _ = event_tx.send(crate::services::controls::ControlsEvent::AudioServerChanged);
+    let _ = event_tx.send(crate::services::controls::ControlsEvent::AudioServer);
 }
 
 fn dict_value<'a>(props: Option<&'a pw::spa::utils::dict::DictRef>, key: &str) -> Option<&'a str> {

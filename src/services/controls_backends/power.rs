@@ -98,7 +98,7 @@ impl super::PowerBackend for PowerProfilesDaemonBackend {
                         match change.get().await {
                             Ok(_profile) => {
                                 if output
-                                    .send(crate::services::controls::ControlsEvent::PowerProfileChanged)
+                                    .send(crate::services::controls::ControlsEvent::PowerProfile)
                                     .await
                                     .is_err()
                                 {
@@ -196,24 +196,11 @@ async fn set_profile_via_platform_profile(profile: &str) -> Result<(), String> {
 }
 
 async fn write_profile_via_pkexec(profile: &str) -> Result<(), String> {
-    let script = format!("printf '%s' '{}' > {}", profile, PLATFORM_PROFILE_PATH);
-    let output = tokio::process::Command::new("pkexec")
-        .arg("sh")
-        .arg("-c")
-        .arg(script)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|error| error.to_string())?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let summary = process_stderr_summary(&output.stderr)
-        .unwrap_or_else(|| "pkexec command failed without stderr output".to_string());
-    Err(summary)
+    crate::services::controls_backends::privileged::write_file_via_pkexec(
+        Path::new(PLATFORM_PROFILE_PATH),
+        profile,
+    )
+    .await
 }
 
 fn canonical_profile_value(raw: &str) -> String {
@@ -245,14 +232,6 @@ fn platform_profile_name(profile: &str) -> &'static str {
     }
 }
 
-fn process_stderr_summary(stderr: &[u8]) -> Option<String> {
-    String::from_utf8_lossy(stderr)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-}
-
 fn parse_powerprofilesctl_get_output(raw: &str) -> Option<String> {
     let value = raw.lines().next()?.trim();
     if value.is_empty() {
@@ -273,8 +252,9 @@ fn power_runtime_summary(ppd_cli_available: bool, platform_profile_exists: bool)
 mod tests {
     use super::{
         canonical_profile_name, daemon_profile_name, parse_powerprofilesctl_get_output,
-        platform_profile_name, power_runtime_summary, process_stderr_summary,
+        platform_profile_name, power_runtime_summary,
     };
+    use crate::services::controls_backends::privileged::stderr_summary;
 
     #[test]
     fn canonical_profile_name_maps_supported_aliases() {
@@ -302,12 +282,12 @@ mod tests {
     }
 
     #[test]
-    fn process_stderr_summary_returns_first_non_empty_line() {
+    fn stderr_summary_returns_first_non_empty_line() {
         assert_eq!(
-            process_stderr_summary(b"\nPermission denied\nsecond line\n"),
+            stderr_summary(b"\nPermission denied\nsecond line\n"),
             Some("Permission denied".to_string())
         );
-        assert_eq!(process_stderr_summary(b"\n\n"), None);
+        assert_eq!(stderr_summary(b"\n\n"), None);
     }
 
     #[test]

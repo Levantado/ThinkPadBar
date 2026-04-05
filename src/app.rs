@@ -1,6 +1,10 @@
 use crate::{
     services::capabilities::RuntimeCapabilities,
-    ui::{chrome, theme::ThemeTokens},
+    ui::{
+        chrome,
+        popups::{self, audio_routes, PopupMetricRow},
+        theme::ThemeTokens,
+    },
 };
 use chrono::Local;
 use iced::{
@@ -42,13 +46,6 @@ pub enum PowerAction {
     Logout,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DisplayPopupOutputCard {
-    label: String,
-    summary: String,
-    badges: Vec<String>,
-}
-
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ControlCenterDeviceItem {
@@ -56,33 +53,6 @@ struct ControlCenterDeviceItem {
     label: &'static str,
     value: String,
     detail: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BluetoothDeviceCard {
-    address: String,
-    label: String,
-    summary: String,
-    detail: Option<String>,
-    badges: Vec<String>,
-    connected: bool,
-    paired: bool,
-    trusted: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AudioRoutePopupItem {
-    id: String,
-    label: String,
-    icon: &'static str,
-    capability_label: &'static str,
-    origin_label: &'static str,
-    profile_label: &'static str,
-    status_label: &'static str,
-    warning_label: Option<&'static str>,
-    detail: String,
-    is_default: bool,
-    available: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -662,19 +632,6 @@ impl ThinkPadBar {
         ("<", ">")
     }
 
-    fn stats_popup_background_alpha(_configured_alpha: f32) -> f32 {
-        1.0
-    }
-
-    fn stats_row_value(value: impl AsRef<str>) -> String {
-        let normalized = value.as_ref().trim();
-        if normalized.is_empty() {
-            "--".to_string()
-        } else {
-            normalized.to_string()
-        }
-    }
-
     fn scroll_direction(delta: mouse::ScrollDelta) -> i8 {
         let y = match delta {
             mouse::ScrollDelta::Lines { y, .. } | mouse::ScrollDelta::Pixels { y, .. } => y,
@@ -856,7 +813,7 @@ impl ThinkPadBar {
 
     fn control_center_bluetooth_device_cards(
         bluetooth: &crate::services::controls::BluetoothDeviceSummary,
-    ) -> Vec<BluetoothDeviceCard> {
+    ) -> Vec<popups::bluetooth_devices::BluetoothDeviceCard> {
         bluetooth
             .device_details
             .iter()
@@ -889,7 +846,7 @@ impl ThinkPadBar {
                     badges.push(format!("BAT {percent}%"));
                 }
 
-                BluetoothDeviceCard {
+                popups::bluetooth_devices::BluetoothDeviceCard {
                     address: device.address.clone(),
                     label: device.name.clone(),
                     summary,
@@ -898,6 +855,7 @@ impl ThinkPadBar {
                     connected: device.connected,
                     paired: device.paired,
                     trusted: device.trusted,
+                    is_new: false,
                 }
             })
             .collect()
@@ -924,9 +882,9 @@ impl ThinkPadBar {
         current: Option<&str>,
         capability_label: &'static str,
         unavailable_label: &'static str,
-    ) -> Vec<AudioRoutePopupItem> {
+    ) -> Vec<popups::audio_routes::AudioRoutePopupItem> {
         if routes.is_empty() {
-            return vec![AudioRoutePopupItem {
+            return vec![popups::audio_routes::AudioRoutePopupItem {
                 id: String::new(),
                 label: unavailable_label.to_string(),
                 icon: "󰖪",
@@ -945,7 +903,7 @@ impl ThinkPadBar {
             .iter()
             .map(|route| {
                 let is_default = current == Some(route.name.as_str());
-                AudioRoutePopupItem {
+                audio_routes::AudioRoutePopupItem {
                     id: route.id.clone(),
                     label: route.name.clone(),
                     icon: Self::audio_route_origin_icon(route.origin),
@@ -1135,23 +1093,6 @@ impl ThinkPadBar {
         }
     }
 
-    fn group_audio_route_popup_items_by_origin(
-        items: &[AudioRoutePopupItem],
-    ) -> Vec<(&'static str, Vec<AudioRoutePopupItem>)> {
-        let mut groups: Vec<(&'static str, Vec<AudioRoutePopupItem>)> = Vec::new();
-        for item in items {
-            if let Some((_, grouped_items)) = groups
-                .iter_mut()
-                .find(|(origin_label, _)| *origin_label == item.origin_label)
-            {
-                grouped_items.push(item.clone());
-            } else {
-                groups.push((item.origin_label, vec![item.clone()]));
-            }
-        }
-        groups
-    }
-
     fn bluetooth_scan_status_summary(state: &BluetoothScanState) -> String {
         match state {
             BluetoothScanState::Idle => "Idle".to_string(),
@@ -1229,9 +1170,9 @@ impl ThinkPadBar {
 
     fn display_popup_output_cards(
         wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
-    ) -> Vec<DisplayPopupOutputCard> {
+    ) -> Vec<popups::displays::DisplayOutputCard> {
         if wayland_snapshot.outputs.is_empty() {
-            return vec![DisplayPopupOutputCard {
+            return vec![popups::displays::DisplayOutputCard {
                 label: if wayland_snapshot.available {
                     "No outputs".to_string()
                 } else {
@@ -1269,7 +1210,7 @@ impl ThinkPadBar {
                     badges.push(format!("{scale_factor}x SCALE"));
                 }
 
-                DisplayPopupOutputCard {
+                popups::displays::DisplayOutputCard {
                     label: output.label(),
                     summary: output.detail_label(),
                     badges,
@@ -1591,14 +1532,7 @@ impl ThinkPadBar {
                 return self.request_controls_refresh(kind);
             }
             Message::ControlsEvent(event) => {
-                let kind = match event {
-                    crate::services::controls::ControlsEvent::AudioServerChanged => {
-                        crate::services::controls::ControlsRefreshKind::AudioMic
-                    }
-                    crate::services::controls::ControlsEvent::PowerProfileChanged => {
-                        crate::services::controls::ControlsRefreshKind::Power
-                    }
-                };
+                let kind = controls_event_refresh_kind(event);
                 return self.request_controls_refresh(kind);
             }
             Message::ControlsRefreshed(kind, refresh) => {
@@ -2769,32 +2703,6 @@ impl ThinkPadBar {
 
         if self.popup == Popup::Stats {
             let sys_data = self.system_info_service.snapshot();
-            let item = |icon: &str,
-                        label: &str,
-                        val: String|
-             -> Element<'_, Message, Theme, iced::Renderer> {
-                let value = Self::stats_row_value(val);
-                Row::new()
-                    .spacing(12)
-                    .align_y(Alignment::Center)
-                    .width(Length::Fill)
-                    .push(
-                        container(text(icon.to_string()).size(14))
-                            .width(Length::Fixed(16.0))
-                            .align_x(iced::alignment::Horizontal::Center),
-                    )
-                    .push(text(label.to_string()).size(13))
-                    .push(Space::with_width(Length::Fill))
-                    .push(
-                        container(text(value).size(13).style(|_| iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        }))
-                        .width(Length::Fixed(108.0))
-                        .align_x(iced::alignment::Horizontal::Right),
-                    )
-                    .into()
-            };
-
             let cpu_summary = Self::cpu_usage_summary(sys_data);
             let mem_summary = if sys_data.mem_str.trim().is_empty() {
                 if sys_data.mem_total > 0 {
@@ -2812,178 +2720,28 @@ impl ThinkPadBar {
             } else {
                 sys_data.temp_str.clone()
             };
-            let stats_bg_alpha = Self::stats_popup_background_alpha(self.config.appearance.opacity);
+            let model = popups::stats::StatsPopupModel::new(
+                popups::stats::opaque_background_alpha(self.config.appearance.opacity),
+                cpu_summary,
+                mem_summary,
+                temp_summary,
+                Self::fan_runtime_summary(&self.controls.fan),
+            );
 
-            let content = Column::new()
-                .width(Length::Fill)
-                .spacing(14)
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .push(text("Stats").size(18))
-                        .push(Space::with_width(Length::Fill))
-                        .push(
-                            button(text("System Info").size(11))
-                                .padding(Padding::from([6, 10]))
-                                .on_press(Message::TogglePopup(Popup::SystemMonitor)),
-                        ),
-                )
-                .push(chrome::domain_popup_nav_row(theme, &self.popup))
-                .push(item("", "CPU Usage", cpu_summary))
-                .push(item("󰍛", "Memory Usage", mem_summary))
-                .push(item("", "Temperature", temp_summary))
-                .push(item(
-                    "󰈐",
-                    "Fan Runtime",
-                    Self::fan_runtime_summary(&self.controls.fan),
-                ));
-
-            return container(
-                container(content)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .padding(Padding::from([20, 24]))
-                    .style(move |_| container::Style {
-                        background: Some(iced::Background::Color(Color {
-                            a: stats_bg_alpha,
-                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                        })),
-                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        border: iced::Border {
-                            radius: 12.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x11, 0x12, 0x1d))),
-                ..Default::default()
-            })
-            .into();
+            return popups::stats::view(theme, model);
         }
 
         if self.popup == Popup::Displays {
-            let summary_rows = Self::display_summary_rows(wayland_snapshot);
-            let output_cards = Self::display_popup_output_cards(wayland_snapshot);
+            let model = popups::displays::DisplaysPopupModel::new(
+                Self::display_summary_rows(wayland_snapshot)
+                    .into_iter()
+                    .map(|(icon, label, value)| PopupMetricRow::new(icon, label, value))
+                    .collect(),
+                wayland_snapshot.missing_capabilities(),
+                Self::display_popup_output_cards(wayland_snapshot),
+            );
 
-            let item = |label: &str, val: String| -> Element<'_, Message, Theme, iced::Renderer> {
-                Row::new()
-                    .spacing(12)
-                    .align_y(Alignment::Center)
-                    .push(
-                        text(label.to_string())
-                            .size(13)
-                            .width(Length::FillPortion(2)),
-                    )
-                    .push(
-                        text(val)
-                            .size(13)
-                            .width(Length::FillPortion(3))
-                            .align_x(iced::alignment::Horizontal::Right),
-                    )
-                    .into()
-            };
-
-            let badge = |label: String| {
-                container(text(label).size(10))
-                    .padding(Padding::from([4, 8]))
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x41, 0x48, 0x68,
-                        ))),
-                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        border: iced::Border {
-                            radius: 999.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    })
-            };
-
-            let mut outputs_col = Column::new().spacing(10);
-            for card in output_cards {
-                let mut badges_row = Row::new().spacing(6);
-                for badge_label in card.badges {
-                    badges_row = badges_row.push(badge(badge_label));
-                }
-                outputs_col = outputs_col.push(
-                    container(
-                        Column::new()
-                            .spacing(8)
-                            .push(text(card.label).size(14))
-                            .push(badges_row)
-                            .push(text(card.summary).size(12).style(|_| {
-                                iced::widget::text::Style {
-                                    color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
-                                }
-                            })),
-                    )
-                    .padding(12)
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x29, 0x2e, 0x42,
-                        ))),
-                        border: iced::Border {
-                            radius: 10.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-                );
-            }
-
-            let mut content = Column::new()
-                .spacing(14)
-                .push(chrome::detail_popup_header_row(
-                    theme,
-                    "Displays",
-                    &self.popup,
-                ))
-                .push(chrome::domain_popup_nav_row(
-                    theme,
-                    &chrome::domain_nav_focus_popup(&self.popup),
-                ));
-            for (_icon, label, value) in summary_rows {
-                content = content.push(item(label, value));
-            }
-            if let Some(missing_caps) = wayland_snapshot.missing_capabilities() {
-                content = content.push(item("Missing Caps", missing_caps));
-            }
-            content = content
-                .push(Space::with_height(Length::Fixed(8.0)))
-                .push(
-                    text("Output Details")
-                        .size(14)
-                        .style(|_| iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
-                        }),
-                )
-                .push(outputs_col);
-
-            return container(
-                container(scrollable(content))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .padding(Padding::from([20, 24]))
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color {
-                            a: self.config.appearance.opacity,
-                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                        })),
-                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        border: iced::Border {
-                            radius: 12.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
+            return popups::displays::view(theme, self.config.appearance.opacity, model);
         }
 
         if self.popup == Popup::AudioRoutes {
@@ -3002,256 +2760,30 @@ impl ThinkPadBar {
                 "No input routes discovered",
             );
 
-            let summary_item =
-                |label: &str, val: String| -> Element<'_, Message, Theme, iced::Renderer> {
-                    Row::new()
-                        .spacing(12)
-                        .align_y(Alignment::Center)
-                        .push(
-                            text(label.to_string())
-                                .size(13)
-                                .width(Length::FillPortion(2)),
-                        )
-                        .push(
-                            text(val)
-                                .size(13)
-                                .width(Length::FillPortion(3))
-                                .align_x(iced::alignment::Horizontal::Right),
-                        )
-                        .into()
-                };
+            let model = popups::audio_routes::AudioRoutesPopupModel::new(
+                Self::current_audio_route_summary(
+                    &self.controls.audio_devices.output_routes,
+                    self.controls.audio_devices.output_route.as_deref(),
+                    "No output route selected",
+                ),
+                Self::current_audio_route_summary(
+                    &self.controls.audio_devices.input_routes,
+                    self.controls.audio_devices.input_route.as_deref(),
+                    "No input route selected",
+                ),
+                output_routes,
+                input_routes,
+            );
 
-            let route_badge = |label: &'static str, bg: Color, fg: Color| {
-                container(text(label).size(9))
-                    .padding(Padding::from([2, 6]))
-                    .style(move |_| container::Style {
-                        background: Some(iced::Background::Color(bg)),
-                        text_color: Some(fg),
-                        border: iced::Border {
-                            radius: 999.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    })
-            };
-
-            let route_button = |item: AudioRoutePopupItem, is_output: bool| {
-                let message = if is_output {
-                    Message::SetAudioOutputRoute(item.id.clone())
-                } else {
-                    Message::SetAudioInputRoute(item.id.clone())
-                };
-                let detail = if item.is_default {
-                    format!("Selected default • {}", item.detail)
-                } else {
-                    item.detail.clone()
-                };
-                button(
-                    Column::new()
-                        .spacing(4)
-                        .push(
-                            Row::new()
-                                .spacing(6)
-                                .align_y(Alignment::Center)
-                                .push(text(item.icon).size(13))
-                                .push(text(item.label.clone()).size(13))
-                                .push(route_badge(
-                                    item.capability_label,
-                                    Color::from_rgb8(0x36, 0x3d, 0x59),
-                                    Color::from_rgb8(0xc0, 0xca, 0xf5),
-                                ))
-                                .push(route_badge(
-                                    item.status_label,
-                                    Color::from_rgb8(0x2f, 0x43, 0x52),
-                                    Color::from_rgb8(0xc8, 0xdf, 0xf8),
-                                ))
-                                .push(route_badge(
-                                    item.profile_label,
-                                    Color::from_rgb8(0x4b, 0x36, 0x59),
-                                    Color::from_rgb8(0xe1, 0xcf, 0xf8),
-                                ))
-                                .push_maybe(item.warning_label.map(|warning| {
-                                    route_badge(
-                                        warning,
-                                        Color::from_rgb8(0x4f, 0x34, 0x1a),
-                                        Color::from_rgb8(0xf6, 0xd7, 0x92),
-                                    )
-                                }))
-                                .push(route_badge(
-                                    item.origin_label,
-                                    if item.available {
-                                        Color::from_rgb8(0x3a, 0x3f, 0x61)
-                                    } else {
-                                        Color::from_rgb8(0x53, 0x31, 0x31)
-                                    },
-                                    if item.available {
-                                        Color::from_rgb8(0xc0, 0xca, 0xf5)
-                                    } else {
-                                        Color::from_rgb8(0xf7, 0xc0, 0xc0)
-                                    },
-                                ))
-                                .push(Space::with_width(Length::Fill))
-                                .push_maybe((!item.id.is_empty()).then(|| {
-                                    text(format!("#{}", item.id)).size(10).style(|_| {
-                                        iced::widget::text::Style {
-                                            color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
-                                        }
-                                    })
-                                })),
-                        )
-                        .push(text(detail).size(11).style(|_| iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
-                        })),
-                )
-                .width(Length::Fill)
-                .padding(12)
-                .on_press_maybe((item.available && !item.is_default).then_some(message))
-                .style(|_, _| iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                    border: iced::Border {
-                        radius: 10.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-            };
-
-            let route_section = |title: &'static str,
-                                 icon: &'static str,
-                                 items: Vec<AudioRoutePopupItem>,
-                                 is_output: bool| {
-                let mut column = Column::new().spacing(8).push(
-                    Row::new()
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .push(text(icon).size(16))
-                        .push(text(title).size(14)),
-                );
-
-                if items.is_empty() {
-                    column = column.push(text("No routes discovered").size(12).style(|_| {
-                        iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
-                        }
-                    }));
-                } else {
-                    for (origin_label, grouped_items) in
-                        Self::group_audio_route_popup_items_by_origin(&items)
-                    {
-                        column =
-                            column.push(text(format!("{origin_label} family")).size(11).style(
-                                |_| iced::widget::text::Style {
-                                    color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
-                                },
-                            ));
-                        for item in grouped_items {
-                            column = column.push(route_button(item, is_output));
-                        }
-                    }
-                }
-
-                container(column).padding(16).style(|_| container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x21, 0x26, 0x38))),
-                    border: iced::Border {
-                        radius: 12.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-            };
-
-            let content = Column::new()
-                .spacing(14)
-                .push(chrome::detail_popup_header_row(
-                    theme,
-                    "Audio Routes",
-                    &self.popup,
-                ))
-                .push(chrome::domain_popup_nav_row(
-                    theme,
-                    &chrome::domain_nav_focus_popup(&self.popup),
-                ))
-                .push(summary_item(
-                    "Active Output Device",
-                    Self::current_audio_route_summary(
-                        &self.controls.audio_devices.output_routes,
-                        self.controls.audio_devices.output_route.as_deref(),
-                        "No output route selected",
-                    ),
-                ))
-                .push(summary_item(
-                    "Active Input Device",
-                    Self::current_audio_route_summary(
-                        &self.controls.audio_devices.input_routes,
-                        self.controls.audio_devices.input_route.as_deref(),
-                        "No input route selected",
-                    ),
-                ))
-                .push(route_section("Output Routes", "󰕾", output_routes, true))
-                .push(route_section("Input Routes", "", input_routes, false));
-
-            return container(
-                container(scrollable(content))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .padding(Padding::from([20, 24]))
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color {
-                            a: self.config.appearance.opacity,
-                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                        })),
-                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        border: iced::Border {
-                            radius: 12.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
+            return popups::audio_routes::view(
+                theme,
+                self.config.appearance.opacity,
+                self.popup.clone(),
+                model,
+            );
         }
 
         if self.popup == Popup::BluetoothDevices {
-            let bluetooth_cards =
-                Self::control_center_bluetooth_device_cards(&self.controls.bluetooth_devices);
-
-            let item = |label: &str, val: String| -> Element<'_, Message, Theme, iced::Renderer> {
-                Row::new()
-                    .spacing(12)
-                    .align_y(Alignment::Center)
-                    .push(
-                        text(label.to_string())
-                            .size(13)
-                            .width(Length::FillPortion(2)),
-                    )
-                    .push(
-                        text(val)
-                            .size(13)
-                            .width(Length::FillPortion(3))
-                            .align_x(iced::alignment::Horizontal::Right),
-                    )
-                    .into()
-            };
-
-            let badge = |label: String| {
-                container(text(label).size(9))
-                    .padding(Padding::from([2, 6]))
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x41, 0x48, 0x68,
-                        ))),
-                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        border: iced::Border {
-                            radius: 999.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    })
-            };
-
             let adapter_summary = if self.controls.bluetooth_enabled {
                 if self.controls.bluetooth_devices.connected_devices.is_empty() {
                     "Adapter enabled".to_string()
@@ -3265,208 +2797,30 @@ impl ThinkPadBar {
                 "Adapter disabled".to_string()
             };
 
-            let mut content = Column::new()
-                .spacing(14)
-                .push(chrome::detail_popup_header_row(
-                    theme,
-                    "Bluetooth Devices",
-                    &self.popup,
-                ))
-                .push(chrome::domain_popup_nav_row(
-                    theme,
-                    &chrome::domain_nav_focus_popup(&self.popup),
-                ))
-                .push(item("Bluetooth Adapter", adapter_summary))
-                .push(item(
-                    "Scan Status",
-                    Self::bluetooth_scan_status_summary(&self.bluetooth_scan_state),
-                ))
-                .push(
-                    button(
-                        Row::new()
-                            .spacing(6)
-                            .align_y(Alignment::Center)
-                            .push(
-                                text(
-                                    if matches!(
-                                        self.bluetooth_scan_state,
-                                        BluetoothScanState::Scanning { .. }
-                                    ) {
-                                        "󰓅"
-                                    } else {
-                                        "󰥔"
-                                    },
-                                )
-                                .size(14),
-                            )
-                            .push(
-                                text(
-                                    if matches!(
-                                        self.bluetooth_scan_state,
-                                        BluetoothScanState::Scanning { .. }
-                                    ) {
-                                        "Stop Scan"
-                                    } else {
-                                        "Scan 5s"
-                                    },
-                                )
-                                .size(12),
-                            ),
-                    )
-                    .padding(Padding::from([8, 10]))
-                    .on_press_maybe(if self.controls.bluetooth_enabled {
-                        Some(
-                            if matches!(
-                                self.bluetooth_scan_state,
-                                BluetoothScanState::Scanning { .. }
-                            ) {
-                                Message::StopBluetoothScan
-                            } else {
-                                Message::ScanBluetoothDevices
-                            },
-                        )
-                    } else {
-                        None
-                    }),
-                )
-                .push(
-                    button(
-                        Row::new()
-                            .spacing(6)
-                            .align_y(Alignment::Center)
-                            .push(text("󰳋").size(14))
-                            .push(text("Open Overskride").size(12)),
-                    )
-                    .padding(Padding::from([8, 10]))
-                    .on_press(Message::OpenOverskride),
-                );
-
-            if bluetooth_cards.is_empty() {
-                content = content.push(
-                    container(text("No Bluetooth devices discovered").size(12).style(|_| {
-                        iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
-                        }
-                    }))
-                    .padding(12)
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x21, 0x26, 0x38,
-                        ))),
-                        border: iced::Border {
-                            radius: 10.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-                );
-            } else {
-                for device in bluetooth_cards {
-                    let mut badges_row = Row::new().spacing(6);
-                    for badge_label in device.badges {
-                        badges_row = badges_row.push(badge(badge_label));
-                    }
-                    if Self::bluetooth_device_is_new(&self.bluetooth_scan_state, &device.address) {
-                        badges_row = badges_row.push(badge("NEW".to_string()));
-                    }
-
-                    let connect_action = if device.connected {
-                        Message::DisconnectBluetoothDevice(device.address.clone())
-                    } else {
-                        Message::ConnectBluetoothDevice(device.address.clone())
-                    };
-
-                    let can_press = self.controls.bluetooth_enabled || device.connected;
-                    let pair_action = (!device.paired && self.controls.bluetooth_enabled)
-                        .then(|| Message::PairBluetoothDevice(device.address.clone()));
-                    let trust_action =
-                        (device.paired && !device.trusted && self.controls.bluetooth_enabled)
-                            .then(|| Message::TrustBluetoothDevice(device.address.clone()));
-                    let remove_action = (!device.connected)
-                        .then(|| Message::RemoveBluetoothDevice(device.address.clone()));
-
-                    let action_button =
-                        |label: &'static str, message: Option<Message>| -> Element<'_, Message> {
-                            button(text(label).size(10))
-                                .padding(Padding::from([4, 8]))
-                                .on_press_maybe(message)
-                                .into()
-                        };
-
-                    let card = Column::new()
-                        .spacing(8)
-                        .push(
-                            Row::new()
-                                .spacing(6)
-                                .align_y(Alignment::Center)
-                                .push(text("󰂯").size(13))
-                                .push(text(device.label.clone()).size(13))
-                                .push(Space::with_width(Length::Fill))
-                                .push(action_button(
-                                    if device.connected {
-                                        "Disconnect"
-                                    } else {
-                                        "Connect"
-                                    },
-                                    can_press.then_some(connect_action),
-                                )),
-                        )
-                        .push(badges_row)
-                        .push(text(device.summary.clone()).size(11).style(|_| {
-                            iced::widget::text::Style {
-                                color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                            }
-                        }))
-                        .push_maybe(device.detail.as_ref().map(|detail| {
-                            text(detail.clone())
-                                .size(11)
-                                .style(|_| iced::widget::text::Style {
-                                    color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
-                                })
-                        }))
-                        .push(
-                            Row::new()
-                                .spacing(8)
-                                .push(action_button("Pair", pair_action))
-                                .push(action_button("Trust", trust_action))
-                                .push(action_button("Remove", remove_action)),
+            let bluetooth_cards =
+                Self::control_center_bluetooth_device_cards(&self.controls.bluetooth_devices)
+                    .into_iter()
+                    .map(|mut card| {
+                        card.is_new = Self::bluetooth_device_is_new(
+                            &self.bluetooth_scan_state,
+                            &card.address,
                         );
+                        card
+                    })
+                    .collect();
+            let scan_running = matches!(
+                self.bluetooth_scan_state,
+                BluetoothScanState::Scanning { .. }
+            );
+            let model = popups::bluetooth_devices::BluetoothDevicesPopupModel::new(
+                adapter_summary,
+                Self::bluetooth_scan_status_summary(&self.bluetooth_scan_state),
+                self.controls.bluetooth_enabled,
+                scan_running,
+                bluetooth_cards,
+            );
 
-                    content =
-                        content.push(container(card).padding(12).style(|_| container::Style {
-                            background: Some(iced::Background::Color(Color::from_rgb8(
-                                0x21, 0x26, 0x38,
-                            ))),
-                            border: iced::Border {
-                                radius: 10.0.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }));
-                }
-            }
-
-            return container(
-                container(scrollable(content))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .padding(Padding::from([20, 24]))
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color {
-                            a: self.config.appearance.opacity,
-                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                        })),
-                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        border: iced::Border {
-                            radius: 12.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
+            return popups::bluetooth_devices::view(theme, self.config.appearance.opacity, model);
         }
 
         if self.popup == Popup::Calendar {
@@ -3634,42 +2988,6 @@ impl ThinkPadBar {
         }
 
         if self.popup == Popup::SystemMonitor {
-            let item = |icon: &str,
-                        label: &str,
-                        val: String|
-             -> Element<'_, Message, Theme, iced::Renderer> {
-                Row::new()
-                    .spacing(12)
-                    .align_y(Alignment::Center)
-                    .push(text(icon.to_string()).size(16))
-                    .push(text(label.to_string()).size(13).width(Length::Fill))
-                    .push(text(val).size(13))
-                    .into()
-            };
-
-            let mut col = Column::new()
-                .spacing(12)
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .push(text("System Info").size(18).style(move |_| {
-                            iced::widget::text::Style {
-                                color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                            }
-                        }))
-                        .push(Space::with_width(Length::Fill))
-                        .push(
-                            text(concat!("ver ", env!("CARGO_PKG_VERSION")))
-                                .size(10)
-                                .style(move |_| iced::widget::text::Style {
-                                    color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
-                                }),
-                        ),
-                )
-                .push(chrome::domain_popup_nav_row(
-                    theme,
-                    &chrome::domain_nav_focus_popup(&self.popup),
-                ));
             let sys_data = self.system_info_service.snapshot();
             let system_diagnostics = self.system_info_service.diagnostics();
             let compositor_diagnostics = self.compositor_service.diagnostics();
@@ -3686,213 +3004,221 @@ impl ThinkPadBar {
                 &idle_snapshot,
             );
             let display_rows = Self::display_summary_rows(wayland_snapshot);
-            col = col
-                .push(item("", "CPU Usage", sys_data.cpu_str.clone()))
-                .push(item("󰍛", "Memory Usage", sys_data.mem_str.clone()))
-                .push(item("󰍛", "Swap Usage", sys_data.swap_str.clone()))
-                .push(item("", "Temperature", sys_data.temp_str.clone()))
-                .push(item("DSK", "Disk Usage /", sys_data.disk_root_str.clone()))
-                .push(item(
-                    "BOT",
-                    "Disk Usage /boot",
-                    sys_data.disk_boot_str.clone(),
-                ))
-                .push(item("NET", "IP Address", sys_data.ip_address.clone()))
-                .push(item("DL", "Download Speed", sys_data.net_down_str.clone()))
-                .push(item("UL", "Upload Speed", sys_data.net_up_str.clone()));
-            for (icon, label, value) in display_rows {
-                col = col.push(item(icon, label, value));
-            }
-            col = col.push(Space::with_height(Length::Fixed(8.0))).push(
-                text("ThinkPad Hardware")
-                    .size(14)
-                    .style(move |_| iced::widget::text::Style {
-                        color: Some(Color::from_rgb8(0x9e, 0xce, 0x6a)),
-                    }),
+            let mut overview_rows = vec![
+                PopupMetricRow::new("", "CPU Usage", sys_data.cpu_str.clone()),
+                PopupMetricRow::new("󰍛", "Memory Usage", sys_data.mem_str.clone()),
+                PopupMetricRow::new("󰍛", "Swap Usage", sys_data.swap_str.clone()),
+                PopupMetricRow::new("", "Temperature", sys_data.temp_str.clone()),
+                PopupMetricRow::new("DSK", "Disk Usage /", sys_data.disk_root_str.clone()),
+                PopupMetricRow::new("BOT", "Disk Usage /boot", sys_data.disk_boot_str.clone()),
+                PopupMetricRow::new("NET", "IP Address", sys_data.ip_address.clone()),
+                PopupMetricRow::new("DL", "Download Speed", sys_data.net_down_str.clone()),
+                PopupMetricRow::new("UL", "Upload Speed", sys_data.net_up_str.clone()),
+            ];
+            overview_rows.extend(
+                display_rows
+                    .into_iter()
+                    .map(|(icon, label, value)| PopupMetricRow::new(icon, label, value)),
             );
-            for (icon, label, value) in hardware_rows {
-                col = col.push(item(icon, label, value));
-            }
+            let hardware_rows = hardware_rows
+                .into_iter()
+                .map(|(icon, label, value)| PopupMetricRow::new(icon, label, value))
+                .collect::<Vec<_>>();
+            let mut observability_rows = Vec::new();
+            let mut warning_rows = Vec::new();
 
             if self.debug_ui_enabled {
                 let runtime_capabilities = self.runtime_capabilities();
-                col = col
-                    .push(Space::with_height(Length::Fixed(8.0)))
-                    .push(text("Observability").size(14).style(move |_| {
-                        iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
-                        }
-                    }))
-                    .push(item(
-                        "TIM",
-                        "Workspace Refresh (last/avg ms)",
-                        format!(
-                            "{}/{}",
-                            self.perf.workspace_refresh_last_ms,
-                            self.perf.workspace_refresh_avg_ms()
-                        ),
-                    ))
-                    .push(item(
-                        "REQ",
-                        "Workspace Refresh (req/coalesced)",
-                        format!(
-                            "{}/{}",
-                            self.perf.workspace_refresh_requested,
-                            self.perf.workspace_refresh_coalesced
-                        ),
-                    ))
-                    .push(item(
-                        "BUS",
-                        "D-Bus Connect (ok/fail)",
-                        format!(
-                            "{}/{}",
-                            self.perf.dbus_connect_successes, self.perf.dbus_connect_failures
-                        ),
-                    ))
-                    .push(item(
-                        "MOD",
-                        "Runtime Capabilities",
-                        runtime_capabilities.summary(),
-                    ))
-                    .push(item(
-                        "PRV",
-                        "Capability Providers",
-                        runtime_capabilities.provider_summary(),
-                    ))
-                    .push(item(
-                        "API",
-                        "Capability Degradations",
-                        runtime_capabilities
-                            .degraded_summary()
-                            .unwrap_or_else(|| "none".to_string()),
-                    ))
-                    .push(item(
-                        "SVC",
-                        "Service Backends",
-                        format!(
-                            "cmp {:?}->{:?} net {:?}->{:?}",
-                            compositor.configured_backend,
-                            compositor.active_backend,
-                            self.network_service.configured_backend(),
-                            self.network_service.active_backend()
-                        ),
-                    ))
-                    .push(item(
-                        "CMP",
-                        "Compositor Runtime",
-                        compositor_diagnostics.summary(),
-                    ))
-                    .push(item(
-                        "CTL",
-                        "Controls Backends",
-                        controls_diagnostics.summary(),
-                    ))
-                    .push(item(
-                        "COL",
-                        "Coalescing Runtime",
-                        coalescing_diagnostics.summary(),
-                    ))
-                    .push(item(
-                        "NET",
-                        "Network Runtime",
-                        network_diagnostics.summary(),
-                    ))
-                    .push(item(
-                        "AUD",
-                        "Audio Runtime",
-                        controls_diagnostics
-                            .audio_runtime
-                            .clone()
-                            .unwrap_or_else(|| "n/a".to_string()),
-                    ))
-                    .push(item(
-                        "󰾆",
-                        "Power Runtime",
-                        controls_diagnostics
-                            .power_runtime
-                            .clone()
-                            .unwrap_or_else(|| "n/a".to_string()),
-                    ))
-                    .push(item("SYS", "System Runtime", system_diagnostics.summary()))
-                    .push(item(
-                        "WAY",
-                        "Wayland Runtime",
-                        wayland_snapshot.runtime_summary(),
-                    ))
-                    .push(item(
-                        "CAP",
-                        "Wayland Capabilities",
-                        wayland_snapshot.capability_summary(),
-                    ))
-                    .push(item(
-                        "OUT",
-                        "Wayland Outputs",
-                        wayland_snapshot.output_summary(),
-                    ))
-                    .push(item(
-                        "DET",
-                        "Wayland Outputs Detail",
-                        wayland_snapshot.output_detail_summary(),
-                    ))
-                    .push(item(
-                        "IDL",
-                        "Idle Inhibitor Runtime",
-                        idle_snapshot.debug_summary(),
-                    ))
-                    .push(item("TRY", "Tray Icons", tray_diagnostics.summary()))
-                    .push(item(
-                        "TRT",
-                        "Tray Runtime",
-                        tray_diagnostics.runtime.summary(),
-                    ));
+                observability_rows.push(PopupMetricRow::new(
+                    "TIM",
+                    "Workspace Refresh (last/avg ms)",
+                    format!(
+                        "{}/{}",
+                        self.perf.workspace_refresh_last_ms,
+                        self.perf.workspace_refresh_avg_ms()
+                    ),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "REQ",
+                    "Workspace Refresh (req/coalesced)",
+                    format!(
+                        "{}/{}",
+                        self.perf.workspace_refresh_requested,
+                        self.perf.workspace_refresh_coalesced
+                    ),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "BUS",
+                    "D-Bus Connect (ok/fail)",
+                    format!(
+                        "{}/{}",
+                        self.perf.dbus_connect_successes, self.perf.dbus_connect_failures
+                    ),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "MOD",
+                    "Runtime Capabilities",
+                    runtime_capabilities.summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "PRV",
+                    "Capability Providers",
+                    runtime_capabilities.provider_summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "API",
+                    "Capability Degradations",
+                    runtime_capabilities
+                        .degraded_summary()
+                        .unwrap_or_else(|| "none".to_string()),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "SVC",
+                    "Service Backends",
+                    format!(
+                        "cmp {:?}->{:?} net {:?}->{:?}",
+                        compositor.configured_backend,
+                        compositor.active_backend,
+                        self.network_service.configured_backend(),
+                        self.network_service.active_backend()
+                    ),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "CMP",
+                    "Compositor Runtime",
+                    compositor_diagnostics.summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "CTL",
+                    "Controls Backends",
+                    controls_diagnostics.summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "COL",
+                    "Coalescing Runtime",
+                    coalescing_diagnostics.summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "NET",
+                    "Network Runtime",
+                    network_diagnostics.summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "AUD",
+                    "Audio Runtime",
+                    controls_diagnostics
+                        .audio_runtime
+                        .clone()
+                        .unwrap_or_else(|| "n/a".to_string()),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "󰾆",
+                    "Power Runtime",
+                    controls_diagnostics
+                        .power_runtime
+                        .clone()
+                        .unwrap_or_else(|| "n/a".to_string()),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "SYS",
+                    "System Runtime",
+                    system_diagnostics.summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "WAY",
+                    "Wayland Runtime",
+                    wayland_snapshot.runtime_summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "CAP",
+                    "Wayland Capabilities",
+                    wayland_snapshot.capability_summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "OUT",
+                    "Wayland Outputs",
+                    wayland_snapshot.output_summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "DET",
+                    "Wayland Outputs Detail",
+                    wayland_snapshot.output_detail_summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "IDL",
+                    "Idle Inhibitor Runtime",
+                    idle_snapshot.debug_summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "TRY",
+                    "Tray Icons",
+                    tray_diagnostics.summary(),
+                ));
+                observability_rows.push(PopupMetricRow::new(
+                    "TRT",
+                    "Tray Runtime",
+                    tray_diagnostics.runtime.summary(),
+                ));
 
                 if let Some(last_unresolved) = tray_diagnostics.last_unresolved_item {
-                    col = col.push(item("WRN", "Tray Icon Last Unresolved", last_unresolved));
+                    warning_rows.push(PopupMetricRow::new(
+                        "WRN",
+                        "Tray Icon Last Unresolved",
+                        last_unresolved,
+                    ));
                 }
                 if let Some(unavailable_reason) = compositor_diagnostics.unavailable_reason {
-                    col = col.push(item("WRN", "Compositor Unavailable", unavailable_reason));
+                    warning_rows.push(PopupMetricRow::new(
+                        "WRN",
+                        "Compositor Unavailable",
+                        unavailable_reason,
+                    ));
                 }
                 if let Some(last_error) = network_diagnostics.last_error {
-                    col = col.push(item("WRN", "Network Last Error", last_error));
+                    warning_rows.push(PopupMetricRow::new("WRN", "Network Last Error", last_error));
                 }
                 if let Some(unavailable_reason) = network_diagnostics.unavailable_reason {
-                    col = col.push(item("WRN", "Network Unavailable", unavailable_reason));
+                    warning_rows.push(PopupMetricRow::new(
+                        "WRN",
+                        "Network Unavailable",
+                        unavailable_reason,
+                    ));
                 }
                 if let Some(unavailable_reason) = wayland_snapshot.unavailable_reason.clone() {
-                    col = col.push(item("WRN", "Wayland Unavailable", unavailable_reason));
+                    warning_rows.push(PopupMetricRow::new(
+                        "WRN",
+                        "Wayland Unavailable",
+                        unavailable_reason,
+                    ));
                 }
                 if let Some(missing_caps) = wayland_snapshot.missing_capabilities() {
-                    col = col.push(item("WRN", "Wayland Missing Caps", missing_caps));
+                    warning_rows.push(PopupMetricRow::new(
+                        "WRN",
+                        "Wayland Missing Caps",
+                        missing_caps,
+                    ));
                 }
                 if let Some(last_failure) = tray_diagnostics.runtime.last_dispatch_failure {
-                    col = col.push(item("WRN", "Tray Dispatch Failure", last_failure));
+                    warning_rows.push(PopupMetricRow::new(
+                        "WRN",
+                        "Tray Dispatch Failure",
+                        last_failure,
+                    ));
                 }
                 if let Some(menu_error) = tray_diagnostics.runtime.last_menu_activation_error {
-                    col = col.push(item("WRN", "Tray Menu Error", menu_error));
+                    warning_rows.push(PopupMetricRow::new("WRN", "Tray Menu Error", menu_error));
                 }
             }
 
-            return container(
-                container(scrollable(container(col).padding([0, 18, 0, 0])))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .padding(Padding::from([20, 24]))
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color {
-                            a: self.config.appearance.opacity,
-                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                        })), // Slightly darker but transparent
-                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        border: iced::Border {
-                            radius: 12.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
+            let model = popups::system_info::SystemInfoPopupModel::new(
+                env!("CARGO_PKG_VERSION"),
+                overview_rows,
+                hardware_rows,
+                observability_rows,
+                warning_rows,
+            );
+
+            return popups::system_info::view(theme, self.config.appearance.opacity, model);
         }
 
         let domain_state = Self::popup_domain_state(&self.popup);
@@ -5020,14 +4346,10 @@ impl ThinkPadBar {
     }
 
     pub fn subscription(&self) -> iced::Subscription<Message> {
-        let (brightness_secs, thermal_secs, slow_secs) =
-            self.config.performance.effective_intervals();
+        let (_, thermal_secs, slow_secs) = self.config.performance.effective_intervals();
 
         iced::Subscription::batch(vec![
             crate::modules::clock::tick(),
-            iced::time::every(std::time::Duration::from_secs(brightness_secs)).map(|_| {
-                Message::RefreshControls(crate::services::controls::ControlsRefreshKind::Brightness)
-            }),
             iced::time::every(std::time::Duration::from_secs(thermal_secs)).map(|_| {
                 Message::RefreshControls(crate::services::controls::ControlsRefreshKind::Fan)
             }),
@@ -5052,12 +4374,32 @@ impl ThinkPadBar {
     }
 }
 
+fn controls_event_refresh_kind(
+    event: crate::services::controls::ControlsEvent,
+) -> crate::services::controls::ControlsRefreshKind {
+    match event {
+        crate::services::controls::ControlsEvent::AudioServer => {
+            crate::services::controls::ControlsRefreshKind::AudioMic
+        }
+        crate::services::controls::ControlsEvent::PowerProfile => {
+            crate::services::controls::ControlsRefreshKind::Power
+        }
+        crate::services::controls::ControlsEvent::Bluetooth => {
+            crate::services::controls::ControlsRefreshKind::Bluetooth
+        }
+        crate::services::controls::ControlsEvent::Brightness => {
+            crate::services::controls::ControlsRefreshKind::Brightness
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundRequestKind, CoalescedControlKind, ControlCenterDeviceItem, ControlsCoalescing,
-        Message, Popup, ThinkPadBar,
+        controls_event_refresh_kind, BackgroundRequestKind, CoalescedControlKind,
+        ControlCenterDeviceItem, ControlsCoalescing, Message, Popup, ThinkPadBar,
     };
+    use crate::ui::popups::audio_routes;
     use iced::{mouse, window::Id, Color};
 
     fn hermetic_bar() -> ThinkPadBar {
@@ -5412,16 +4754,16 @@ mod tests {
 
     #[test]
     fn stats_popup_background_alpha_is_opaque() {
-        assert_eq!(ThinkPadBar::stats_popup_background_alpha(0.25), 1.0);
-        assert_eq!(ThinkPadBar::stats_popup_background_alpha(0.85), 1.0);
+        assert_eq!(crate::ui::popups::stats::opaque_background_alpha(0.25), 1.0);
+        assert_eq!(crate::ui::popups::stats::opaque_background_alpha(0.85), 1.0);
     }
 
     #[test]
     fn stats_row_value_never_returns_blank() {
-        assert_eq!(ThinkPadBar::stats_row_value(""), "--");
-        assert_eq!(ThinkPadBar::stats_row_value("   "), "--");
-        assert_eq!(ThinkPadBar::stats_row_value("11%"), "11%");
-        assert_eq!(ThinkPadBar::stats_row_value(" 34°C "), "34°C");
+        assert_eq!(crate::ui::popups::stats::normalize_value(""), "--");
+        assert_eq!(crate::ui::popups::stats::normalize_value("   "), "--");
+        assert_eq!(crate::ui::popups::stats::normalize_value("11%"), "11%");
+        assert_eq!(crate::ui::popups::stats::normalize_value(" 34°C "), "34°C");
     }
 
     #[test]
@@ -5653,7 +4995,7 @@ mod tests {
 
         assert_eq!(
             cards,
-            vec![super::BluetoothDeviceCard {
+            vec![crate::ui::popups::bluetooth_devices::BluetoothDeviceCard {
                 address: "AA:BB:CC:DD:EE:FF".to_string(),
                 label: "WH-1000XM5".to_string(),
                 summary: "Connected • Battery 90%".to_string(),
@@ -5667,6 +5009,7 @@ mod tests {
                 connected: true,
                 paired: true,
                 trusted: true,
+                is_new: false,
             }]
         );
     }
@@ -5695,7 +5038,7 @@ mod tests {
         assert_eq!(
             items,
             vec![
-                super::AudioRoutePopupItem {
+                audio_routes::AudioRoutePopupItem {
                     id: "52".to_string(),
                     label: "Built-in Audio".to_string(),
                     icon: "󰓃",
@@ -5708,7 +5051,7 @@ mod tests {
                     is_default: false,
                     available: true,
                 },
-                super::AudioRoutePopupItem {
+                audio_routes::AudioRoutePopupItem {
                     id: "77".to_string(),
                     label: "USB DAC".to_string(),
                     icon: "󰕓",
@@ -5741,7 +5084,7 @@ mod tests {
 
         assert_eq!(
             items,
-            vec![super::AudioRoutePopupItem {
+            vec![audio_routes::AudioRoutePopupItem {
                 id: String::new(),
                 label: "No input routes discovered".to_string(),
                 icon: "󰖪",
@@ -5808,7 +5151,7 @@ mod tests {
     #[test]
     fn route_popup_items_group_by_origin_family_in_stable_order() {
         let items = vec![
-            super::AudioRoutePopupItem {
+            audio_routes::AudioRoutePopupItem {
                 id: "1".to_string(),
                 label: "WH-1000XM5".to_string(),
                 icon: "󰂯",
@@ -5821,7 +5164,7 @@ mod tests {
                 is_default: true,
                 available: true,
             },
-            super::AudioRoutePopupItem {
+            audio_routes::AudioRoutePopupItem {
                 id: "2".to_string(),
                 label: "MX Keys".to_string(),
                 icon: "󰂯",
@@ -5834,7 +5177,7 @@ mod tests {
                 is_default: false,
                 available: true,
             },
-            super::AudioRoutePopupItem {
+            audio_routes::AudioRoutePopupItem {
                 id: "3".to_string(),
                 label: "USB DAC".to_string(),
                 icon: "󰕓",
@@ -5849,7 +5192,7 @@ mod tests {
             },
         ];
 
-        let groups = ThinkPadBar::group_audio_route_popup_items_by_origin(&items);
+        let groups = audio_routes::group_by_origin(&items);
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].0, "BT");
         assert_eq!(groups[0].1.len(), 2);
@@ -6562,7 +5905,7 @@ mod tests {
         let mut bar = hermetic_bar();
 
         let _ = bar.update(super::Message::ControlsEvent(
-            crate::services::controls::ControlsEvent::PowerProfileChanged,
+            crate::services::controls::ControlsEvent::PowerProfile,
         ));
 
         assert!(bar.controls_refresh_coalescing.is_inflight(&kind));
@@ -6622,5 +5965,21 @@ mod tests {
         assert!(bar
             .background_request_coalescing
             .is_queued(&BackgroundRequestKind::DbusConnect));
+    }
+
+    #[test]
+    fn controls_event_refresh_kind_maps_bluetooth_event_to_bluetooth_refresh() {
+        assert_eq!(
+            controls_event_refresh_kind(crate::services::controls::ControlsEvent::Bluetooth),
+            crate::services::controls::ControlsRefreshKind::Bluetooth
+        );
+    }
+
+    #[test]
+    fn controls_event_refresh_kind_maps_brightness_event_to_brightness_refresh() {
+        assert_eq!(
+            controls_event_refresh_kind(crate::services::controls::ControlsEvent::Brightness),
+            crate::services::controls::ControlsRefreshKind::Brightness
+        );
     }
 }

@@ -3,7 +3,9 @@ use std::{future::Future, pin::Pin};
 pub mod audio;
 pub mod bluetooth;
 pub mod brightness;
+pub mod fan;
 pub mod power;
+pub mod privileged;
 
 pub type BackendFuture<'a, T = ()> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -29,12 +31,18 @@ pub trait BrightnessBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
     fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode;
     fn snapshot(&self) -> crate::services::controls::BrightnessSnapshot;
-    fn set_brightness(&self, percent: u32);
+    fn set_brightness(&self, percent: u32) -> BackendFuture<'_, ()>;
+    fn subscription(&self) -> iced::Subscription<crate::services::controls::ControlsEvent> {
+        iced::Subscription::none()
+    }
 }
 
 pub trait BluetoothBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
     fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode;
+    fn diagnostics_summary(&self) -> Option<String> {
+        None
+    }
     fn enabled(&self) -> bool;
     fn device_summary(&self) -> crate::services::controls::BluetoothDeviceSummary;
     fn toggle(&self, enable: bool) -> bool;
@@ -46,6 +54,19 @@ pub trait BluetoothBackend: Send + Sync {
     fn trust_device(&self, address: String) -> BackendFuture<'_, bool>;
     fn remove_device(&self, address: String) -> BackendFuture<'_, bool>;
     fn open_overskride(&self) -> bool;
+    fn subscription(&self) -> iced::Subscription<crate::services::controls::ControlsEvent> {
+        iced::Subscription::none()
+    }
+}
+
+pub trait FanBackend: Send + Sync {
+    fn backend_name(&self) -> &'static str;
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode;
+    fn diagnostics_summary(&self) -> Option<String> {
+        None
+    }
+    fn info(&self) -> crate::services::controls::FanInfo;
+    fn set_level(&self, level: &str) -> BackendFuture<'_, ()>;
 }
 
 pub trait PowerBackend: Send + Sync {

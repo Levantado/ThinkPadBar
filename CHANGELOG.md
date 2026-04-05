@@ -2,6 +2,82 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.42] - 2026-04-06
+
+### Changed
+- Continued brightness backend cleanup toward a proper event-driven runtime:
+  - `SysfsBrightnessBackend` now exposes a backend subscription and emits a dedicated `ControlsEvent::Brightness`;
+  - brightness sync no longer depends on a dedicated periodic `app` polling timer;
+  - runtime updates are triggered by `inotify` watches on `/sys/class/backlight` brightness files, while the existing slow refresh path remains as a degraded safety net.
+- Continued `S1 Theme Tokens + UI Decomposition`:
+  - extracted the Bluetooth Devices detail popup into `src/ui/popups/bluetooth_devices.rs`;
+  - `app.rs` now builds a typed `BluetoothDevicesPopupModel` and delegates Bluetooth popup rendering to the UI layer instead of holding the full widget tree inline.
+
+### Quality
+- Added regression coverage for:
+  - brightness watch-path discovery for runtime event wiring;
+  - `ControlsEvent::Brightness -> ControlsRefreshKind::Brightness` mapping;
+  - extracted Bluetooth popup model preservation.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features`, `cargo test --workspace --all-features` (246 passed).
+
+## [1.0.41] - 2026-04-06
+
+### Changed
+- Continued brightness backend cleanup toward native system integration:
+  - `SysfsBrightnessBackend` now uses `org.freedesktop.login1.Session.SetBrightness` as the primary write path;
+  - direct sysfs write, `brightnessctl`, `light`, and privileged fallback remain only as degraded recovery paths;
+  - backend identity/capability now reflects a hybrid `logind + sysfs` model instead of a purely command-driven path.
+- Continued `S1 Theme Tokens + UI Decomposition`:
+  - extracted the Displays detail popup into `src/ui/popups/displays.rs`;
+  - `app.rs` now builds a typed `DisplaysPopupModel` and delegates rendering of the Displays popup to the UI layer.
+
+### Quality
+- Added regression coverage for:
+  - backlight device-name extraction and logind brightness request shaping;
+  - extracted Displays popup model preservation.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features`, `cargo test --workspace --all-features` (243 passed).
+
+## [1.0.40] - 2026-04-06
+
+### Changed
+- Continued `S3 BlueZ Native Backend` from the foundation in `1.0.39`:
+  - `BluezBluetoothBackend` now owns an event-driven `BlueZ` signal subscription on the system bus;
+  - Bluetooth controls react to `PropertiesChanged`, `InterfacesAdded`, and `InterfacesRemoved` signals under `/org/bluez` instead of relying only on explicit refresh commands.
+- Continued `S5 Privileged Control Plane`:
+  - added `src/services/controls_backends/privileged.rs` with shared direct-write and `pkexec` fallback helpers;
+  - moved fan writes onto the backend seam with async execution and direct-write/privileged fallback isolated from UI orchestration;
+  - reused the same privileged helper for the guarded `platform_profile` fallback path in the power backend.
+- Tightened controls runtime flow:
+  - `ControlsService` now batches Bluetooth backend subscriptions together with audio and power runtime events;
+  - brightness and fan command execution now await backend futures explicitly instead of fire-and-forget sync calls;
+  - normalized `ControlsEvent` into short typed domain variants (`AudioServer`, `PowerProfile`, `Bluetooth`).
+- Removed the legacy `modules::fan::set_fan_level` path so fan control has a single backend-owned write path.
+
+### Quality
+- Added regression coverage for:
+  - BlueZ signal filtering for runtime-relevant messages only;
+  - control-event to refresh-kind mapping for Bluetooth runtime updates.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features`, `cargo test --workspace --all-features` (240 passed).
+
+## [1.0.39] - 2026-04-06
+
+### Changed
+- Continued `S1 Theme Tokens + UI Decomposition`:
+  - added `src/ui/popups/stats.rs` and moved Stats popup rendering/model normalization out of `app.rs`;
+  - added `src/ui/popups/system_info.rs` and moved System Info section grouping out of `app.rs`;
+  - introduced popup view-model seams so optional sections and blank-value normalization are tested outside the application shell.
+- Implemented the `S3 BlueZ Native Backend` foundation:
+  - replaced the old shell-heavy Bluetooth backend with `BluezBluetoothBackend`;
+  - Bluetooth adapter power, discovery, device connect/disconnect/pair/trust/remove, connected-device summaries, battery percentages, and audio-profile parsing now come from BlueZ D-Bus object state instead of `bluetoothctl` scraping.
+- Continued backend normalization toward the `S5 Privileged Control Plane`:
+  - added a dedicated `FanBackend` trait and default `ProcfsFanBackend`;
+  - routed fan refresh/command flow through the backend seam so future permission/polkit cleanup can happen without touching controls orchestration again.
+- Extended runtime capability reporting to surface real Bluetooth and fan provider details from backend diagnostics instead of hard-coded strings.
+
+### Quality
+- Added regression coverage for extracted Stats/System Info popup models, BlueZ object parsing, Bluetooth profile normalization, and fan backend command routing.
+- Validation passed: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features`, `cargo test --workspace --all-features`.
+
 ## [1.0.38] - 2026-04-06
 
 ### Changed

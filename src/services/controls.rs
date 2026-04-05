@@ -123,6 +123,7 @@ pub struct ControlsDiagnostics {
     pub audio_backend: &'static str,
     pub audio_runtime: Option<String>,
     pub brightness_backend: &'static str,
+    pub fan_backend: &'static str,
     pub bluetooth_backend: &'static str,
     pub power_backend: &'static str,
     pub power_runtime: Option<String>,
@@ -131,8 +132,12 @@ pub struct ControlsDiagnostics {
 impl ControlsDiagnostics {
     pub fn summary(&self) -> String {
         format!(
-            "aud {} bri {} bt {} pwr {}",
-            self.audio_backend, self.brightness_backend, self.bluetooth_backend, self.power_backend
+            "aud {} bri {} fan {} bt {} pwr {}",
+            self.audio_backend,
+            self.brightness_backend,
+            self.fan_backend,
+            self.bluetooth_backend,
+            self.power_backend
         )
     }
 }
@@ -177,8 +182,10 @@ impl Default for ControlsSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlsEvent {
-    AudioServerChanged,
-    PowerProfileChanged,
+    AudioServer,
+    PowerProfile,
+    Bluetooth,
+    Brightness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -238,6 +245,7 @@ pub struct ControlsService {
     snapshot: ControlsSnapshot,
     audio_backend: Arc<dyn crate::services::controls_backends::AudioBackend>,
     brightness_backend: Arc<dyn crate::services::controls_backends::BrightnessBackend>,
+    fan_backend: Arc<dyn crate::services::controls_backends::FanBackend>,
     bluetooth_backend: Arc<dyn crate::services::controls_backends::BluetoothBackend>,
     power_backend: Arc<dyn crate::services::controls_backends::PowerBackend>,
 }
@@ -247,7 +255,10 @@ impl ControlsService {
         Self::with_backends(
             Arc::new(crate::services::controls_backends::audio::WpctlAudioBackend::default()),
             Arc::new(crate::services::controls_backends::brightness::SysfsBrightnessBackend),
-            Arc::new(crate::services::controls_backends::bluetooth::BluetoothCtlBackend),
+            Arc::new(crate::services::controls_backends::fan::ProcfsFanBackend),
+            Arc::new(
+                crate::services::controls_backends::bluetooth::BluezBluetoothBackend::default(),
+            ),
             Arc::new(crate::services::controls_backends::power::PowerProfilesDaemonBackend),
         )
     }
@@ -255,6 +266,7 @@ impl ControlsService {
     fn with_backends(
         audio_backend: Arc<dyn crate::services::controls_backends::AudioBackend>,
         brightness_backend: Arc<dyn crate::services::controls_backends::BrightnessBackend>,
+        fan_backend: Arc<dyn crate::services::controls_backends::FanBackend>,
         bluetooth_backend: Arc<dyn crate::services::controls_backends::BluetoothBackend>,
         power_backend: Arc<dyn crate::services::controls_backends::PowerBackend>,
     ) -> Self {
@@ -264,7 +276,7 @@ impl ControlsService {
                 audio: audio_backend.audio_info(),
                 audio_devices: audio_backend.device_summary(),
                 mic: audio_backend.mic_info(),
-                fan: crate::modules::fan::get_fan_info(),
+                fan: fan_backend.info(),
                 battery: crate::modules::battery::get_battery_info(),
                 power_profile: power_backend.profile(),
                 bluetooth_enabled: bluetooth_backend.enabled(),
@@ -272,6 +284,7 @@ impl ControlsService {
             },
             audio_backend,
             brightness_backend,
+            fan_backend,
             bluetooth_backend,
             power_backend,
         }
@@ -283,6 +296,7 @@ impl ControlsService {
             snapshot,
             audio_backend: Arc::new(NoopAudioBackend),
             brightness_backend: Arc::new(NoopBrightnessBackend),
+            fan_backend: Arc::new(NoopFanBackend),
             bluetooth_backend: Arc::new(NoopBluetoothBackend),
             power_backend: Arc::new(NoopPowerBackend),
         }
@@ -297,6 +311,7 @@ impl ControlsService {
             audio_backend: self.audio_backend.backend_name(),
             audio_runtime: self.audio_backend.diagnostics_summary(),
             brightness_backend: self.brightness_backend.backend_name(),
+            fan_backend: self.fan_backend.backend_name(),
             bluetooth_backend: self.bluetooth_backend.backend_name(),
             power_backend: self.power_backend.backend_name(),
             power_runtime: self.power_backend.diagnostics_summary(),
@@ -320,11 +335,18 @@ impl ControlsService {
                 detail: None,
             },
             crate::services::capabilities::CapabilityStatus {
+                key: "fan",
+                label: "Fan Control",
+                mode: self.fan_backend.capability_mode(),
+                provider: self.fan_backend.backend_name().to_string(),
+                detail: self.fan_backend.diagnostics_summary(),
+            },
+            crate::services::capabilities::CapabilityStatus {
                 key: "bt",
                 label: "Bluetooth",
                 mode: self.bluetooth_backend.capability_mode(),
                 provider: self.bluetooth_backend.backend_name().to_string(),
-                detail: Some("cli/rfkill/sysfs control path".to_string()),
+                detail: self.bluetooth_backend.diagnostics_summary(),
             },
             crate::services::capabilities::CapabilityStatus {
                 key: "pwr",
@@ -334,19 +356,6 @@ impl ControlsService {
                 detail: self.power_backend.diagnostics_summary(),
             },
         ];
-
-        let fan_available = std::path::Path::new("/proc/acpi/ibm/fan").exists();
-        statuses.push(crate::services::capabilities::CapabilityStatus {
-            key: "fan",
-            label: "Fan Control",
-            mode: if fan_available {
-                crate::services::capabilities::CapabilityMode::Fallback
-            } else {
-                crate::services::capabilities::CapabilityMode::Unavailable
-            },
-            provider: "procfs+pkexec".to_string(),
-            detail: (!fan_available).then(|| "thinkpad_acpi fan interface missing".to_string()),
-        });
 
         let battery_care_exposed = self.snapshot.battery.charge_start_threshold.is_some()
             || self.snapshot.battery.charge_end_threshold.is_some();
@@ -479,7 +488,7 @@ impl ControlsService {
                 ..ControlsRefresh::default()
             },
             ControlsRefreshKind::Fan => ControlsRefresh {
-                fan: Some(crate::modules::fan::get_fan_info()),
+                fan: Some(self.fan_backend.info()),
                 ..ControlsRefresh::default()
             },
             ControlsRefreshKind::BatteryPower => ControlsRefresh {
@@ -534,11 +543,11 @@ impl ControlsService {
                 ControlsFollowUp::Refresh(ControlsRefreshKind::AudioMic)
             }
             ControlsCommand::SetBrightness(percent) => {
-                self.brightness_backend.set_brightness(percent);
+                self.brightness_backend.set_brightness(percent).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Brightness)
             }
             ControlsCommand::SetFanLevel(level) => {
-                crate::modules::fan::set_fan_level(&level);
+                self.fan_backend.set_level(&level).await;
                 ControlsFollowUp::Refresh(ControlsRefreshKind::Fan)
             }
             ControlsCommand::SetPowerProfile(profile) => {
@@ -587,6 +596,8 @@ impl ControlsService {
     pub fn subscription(&self) -> iced::Subscription<ControlsEvent> {
         iced::Subscription::batch([
             self.audio_backend.subscription(),
+            self.brightness_backend.subscription(),
+            self.bluetooth_backend.subscription(),
             self.power_backend.subscription(),
         ])
     }
@@ -751,7 +762,38 @@ impl crate::services::controls_backends::BrightnessBackend for NoopBrightnessBac
         BrightnessSnapshot::default()
     }
 
-    fn set_brightness(&self, _percent: u32) {}
+    fn set_brightness(
+        &self,
+        _percent: u32,
+    ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+        Box::pin(async {})
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct NoopFanBackend;
+
+#[cfg(test)]
+impl crate::services::controls_backends::FanBackend for NoopFanBackend {
+    fn backend_name(&self) -> &'static str {
+        "noop-fan"
+    }
+
+    fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+        crate::services::capabilities::CapabilityMode::Unavailable
+    }
+
+    fn info(&self) -> FanInfo {
+        FanInfo {
+            speed: "---".to_string(),
+            level: "auto".to_string(),
+        }
+    }
+
+    fn set_level(&self, _level: &str) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 #[cfg(test)]
@@ -863,7 +905,7 @@ mod tests {
     use super::{
         AudioDeviceSummary, AudioInfo, AudioRouteInfo, AudioRouteOrigin, BluetoothConnectedDevice,
         BluetoothDeviceSummary, BrightnessSnapshot, ControlsCommand, ControlsRefresh,
-        ControlsRefreshKind, ControlsService, ControlsSnapshot,
+        ControlsRefreshKind, ControlsService, ControlsSnapshot, FanInfo,
     };
     use crate::modules::mic::MicInfo;
     use std::sync::{Arc, Mutex};
@@ -986,8 +1028,49 @@ mod tests {
             self.snapshot.clone()
         }
 
-        fn set_brightness(&self, percent: u32) {
-            self.calls.lock().unwrap().push(percent);
+        fn set_brightness(
+            &self,
+            percent: u32,
+        ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls.lock().unwrap().push(percent);
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockFanBackend {
+        info: FanInfo,
+        calls: SharedStringCalls,
+    }
+
+    impl crate::services::controls_backends::FanBackend for MockFanBackend {
+        fn backend_name(&self) -> &'static str {
+            "mock-fan"
+        }
+
+        fn capability_mode(&self) -> crate::services::capabilities::CapabilityMode {
+            crate::services::capabilities::CapabilityMode::Fallback
+        }
+
+        fn diagnostics_summary(&self) -> Option<String> {
+            Some("mock-fan-runtime".to_string())
+        }
+
+        fn info(&self) -> FanInfo {
+            self.info.clone()
+        }
+
+        fn set_level(
+            &self,
+            level: &str,
+        ) -> crate::services::controls_backends::BackendFuture<'_, ()> {
+            let calls = self.calls.clone();
+            let level = level.to_string();
+            Box::pin(async move {
+                calls.lock().unwrap().push(level);
+            })
         }
     }
 
@@ -1153,6 +1236,7 @@ mod tests {
         ControlsService,
         SharedStringCalls,
         SharedU32Calls,
+        SharedStringCalls,
         SharedBoolCalls,
         SharedBluetoothCommandCalls,
         SharedCount,
@@ -1162,6 +1246,7 @@ mod tests {
     fn test_service() -> TestServiceParts {
         let audio_calls = Arc::new(Mutex::new(Vec::new()));
         let brightness_calls = Arc::new(Mutex::new(Vec::new()));
+        let fan_calls = Arc::new(Mutex::new(Vec::new()));
         let bluetooth_calls = Arc::new(Mutex::new(Vec::new()));
         let bluetooth_command_calls = Arc::new(Mutex::new(Vec::new()));
         let overskride_calls = Arc::new(Mutex::new(0));
@@ -1211,6 +1296,13 @@ mod tests {
                 snapshot: BrightnessSnapshot::from_percent(64),
                 calls: brightness_calls.clone(),
             }),
+            Arc::new(MockFanBackend {
+                info: FanInfo {
+                    speed: "2700".to_string(),
+                    level: "auto".to_string(),
+                },
+                calls: fan_calls.clone(),
+            }),
             Arc::new(MockBluetoothBackend {
                 enabled: true,
                 devices: BluetoothDeviceSummary {
@@ -1239,6 +1331,7 @@ mod tests {
             service,
             audio_calls,
             brightness_calls,
+            fan_calls,
             bluetooth_calls,
             bluetooth_command_calls,
             overskride_calls,
@@ -1313,6 +1406,13 @@ mod tests {
             }),
             brightness_backend: Arc::new(MockBrightnessBackend {
                 snapshot: BrightnessSnapshot::default(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            fan_backend: Arc::new(MockFanBackend {
+                info: FanInfo {
+                    speed: "---".to_string(),
+                    level: "auto".to_string(),
+                },
                 calls: Arc::new(Mutex::new(Vec::new())),
             }),
             bluetooth_backend: Arc::new(MockBluetoothBackend {
@@ -1396,6 +1496,13 @@ mod tests {
                 snapshot: BrightnessSnapshot::default(),
                 calls: Arc::new(Mutex::new(Vec::new())),
             }),
+            fan_backend: Arc::new(MockFanBackend {
+                info: FanInfo {
+                    speed: "---".to_string(),
+                    level: "auto".to_string(),
+                },
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
             bluetooth_backend: Arc::new(MockBluetoothBackend {
                 enabled: false,
                 devices: BluetoothDeviceSummary::default(),
@@ -1431,6 +1538,7 @@ mod tests {
 
         let audio_refresh = service.refresh(ControlsRefreshKind::AudioMic).await;
         let brightness_refresh = service.refresh(ControlsRefreshKind::Brightness).await;
+        let fan_refresh = service.refresh(ControlsRefreshKind::Fan).await;
         let battery_refresh = service.refresh(ControlsRefreshKind::BatteryPower).await;
         let power_refresh = service.refresh(ControlsRefreshKind::Power).await;
         let bluetooth_refresh = service.refresh(ControlsRefreshKind::Bluetooth).await;
@@ -1442,6 +1550,7 @@ mod tests {
         );
         assert_eq!(audio_refresh.mic.unwrap().volume, 12);
         assert_eq!(brightness_refresh.brightness.unwrap().percent, 64);
+        assert_eq!(fan_refresh.fan.unwrap().speed, "2700");
         assert_eq!(
             battery_refresh.power_profile.as_deref(),
             Some("performance")
@@ -1464,6 +1573,7 @@ mod tests {
             service,
             audio_calls,
             brightness_calls,
+            fan_calls,
             bluetooth_calls,
             bluetooth_command_calls,
             overskride_calls,
@@ -1485,6 +1595,9 @@ mod tests {
             .execute(ControlsCommand::SetAudioInputRoute("80".to_string()))
             .await;
         let _ = service.execute(ControlsCommand::SetBrightness(31)).await;
+        let _ = service
+            .execute(ControlsCommand::SetFanLevel("7".to_string()))
+            .await;
         let _ = service
             .execute(ControlsCommand::SetPowerProfile("balanced".to_string()))
             .await;
@@ -1532,6 +1645,7 @@ mod tests {
             ]
         );
         assert_eq!(brightness_calls.lock().unwrap().as_slice(), [31]);
+        assert_eq!(fan_calls.lock().unwrap().as_slice(), ["7"]);
         assert_eq!(power_calls.lock().unwrap().as_slice(), ["balanced"]);
         assert_eq!(bluetooth_calls.lock().unwrap().as_slice(), [false]);
         assert_eq!(
@@ -1561,6 +1675,7 @@ mod tests {
         assert_eq!(diagnostics.audio_backend, "mock-audio");
         assert_eq!(diagnostics.audio_runtime, None);
         assert_eq!(diagnostics.brightness_backend, "mock-brightness");
+        assert_eq!(diagnostics.fan_backend, "mock-fan");
         assert_eq!(diagnostics.bluetooth_backend, "mock-bluetooth");
         assert_eq!(diagnostics.power_backend, "mock-power");
         assert_eq!(
