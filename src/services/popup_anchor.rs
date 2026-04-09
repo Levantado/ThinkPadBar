@@ -13,6 +13,7 @@ pub enum PopupSurfaceKind {
     Displays,
     Calendar,
     TrayMenu,
+    Media,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +116,12 @@ impl PopupAnchorService {
                 margin: self.right_edge_margin(),
             },
             PopupSurfaceKind::Displays => PopupSurfacePlan {
+                width: Self::RIGHT_EDGE_WIDTH,
+                height: Self::MEDIUM_HEIGHT,
+                anchor: Anchor::TOP | Anchor::RIGHT,
+                margin: self.right_edge_margin(),
+            },
+            PopupSurfaceKind::Media => PopupSurfacePlan {
                 width: Self::RIGHT_EDGE_WIDTH,
                 height: Self::MEDIUM_HEIGHT,
                 anchor: Anchor::TOP | Anchor::RIGHT,

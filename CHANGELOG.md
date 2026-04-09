@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.69] - 2026-04-10
+
+### Fixed
+- **App Core**: Fixed Media UI reactivity bug by correctly returning `Task::none()` for `MediaEvent` in the main update loop.
+- **Bar UI**: Fully unified Media module pills with the rest of the bar; using consistent `mouse_area(container(...))` structure and `4px 12px` padding to eliminate vertical alignment shifts.
+- **Media Popup**: Optimized layout to fit standard `MEDIUM_HEIGHT` (540px) without scrollbars.
+- **Media Popup**: Reduced cover art size to 240px and integrated volume slider into the controls row for better space efficiency.
+
+## [1.0.68] - 2026-04-10
+
+### Fixed
+- **Audio Visualizer**: Fixed a bug where visualizer updates would freeze when any popup was open.
+- **Media Module**: Standardized bar pill heights and paddings to match the rest of the UI (1.0.66 spec).
+- **Media Module**: Corrected marquee metadata order to "Artist - Title".
+- **Media Popup**: Restored and improved playback control buttons (Prev, Play/Pause, Next, Stop) with better visibility and interaction.
+- **Media Popup**: Increased position polling frequency to 100ms during playback for a smooth progress slider.
+
+## [1.0.67] - 2026-04-10
+
+### Added
+- **Integrated MPRIS Media Module**: Real-time media tracking and control using native D-Bus (`zbus 5.0`).
+- **Media Popup**: A new detail view using the Golden Ratio layout, featuring cover art (local & HTTP), metadata, and player volume.
+- **Media Bar Module**: Three-button control group (Prev, Play/Pause, Next) and a track title pill next to the visualizer.
+- **Text Marquee Engine**: Implemented seamless character-shifting animation for long track titles in the bar.
+- **Media Seek**: Support for absolute track positioning via progress slider in the media popup.
+
 ## [1.0.66] - 2026-04-10
 
 ### Changed

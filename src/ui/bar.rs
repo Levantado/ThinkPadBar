@@ -76,6 +76,14 @@ impl AudioVisualizerModel {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaPillModel {
+    pub title: String,
+    pub artist: String,
+    pub playback_status: String,
+    pub has_player: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct MainBarModel {
     pub opacity: f32,
@@ -85,6 +93,7 @@ pub struct MainBarModel {
     pub center_title: String,
     pub special_workspace_visible: bool,
     pub visualizer: AudioVisualizerModel,
+    pub media: MediaPillModel,
     pub stats: StatsPillModel,
     pub controls: ControlsPillModel,
     pub connectivity: ConnectivityPillModel,
@@ -150,6 +159,15 @@ pub fn view(model: MainBarModel) -> Element<'static, Message> {
     let connectivity_pill =
         connectivity_pill(&model.connectivity, pill_bg, pill_fg, pill_border_radius);
     let battery_pill = battery_pill(&model.battery, pill_bg, pill_fg, pill_border_radius);
+
+    if model.media.has_player {
+        left = left.push(media_pill(
+            &model.media,
+            pill_bg,
+            pill_fg,
+            pill_border_radius,
+        ));
+    }
     let kbd_pill = plain_pill(
         model.keyboard_layout,
         14,
@@ -747,6 +765,90 @@ fn pill_style(background: Color, text_color: Color, radius: f32) -> container::S
         },
         ..Default::default()
     }
+}
+
+fn media_pill(
+    model: &MediaPillModel,
+    bg: Color,
+    fg: Color,
+    radius: f32,
+) -> Element<'static, Message> {
+    let play_pause_icon = if model.playback_status == "Playing" {
+        "󰏤"
+    } else {
+        "󰐊"
+    };
+
+    let controls = mouse_area(
+        container(
+            Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push(
+                    button(
+                        text("󰒮")
+                            .size(14)
+                            .style(move |_| iced::widget::text::Style { color: Some(fg) }),
+                    )
+                    .padding(0)
+                    .on_press(Message::MediaCommand(
+                        crate::services::media::MediaCommand::Previous,
+                    ))
+                    .style(move |_, _| button::Style::default()),
+                )
+                .push(
+                    button(
+                        text(play_pause_icon)
+                            .size(16)
+                            .style(move |_| iced::widget::text::Style { color: Some(fg) }),
+                    )
+                    .padding(0)
+                    .on_press(Message::MediaCommand(
+                        crate::services::media::MediaCommand::PlayPause,
+                    ))
+                    .style(move |_, _| button::Style::default()),
+                )
+                .push(
+                    button(
+                        text("󰒭")
+                            .size(14)
+                            .style(move |_| iced::widget::text::Style { color: Some(fg) }),
+                    )
+                    .padding(0)
+                    .on_press(Message::MediaCommand(
+                        crate::services::media::MediaCommand::Next,
+                    ))
+                    .style(move |_, _| button::Style::default()),
+                ),
+        )
+        .padding(Padding::from([4, 12])) // Идентичный паддинг как у Stats/Battery
+        .style(move |_| pill_style(bg, fg, radius)),
+    );
+
+    let title_pill = mouse_area(
+        container(
+            text(model.title.clone())
+                .size(11)
+                .style(move |_| iced::widget::text::Style { color: Some(fg) }),
+        )
+        .padding(Padding::from([4, 12])) // Идентичный паддинг
+        .style(move |_| container::Style {
+            background: Some(Background::Color(bg)),
+            border: iced::Border {
+                radius: radius.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    )
+    .on_press(Message::TogglePopup(Popup::Media));
+
+    Row::new()
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .push(controls)
+        .push(title_pill)
+        .into()
 }
 
 #[cfg(test)]

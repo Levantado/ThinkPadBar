@@ -27,6 +27,7 @@ pub enum Popup {
     Displays,
     Calendar,
     TrayMenu,
+    Media,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +86,10 @@ pub struct ThinkPadBar {
     system_info_service: crate::services::system_info::SystemInfoService,
     tray_ui_service: crate::services::tray_ui::TrayUiService,
     audio_visualizer_service: crate::services::audio_visualizer::AudioVisualizerService,
+    media_snapshot: crate::services::media::MediaSnapshot,
+    media_command_tx: tokio::sync::mpsc::Sender<crate::services::media::MediaCommand>,
+    media_event_rx: tokio::sync::broadcast::Receiver<crate::services::media::MediaEvent>,
+    start_time: std::time::Instant,
     bluetooth_scan_state: BluetoothScanState,
     controls_coalescing: ControlsCoalescing,
     controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer<
@@ -132,6 +137,8 @@ pub enum Message {
     ControlsCommandCompleted(crate::services::controls::ControlsFollowUp),
     BackgroundWifiInfoSynced(crate::services::network::WifiInfo),
     AudioVisualizerFrame(crate::services::audio_visualizer::AudioVisualizerSnapshot),
+    MediaEvent(crate::services::media::MediaEvent),
+    MediaCommand(crate::services::media::MediaCommand),
     WaylandRuntimeEvent(crate::services::wayland_runtime::WaylandRuntimeEvent),
     RefreshCompositor,
     CompositorEvent(crate::services::compositor::CompositorEvent),
@@ -333,6 +340,7 @@ impl ThinkPadBar {
             Popup::Displays => crate::services::popup_anchor::PopupSurfaceKind::Displays,
             Popup::Calendar => crate::services::popup_anchor::PopupSurfaceKind::Calendar,
             Popup::TrayMenu => crate::services::popup_anchor::PopupSurfaceKind::TrayMenu,
+            Popup::Media => crate::services::popup_anchor::PopupSurfaceKind::Media,
         }
     }
 
@@ -563,7 +571,12 @@ impl ThinkPadBar {
             Popup::Controls => {
                 popup_host::PopupHostModel::Controls(self.build_controls_popup_model())
             }
+            Popup::Media => popup_host::PopupHostModel::Media(self.build_media_popup_model()),
         }
+    }
+
+    fn build_media_popup_model(&self) -> popups::media::MediaPopupModel {
+        popups::media::MediaPopupModel::new(&self.media_snapshot, self.config.appearance.opacity)
     }
 
     fn build_main_bar_model(&self) -> crate::ui::bar::MainBarModel {
@@ -643,6 +656,22 @@ impl ThinkPadBar {
                             .normalized_color_profile(),
                     ),
             },
+            media: {
+                let full_text = format!(
+                    "{} - {}",
+                    self.media_snapshot.artist, self.media_snapshot.title
+                );
+                let display_text =
+                    Self::calculate_marquee(&full_text, 25, self.start_time.elapsed().as_millis());
+
+                bar::MediaPillModel {
+                    title: display_text,
+                    artist: String::new(), // Artist already merged into title for marquee
+                    playback_status: self.media_snapshot.playback_status.clone(),
+                    has_player: self.media_snapshot.has_player,
+                }
+            },
+
             stats: bar::StatsPillModel {
                 cpu_summary: popups::power::cpu_usage_summary(sys_data),
                 temp_summary: bar::temperature_summary(sys_data),
@@ -963,6 +992,30 @@ impl ThinkPadBar {
         ])
     }
 
+    pub fn calculate_marquee(full_text: &str, limit: usize, elapsed_ms: u128) -> String {
+        if full_text.chars().count() <= limit {
+            return full_text.to_string();
+        }
+
+        let chars: Vec<char> = full_text.chars().collect();
+        let len = chars.len();
+        let gap = 5;
+        let total_len = len + gap;
+        let speed_chars_per_sec = 2;
+        let offset = ((elapsed_ms / (1000 / speed_chars_per_sec)) as usize) % total_len;
+
+        let mut marquee_text = String::with_capacity(limit);
+        for i in 0..limit {
+            let idx = (offset + i) % total_len;
+            if idx < len {
+                marquee_text.push(chars[idx]);
+            } else {
+                marquee_text.push(' ');
+            }
+        }
+        marquee_text
+    }
+
     pub fn new(config: crate::config::Config) -> impl FnOnce() -> (Self, Task<Message>) {
         let cfg = config.clone();
         move || {
@@ -1039,6 +1092,9 @@ impl ThinkPadBar {
             // Since we are in a tokio-enabled FnOnce, we can't easily await here without block_on.
             // But iced's run_with expects a Task.
 
+            let (media_service, media_event_rx, media_command_tx) =
+                crate::services::media::MediaService::new();
+
             let app = Self {
                 config: cfg,
                 dbus_conn: None,
@@ -1060,6 +1116,10 @@ impl ThinkPadBar {
                 system_info_service,
                 tray_ui_service,
                 audio_visualizer_service,
+                media_snapshot: crate::services::media::MediaSnapshot::default(),
+                media_command_tx,
+                media_event_rx,
+                start_time: std::time::Instant::now(),
                 bluetooth_scan_state: BluetoothScanState::default(),
                 controls_coalescing: ControlsCoalescing::default(),
                 controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(
@@ -1072,7 +1132,14 @@ impl ThinkPadBar {
                 debug_ui_enabled: Self::debug_ui_enabled(),
             };
 
-            (app, Task::batch(vec![main_task, popup_task]))
+            let media_task = Task::perform(
+                async move {
+                    let _ = media_service.run().await;
+                },
+                |_| Message::Tick(Local::now()),
+            ); // Dummy msg, we care about the side effect
+
+            (app, Task::batch(vec![main_task, popup_task, media_task]))
         }
     }
 
@@ -1214,6 +1281,21 @@ impl ThinkPadBar {
             }
             Message::AudioVisualizerFrame(snapshot) => {
                 self.audio_visualizer = snapshot;
+            }
+            Message::MediaEvent(event) => match event {
+                crate::services::media::MediaEvent::SnapshotUpdated(snapshot) => {
+                    self.media_snapshot = snapshot;
+                    return Task::none();
+                }
+            },
+            Message::MediaCommand(cmd) => {
+                let tx = self.media_command_tx.clone();
+                return Task::perform(
+                    async move {
+                        let _ = tx.send(cmd).await;
+                    },
+                    |_| Message::Tick(Local::now()),
+                );
             }
             Message::WaylandRuntimeEvent(
                 crate::services::wayland_runtime::WaylandRuntimeEvent::SnapshotUpdated(snapshot),
@@ -1584,7 +1666,7 @@ impl ThinkPadBar {
     }
 
     fn audio_visualizer_updates_enabled(&self) -> bool {
-        self.popup == Popup::None && self.config.appearance.audio_visualizer.enabled
+        self.config.appearance.audio_visualizer.enabled
     }
 
     fn system_info_fast_updates_enabled(&self) -> bool {
@@ -1617,6 +1699,8 @@ impl ThinkPadBar {
             self.controls_service
                 .subscription()
                 .map(Message::ControlsEvent),
+            crate::services::media::MediaService::subscription(self.media_event_rx.resubscribe())
+                .map(Message::MediaEvent),
             audio_visualizer_subscription,
             iced::event::listen_with(|event, _status, window| match event {
                 iced::Event::Window(iced::window::Event::Unfocused) => {
@@ -1699,6 +1783,10 @@ mod tests {
                         },
                     ),
                 ),
+            media_snapshot: crate::services::media::MediaSnapshot::default(),
+            media_command_tx: tokio::sync::mpsc::channel(1).0,
+            media_event_rx: tokio::sync::broadcast::channel(1).1,
+            start_time: std::time::Instant::now(),
             bluetooth_scan_state: super::BluetoothScanState::default(),
             controls_coalescing: ControlsCoalescing::default(),
             controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(),
@@ -2895,12 +2983,13 @@ mod tests {
     }
 
     #[test]
-    fn visualizer_updates_pause_while_popup_is_open() {
+    fn visualizer_updates_continue_while_popup_is_open() {
         let mut bar = hermetic_bar();
         assert!(bar.audio_visualizer_updates_enabled());
 
         bar.popup = Popup::SystemMonitor;
-        assert!(!bar.audio_visualizer_updates_enabled());
+        // Visualizer should NOT pause anymore
+        assert!(bar.audio_visualizer_updates_enabled());
 
         bar.popup = Popup::None;
         assert!(bar.audio_visualizer_updates_enabled());
@@ -3335,6 +3424,42 @@ mod tests {
             controls_event_refresh_kind(crate::services::controls::ControlsEvent::Bluetooth),
             crate::services::controls::ControlsRefreshKind::Bluetooth
         );
+    }
+
+    #[test]
+    fn calculate_marquee_returns_static_for_short_text() {
+        let text = "Short Text";
+        let res = ThinkPadBar::calculate_marquee(text, 25, 1000);
+        assert_eq!(res, "Short Text");
+    }
+
+    #[test]
+    fn calculate_marquee_shifts_long_text_cyclically() {
+        let text = "This is a very long text that should marquee";
+        let res0 = ThinkPadBar::calculate_marquee(text, 25, 0);
+        assert_eq!(res0.chars().count(), 25);
+        assert!(res0.starts_with("This is"));
+
+        let res1 = ThinkPadBar::calculate_marquee(text, 25, 1500); // 3 chars shift (2 chars/sec)
+        assert!(res1.starts_with("s is a ve"));
+    }
+
+    #[test]
+    fn media_event_updates_snapshot() {
+        let mut bar = hermetic_bar();
+        let new_snap = crate::services::media::MediaSnapshot {
+            title: "New Track".to_string(),
+            artist: "Artist".to_string(),
+            has_player: true,
+            ..crate::services::media::MediaSnapshot::default()
+        };
+
+        let _ = bar.update(Message::MediaEvent(
+            crate::services::media::MediaEvent::SnapshotUpdated(new_snap.clone()),
+        ));
+
+        assert_eq!(bar.media_snapshot.title, "New Track");
+        assert!(bar.media_snapshot.has_player);
     }
 
     #[test]

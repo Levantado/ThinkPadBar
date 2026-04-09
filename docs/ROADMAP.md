@@ -7,107 +7,58 @@ This roadmap defines the next evolution steps from a reliable single-product bar
 - strict quality gate,
 - predictable UX.
 
-## Baseline (as of 2026-03-25)
-- Current release line: `0.6.x`
-- Validation gate: `fmt/check/clippy(-D warnings)/test` is mandatory
-- High-priority tray tech debt `TD-TRAY-001` closed in `0.6.53` (deterministic right-click routing)
+## Baseline (as of 2026-04-10)
+- **Current release: `1.0.69`**
+- **Major Milestone Completed**: S8 Integrated MPRIS Media Module.
+- **UI Maturity**: Unified popup scale, standardized pill alignment, Golden Ratio layouts.
+- **Observability**: Perf counters and diagnostics for D-Bus, PipeWire, and Wayland runtimes.
 
-## Milestone v0.7.0 — Product Hardening
-Goal: improve product maturity and observability without architecture bloat.
-
-### Deliverables
-1. Stable internal module API
-- Define module capability model (what a module can do, publish, and consume).
-- Standardize module lifecycle hooks and event contracts.
-- Eliminate ad-hoc cross-module calls where feasible.
-
-2. Observability subsystem
-- Structured logs for critical interaction paths (tray/wifi/bluetooth/workspace).
-- Perf counters:
-  - update frequency per module,
-  - average and p95 handler latency,
-  - popup open/close latency.
-- Optional debug panel or compact debug overlay.
-
-3. Declarative layout + theme layer
-- Externalize visual tokens (spacing, radius, colors, typography).
-- Support declarative layout blocks for top bar and popup sections.
-- Keep backward compatibility with existing config defaults.
-
-### Definition of Done
-- No regressions in mandatory quality gate.
-- Runtime diagnostics can explain at least 90% of interaction failures without code changes.
-- Users can adjust theme/layout basics from config without recompilation.
-
-### Target Metrics
-- Idle CPU: `<= 0.7%` on target hardware profile.
-- Idle RSS: `<= 35 MiB`.
-- UI action latency (common controls): p95 `<= 120 ms`.
-
-## Milestone v0.8.0 — Platform Preparation
-Goal: prepare the codebase for ecosystem growth and distribution-grade operations.
+## Milestone v1.1.0 — Customization & Hot Reload
+Goal: Allow users to define the bar structure and appearance without recompilation.
 
 ### Deliverables
-1. Plugin boundary (phase 1)
-- Introduce clear internal ABI/trait boundary for built-in modules.
-- Define safe data contracts for events, commands, and state snapshots.
-- Add versioned compatibility markers for module interfaces.
+1. **User Visual Config (S7)**
+- Move hardcoded bar segments into a declarative `config.toml` structure.
+- Support `left`, `center`, `right` alignment groups for modules.
+- Implement Hot Reload: apply theme and layout changes instantly on config save.
 
-2. Distribution-grade release contour
-- Config migration pipeline between minor versions.
-- Versioned changelog discipline + release checklist automation.
-- Packaging strategy (e.g. cargo install + distro package docs + checksum artifacts).
+2. **Advanced Theme Engine**
+- Externalize all visual tokens (colors, margins, radius) to a dedicated theme section.
+- Support multiple built-in color profiles (Tokyo Night, Gruvbox, Nord).
 
-3. Compatibility policy
-- Document supported config keys and deprecation cycle.
-- Add startup warnings for deprecated/invalid config with actionable guidance.
+3. **Dynamic Media Control**
+- Auto-hide media pill when no players are active.
+- Support for multiple active players with a switching mechanism in the popup.
 
 ### Definition of Done
-- New module can be integrated via module boundary without touching unrelated core code.
-- Config migration works across at least two consecutive minor versions.
-- Release process is reproducible from a single documented checklist.
+- Users can reorder or disable any module (Wifi, Battery, Media) via config.
+- Bar updates visual appearance within 500ms of config change without restart.
+- No increase in idle resource usage due to config monitoring.
 
-### Target Metrics
-- Backward config compatibility success rate: `100%` for supported versions.
-- Upgrade failure rate in smoke tests: `0%`.
-
-## Milestone v0.9.0 — Multi-Compositor Backend
-Goal: abstract compositor-specific behavior while keeping performance predictable.
+## Milestone v1.2.0 — Extended Ecosystem
+Goal: Expand functionality to cover typical desktop environments needs.
 
 ### Deliverables
-1. Backend trait abstraction
-- Introduce compositor backend trait for:
-  - workspace model,
-  - active window,
-  - layout switching,
-  - cursor position,
-  - event stream.
-- Keep Hyprland backend as reference implementation.
+1. **Notification Center**
+- Integrated D-Bus notification server (`org.freedesktop.Notifications`).
+- History log in a dedicated popup.
+- Actionable notifications (buttons, quick replies).
 
-2. Additional compositor backends
-- Implement at least one more backend (`Sway` or `Niri`) with parity for core features.
-- Add backend selection/config mechanism.
+2. **Weather & Geolocation**
+- Local weather module with auto-refresh based on IP or manual location.
+- Support for multiple providers (OpenWeatherMap, PirateWeather).
 
-3. Cross-backend validation
-- Backend conformance tests for common behavior.
-- Runtime fallback behavior for unsupported capabilities.
-
-### Definition of Done
-- Core bar behavior runs on at least two compositors.
-- Missing backend capabilities degrade gracefully with explicit user-facing status.
-- No critical increase in idle resource usage versus Hyprland-only baseline.
-
-### Target Metrics
-- Cross-backend core feature parity: `>= 85%`.
-- Idle overhead delta vs Hyprland backend: `<= +15%` CPU/RAM.
+3. **NetworkManager Backend**
+- Full parity with IWD backend for users on standard distributions.
+- VPN and Mobile Data (WWAN) status and control.
 
 ## Cross-Milestone Constraints
 1. Keep `Cargo.lock` managed only by cargo commands.
 2. Treat warnings as errors.
-3. Every bug fix includes regression coverage unless explicitly waived.
-4. Version bump + changelog update required for release-level changes.
+3. Every bug fix includes regression coverage.
+4. Version bump + changelog update required for every release.
 
-## Suggested Execution Order (short-term)
-1. Validate `TD-TRAY-001` closure on production trays with 30+ click series per target app set.
-2. Introduce declarative theme tokens and map current style to them.
-3. Add popup open/close p95 latency counters to observability block.
+## Execution History
+- **2026-04-10**: Released **1.0.69**. Finalized Media Module with Marquee, Seek, and Golden Ratio popup. Fixed visualizer freeze.
+- **2026-04-09**: Released **1.0.62-1.0.66**. Global UI unification and hierarchical tray menu.
+- **2026-03-22**: Initial core architecture and basic modules (Wifi, Battery, Power).

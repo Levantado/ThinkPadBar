@@ -6,6 +6,7 @@ pub mod controls;
 pub mod controls_backends;
 pub mod icon_resolver;
 pub mod idle_inhibitor;
+pub mod media;
 pub mod network;
 pub mod popup_anchor;
 pub mod session;

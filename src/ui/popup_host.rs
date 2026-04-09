@@ -21,6 +21,7 @@ pub enum PopupHostModel {
     Power(popups::power::PowerPopupModel),
     Connectivity(popups::connectivity::ConnectivityPopupModel),
     Controls(popups::controls::ControlsPopupModel),
+    Media(popups::media::MediaPopupModel),
 }
 
 pub fn view(
@@ -44,6 +45,7 @@ pub fn view(
         PopupHostModel::Power(model) => popups::power::view(theme, model),
         PopupHostModel::Connectivity(model) => popups::connectivity::view(theme, model),
         PopupHostModel::Controls(model) => popups::controls::view(theme, model),
+        PopupHostModel::Media(model) => popups::media::view(theme, &model),
     }
 }
 

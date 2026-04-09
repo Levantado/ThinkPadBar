@@ -4,6 +4,7 @@ pub mod calendar;
 pub mod connectivity;
 pub mod controls;
 pub mod displays;
+pub mod media;
 pub mod power;
 pub mod stats;
 pub mod system_info;
