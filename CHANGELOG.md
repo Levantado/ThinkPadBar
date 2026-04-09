@@ -2,6 +2,217 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.61] - 2026-04-09
+
+### Fixed
+- Reworked right-click tray popup menu activation to mirror `ashell`'s `dbusmenu` flow: menu items now dispatch `com.canonical.dbusmenu.Event("clicked")` through a direct `zbus::Proxy` instead of routing through the generic `system-tray` menu-item activation path.
+- Fixed the D-Bus destination used for tray menu actions by stripping the status-notifier object path from resolved tray item addresses before building the `dbusmenu` proxy, so menu buttons no longer target invalid destinations like `:1.42/org/ayatana/NotificationItem/...`.
+- Hardened tray popup menu diagnostics for missing session-bus connections, missing menu paths, and proxy creation failures so broken tray actions no longer fail silently.
+
+### Quality
+- Added regression coverage for extracting a valid bus destination from resolved tray item addresses.
+
+## [1.0.60] - 2026-04-07
+
+### Changed
+- Paused per-second fast `System Info` refreshes while the `System Info` popup itself is open, so scrolling no longer competes with a full popup model rebuild every second.
+- Kept the existing slow and thermal refresh paths intact, so the rest of the app still receives normal background system updates outside the heavy popup-scroll path.
+- Promoted `Visualizer Runtime` out of the debug-only observability block so runtime diagnostics are now visible in regular `System Info` UX.
+
+### Quality
+- Added regression coverage for:
+  - disabling fast system-info updates while `Popup::SystemMonitor` is open;
+  - preserving fast updates for other popups;
+  - exposing `Visualizer Runtime` even when debug UI is disabled.
+
+## [1.0.59] - 2026-04-07
+
+### Changed
+- Paused audio-visualizer subscription updates whenever any popup is open, so high-frequency visualizer frames no longer fight `System Info` and other popup scrolling.
+- Kept the visualizer state cached, so the bar resumes from the last snapshot after the popup closes instead of rebuilding state from scratch.
+
+### Quality
+- Added regression coverage ensuring visualizer updates are disabled while a popup is visible and re-enabled when the UI returns to the hidden-popup state.
+
+## [1.0.58] - 2026-04-07
+
+### Changed
+- The audio visualizer pill now stays visible whenever `appearance.audio_visualizer.enabled = true`, even before live PipeWire frames arrive.
+- Inactive visualizer state is now rendered as a dim placeholder instead of disappearing completely, improving UX discoverability.
+- Visualizer diagnostics now include published frame count and last RMS-derived signal level so System Info can distinguish “runtime alive but no signal” from “runtime not publishing”.
+
+### Quality
+- Updated regression coverage for always-visible visualizer behavior and richer diagnostics summaries.
+
+## [1.0.57] - 2026-04-07
+
+### Changed
+- Extended `appearance.audio_visualizer` with layout controls: `mode`, `padding_x`, and `padding_y`.
+- Added layout presets for visualizer pill footprint: `compact` keeps the current tight segment, while `expressive` uses roomier default padding.
+- The bar renderer now applies config-driven visualizer pill padding instead of a fixed container inset.
+
+### Quality
+- Added regression coverage for visualizer layout-mode defaults and padding normalization.
+
+## [1.0.56] - 2026-04-07
+
+### Changed
+- Extended `appearance.audio_visualizer` with presentational style knobs: `bar_width`, `gap`, `color_profile`, and `decay_profile`.
+- The native visualizer now supports three color presets (`heat`, `accent`, `mono`) and three smoothing presets (`smooth`, `tight`, `expressive`) without changing the PipeWire runtime shape.
+- The main bar renderer now applies config-driven bar width, inter-bar spacing, and palette selection instead of a fixed visual treatment.
+
+### Quality
+- Added regression coverage for visualizer style normalization, distinct color-profile mapping, and decay-profile behavior.
+
+## [1.0.55] - 2026-04-07
+
+### Changed
+- Extended the native PipeWire visualizer with product-level configuration knobs: visible bar count, min/max bar height, FPS cap, and frequency range.
+- Added visualizer runtime observability to System Info debug surfaces so the runtime can be inspected without external tooling.
+- The bar renderer now consumes only the configured visible bands and applies config-driven bar heights instead of a hardcoded visual shape.
+
+### Quality
+- Added regression coverage for visualizer diagnostics summaries and config normalization of the visualizer settings.
+
+## [1.0.54] - 2026-04-07
+
+### Added
+- Added a native PipeWire audio visualizer service with fixed-size spectrum snapshots, compact publish-rate limiting, and no external `cava` dependency.
+- Added a compact visualizer segment to the main bar immediately to the right of the workspace group.
+- Added `appearance.show_audio_visualizer` config support to disable the segment explicitly.
+
+### Quality
+- Added regression coverage for visualizer band analysis, smoothing behavior, config parsing, bar visibility, and main-bar model propagation.
+
+## [1.0.53] - 2026-04-07
+
+### Changed
+- Finished the current `app.rs` cleanup sweep by centralizing control-command preview/snapshot synchronization into shared helpers inside `ThinkPadBar`.
+- Replaced the repeated open-coded `controls_service.preview_command(...)` + snapshot resync pattern across volume, brightness, routes, bluetooth, fan, power-profile, and Overskride command paths.
+
+### Quality
+- Added regression coverage ensuring previewed control commands keep the app-side controls snapshot synchronized with the controls service snapshot.
+
+## [1.0.52] - 2026-04-07
+
+### Changed
+- Continued the `app.rs` update-side decomposition by extracting decision and task orchestration for session, tray, and network interactions into `update_coordinator`.
+- `app.rs` no longer hand-builds async follow-up tasks for:
+  - launcher and power session commands;
+  - network scan/connect/toggle-wifi follow-ups;
+  - tray candidate resolution and tray menu popup open/close interpretation.
+
+### Quality
+- Added centralized regression coverage for network follow-up mapping, tray popup policy mapping, and power-action/session follow-up mapping.
+
+## [1.0.51] - 2026-04-07
+
+### Changed
+- Continued the `app.rs` decomposition in two connected seams:
+  - extracted popup routing into `ui::popup_host`, so `app.rs` no longer holds the popup view dispatch tree;
+  - extracted popup transition policy into `popup_coordinator`, centralizing refresh-on-open, reset-on-close, and show/hide transition decisions.
+
+### Quality
+- `ThinkPadBar` now applies typed popup transition plans instead of open-coded refresh/reset logic inside `Message::TogglePopup` and related close paths.
+- Added regression coverage for popup-host routing and for popup transition behaviors like bluetooth scan reset and calendar offset reset on close.
+
+## [1.0.50] - 2026-04-07
+
+### Changed
+- Continued the popup-host decomposition by extracting the two remaining inline popup surfaces from `app.rs`:
+  - calendar popup rendering and calendar month/week shaping now live in `ui::popups::calendar`;
+  - tray menu popup rendering and owned-menu node shaping now live in `ui::popups::tray_menu`.
+
+### Quality
+- `app.rs::view_popup()` now acts as a much thinner popup router instead of holding calendar/tray widget trees inline.
+- Added regression coverage for the new calendar and tray-menu popup builders plus a test-only tray-menu seam for hermetic popup-model tests.
+
+## [1.0.49] - 2026-04-06
+
+### Changed
+- Continued the `app.rs` decomposition in two larger structural steps:
+  - extracted the full main bar presenter into `ui::bar`, including workspace chips, tray items, pill rendering, top-bar truncation, and pill scroll interaction wiring;
+  - extracted System Info popup row assembly into `ui::adapters`, so `app.rs` now delegates the popup presentation adapter instead of building observability rows inline.
+
+### Quality
+- Added regression coverage for the new main-bar seam and for shared top-bar helper behavior like SSID truncation and scroll-direction mapping.
+- Reduced `app.rs` further toward orchestration-only responsibilities by removing the inlined top-bar rendering tree and the remaining large System Info presentation adapter block.
+
+## [1.0.48] - 2026-04-06
+
+### Changed
+- Continued the `app.rs` decomposition sweep by removing the next batch of popup and pill shaping logic from the application shell:
+  - bluetooth scan status shaping and bluetooth-device "new" marking now live in `ui::popups::bluetooth_devices`;
+  - connectivity popup model assembly now lives in `ui::popups::connectivity`;
+  - battery/audio labels plus control-center power/device summaries and bluetooth pill summary now live in `ui::chrome`.
+
+### Quality
+- Removed duplicate cached control summary strings from `ThinkPadBar`, keeping pill labels derived from typed state instead of manually synchronized string caches.
+- Added regression coverage for the moved chrome helpers, bluetooth scan shaping, bluetooth popup model assembly, and connectivity popup builder.
+
+## [1.0.47] - 2026-04-06
+
+### Changed
+- Continued the `app.rs` decomposition by moving popup presentation shaping helpers into their domain modules:
+  - audio route popup item construction and current-route summary logic now live in `ui::popups::audio_routes`;
+  - display summary rows and output-card shaping now live in `ui::popups::displays`;
+  - ThinkPad hardware row shaping for System Info now lives in `ui::popups::system_info`.
+
+### Quality
+- Removed the corresponding ad-hoc helper layer from `app.rs`, keeping popup construction focused on orchestration instead of view-model shaping.
+- Preserved regression coverage for moved builders and presentation helpers through the workspace test suite.
+
+## [1.0.46] - 2026-04-06
+
+### Changed
+- Finished the next popup decomposition sweep:
+  - removed the remaining manual popup-model assembly from `ThinkPadBar::view` for `Stats`, `Displays`, `Audio Routes`, `Bluetooth Devices`, `Connectivity`, and `System Info`;
+  - introduced dedicated builder methods so `app.rs` now orchestrates popup rendering instead of constructing ad-hoc popup state inline.
+
+### Quality
+- Added regression coverage for builder seams across:
+  - stats popup state normalization;
+  - displays popup summary/card preservation;
+  - audio routes popup summaries;
+  - bluetooth devices popup new-device marking;
+  - connectivity popup state;
+  - system info popup overview/hardware population.
+
+## [1.0.45] - 2026-04-06
+
+### Changed
+- Continued popup decomposition in three connected slices:
+  - moved `PowerPopupModel` assembly into a typed popup-domain builder instead of open-coded field mapping inside `app.rs`;
+  - moved `ControlsPopupModel` assembly into its own typed builder so `app.rs` no longer manually maps brightness/audio/mic fields;
+  - introduced a shared compact domain-popup layout contract to replace repeated width/padding magic numbers across primary popups.
+
+### Quality
+- Added regression coverage for:
+  - `ThinkPadBar` power-popup builder preservation;
+  - `ThinkPadBar` controls-popup builder preservation;
+  - popup-model builders inside `ui::popups::power` and `ui::popups::controls`;
+  - stable shared domain-popup layout budget.
+
+## [1.0.44] - 2026-04-06
+
+### Changed
+- Continued popup-domain decomposition:
+  - removed the last `fan` coupling from the `Controls` popup assembly path in `app.rs`;
+  - `fan control` remains owned exclusively by the `Power` popup, alongside battery and power profile state.
+
+### Quality
+- Added regression coverage that keeps fan runtime state anchored to `PowerPopupModel`.
+
+## [1.0.43] - 2026-04-06
+
+### Fixed
+- Hardened tray icon memory behavior for long-lived sessions:
+  - tray pixmap icons now stop recreating fresh `iced` RGBA image handles on every dynamic pixmap update;
+  - the first pixmap-backed handle is kept stable per tray item, preventing unbounded renderer image churn during idle uptime.
+
+### Quality
+- Added regression coverage for frozen tray pixmap handle behavior to guard against RSS growth regressions.
+
 ## [1.0.42] - 2026-04-06
 
 ### Changed

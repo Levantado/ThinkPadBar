@@ -131,9 +131,7 @@ impl AudioObjectStore {
 impl Drop for PipeWireThreadGuard {
     fn drop(&mut self) {
         let _ = self.command_tx.send(AudioListenerCommand::Terminate);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        self.handle.take();
     }
 }
 

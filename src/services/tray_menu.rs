@@ -92,6 +92,17 @@ impl OwnedTrayMenu {
             }
         }
     }
+
+    #[cfg(test)]
+    pub fn new_for_tests(nodes: Vec<OwnedTrayMenuNode>) -> Self {
+        let mut actions = HashMap::new();
+        for node in &nodes {
+            if let OwnedTrayMenuNode::Action(action) = node {
+                actions.insert(action.id, action.clone());
+            }
+        }
+        Self { nodes, actions }
+    }
 }
 
 #[cfg(test)]

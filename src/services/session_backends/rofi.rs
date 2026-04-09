@@ -9,7 +9,7 @@ impl LauncherBackend for RofiLauncherBackend {
 
     fn toggle_launcher(&self) -> bool {
         if let Ok(mut child) = std::process::Command::new("rofi")
-            .args(&["-replace", "-show", "drun"])
+            .args(["-replace", "-show", "drun"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()

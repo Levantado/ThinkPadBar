@@ -4378,7 +4378,7 @@ dependencies = [
 
 [[package]]
 name = "thinkpadbar"
-version = "1.0.42"
+version = "1.0.61"
 dependencies = [
  "chrono",
  "dirs",

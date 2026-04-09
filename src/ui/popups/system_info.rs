@@ -60,6 +60,79 @@ impl SystemInfoPopupModel {
     }
 }
 
+pub fn hardware_rows(
+    battery: &crate::services::controls::BatteryInfo,
+    power_profile: &str,
+    fan: &crate::services::controls::FanInfo,
+    sys_data: &crate::modules::system::SysData,
+    idle_snapshot: &crate::services::idle_inhibitor::IdleInhibitorSnapshot,
+) -> Vec<PopupMetricRow> {
+    vec![
+        PopupMetricRow::new(
+            "󰁹",
+            "Battery Runtime",
+            crate::ui::popups::power::battery_runtime_summary(battery),
+        ),
+        PopupMetricRow::new(
+            "󰚥",
+            "AC Adapter",
+            crate::ui::popups::power::battery_ac_summary(battery),
+        ),
+        PopupMetricRow::new(
+            "",
+            "Battery Health",
+            crate::ui::popups::power::battery_health_summary(battery),
+        ),
+        PopupMetricRow::new(
+            "󰾹",
+            "Battery Wear",
+            crate::ui::popups::power::battery_wear_summary(battery),
+        ),
+        PopupMetricRow::new(
+            "󱤅",
+            "Pack Capacity",
+            crate::ui::popups::power::battery_pack_summary(battery),
+        ),
+        PopupMetricRow::new(
+            "󱈸",
+            "Pack Voltage",
+            crate::ui::popups::power::battery_voltage_summary(battery),
+        ),
+        PopupMetricRow::new(
+            "󰂄",
+            "Cycle Count",
+            crate::ui::popups::power::battery_cycle_summary(battery),
+        ),
+        PopupMetricRow::new(
+            "󱞊",
+            "Charge Thresholds",
+            crate::ui::popups::power::battery_threshold_summary(battery),
+        ),
+        PopupMetricRow::new(
+            "󱐌",
+            "Charge State",
+            crate::ui::popups::power::battery_charge_state_summary(battery),
+        ),
+        PopupMetricRow::new(
+            "󱐋",
+            "Charge / Draw Power",
+            crate::ui::popups::power::battery_power_summary(battery),
+        ),
+        PopupMetricRow::new("󰾆", "Power Profile", power_profile.to_string()),
+        PopupMetricRow::new(
+            "󰈐",
+            "Fan Runtime",
+            crate::ui::popups::power::fan_runtime_summary(fan),
+        ),
+        PopupMetricRow::new(
+            "",
+            "Thermal State",
+            crate::ui::popups::power::thermal_state_summary(sys_data),
+        ),
+        PopupMetricRow::new("", "Idle Inhibitor", idle_snapshot.label().to_string()),
+    ]
+}
+
 pub fn view(
     theme: ThemeTokens,
     opacity: f32,

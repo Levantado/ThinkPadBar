@@ -4,7 +4,7 @@ use iced::{
 };
 
 use crate::{
-    app::{Message, Popup},
+    app::{BluetoothScanState, Message, Popup},
     ui::{chrome, theme::ThemeTokens},
 };
 
@@ -45,6 +45,130 @@ impl BluetoothDevicesPopupModel {
             scan_running,
             device_cards,
         }
+    }
+
+    pub fn build_device_cards(
+        bluetooth: &crate::services::controls::BluetoothDeviceSummary,
+    ) -> Vec<BluetoothDeviceCard> {
+        bluetooth
+            .device_details
+            .iter()
+            .map(|device| {
+                let summary = match (device.connected, device.battery_percent) {
+                    (true, Some(percent)) => format!("Connected • Battery {percent}%"),
+                    (true, None) => "Connected".to_string(),
+                    (false, Some(percent)) => format!("Disconnected • Battery {percent}%"),
+                    (false, None) => "Disconnected".to_string(),
+                };
+                let detail_parts = std::iter::once(device.address.clone())
+                    .chain(
+                        (!device.audio_profiles.is_empty())
+                            .then(|| device.audio_profiles.join(" • ")),
+                    )
+                    .collect::<Vec<_>>();
+                let detail = (!detail_parts.is_empty()).then(|| detail_parts.join(" • "));
+                let mut badges = vec![if device.connected {
+                    "CONNECTED".to_string()
+                } else {
+                    "DISCONNECTED".to_string()
+                }];
+                if device.paired {
+                    badges.push("PAIRED".to_string());
+                }
+                if device.trusted {
+                    badges.push("TRUSTED".to_string());
+                }
+                if let Some(percent) = device.battery_percent {
+                    badges.push(format!("BAT {percent}%"));
+                }
+
+                BluetoothDeviceCard {
+                    address: device.address.clone(),
+                    label: device.name.clone(),
+                    summary,
+                    detail,
+                    badges,
+                    connected: device.connected,
+                    paired: device.paired,
+                    trusted: device.trusted,
+                    is_new: false,
+                }
+            })
+            .collect()
+    }
+
+    pub fn from_state(
+        controls: &crate::services::controls::ControlsSnapshot,
+        scan_state: &BluetoothScanState,
+    ) -> Self {
+        let adapter_summary = if controls.bluetooth_enabled {
+            if controls.bluetooth_devices.connected_devices.is_empty() {
+                "Adapter enabled".to_string()
+            } else {
+                format!(
+                    "{} connected",
+                    controls.bluetooth_devices.connected_devices.len()
+                )
+            }
+        } else {
+            "Adapter disabled".to_string()
+        };
+
+        let device_cards = Self::build_device_cards(&controls.bluetooth_devices)
+            .into_iter()
+            .map(|mut card| {
+                card.is_new = bluetooth_device_is_new(scan_state, &card.address);
+                card
+            })
+            .collect();
+        let scan_running = matches!(scan_state, BluetoothScanState::Scanning { .. });
+
+        Self::new(
+            adapter_summary,
+            scan_status_summary(scan_state),
+            controls.bluetooth_enabled,
+            scan_running,
+            device_cards,
+        )
+    }
+}
+
+pub fn scan_status_summary(state: &BluetoothScanState) -> String {
+    match state {
+        BluetoothScanState::Idle => "Idle".to_string(),
+        BluetoothScanState::Scanning { remaining_secs, .. } => {
+            if *remaining_secs == 0 {
+                "Finishing scan...".to_string()
+            } else {
+                format!("Scanning ({remaining_secs}s left)")
+            }
+        }
+        BluetoothScanState::Completed {
+            total_devices,
+            newly_discovered_addresses,
+            remaining_secs,
+        } => {
+            if newly_discovered_addresses.is_empty() {
+                format!("{total_devices} devices known; no new devices • idle in {remaining_secs}s")
+            } else {
+                format!(
+                    "{total_devices} devices known; {} newly discovered • idle in {remaining_secs}s",
+                    newly_discovered_addresses.len()
+                )
+            }
+        }
+    }
+}
+
+pub fn bluetooth_device_is_new(scan_state: &BluetoothScanState, address: &str) -> bool {
+    match scan_state {
+        BluetoothScanState::Completed {
+            newly_discovered_addresses,
+            ..
+        } => newly_discovered_addresses
+            .iter()
+            .any(|candidate| candidate == address),
+        _ => false,
     }
 }
 
@@ -263,7 +387,15 @@ fn badge(label: String) -> iced::widget::Container<'static, Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BluetoothDeviceCard, BluetoothDevicesPopupModel};
+    use super::{
+        bluetooth_device_is_new, scan_status_summary, BluetoothDeviceCard,
+        BluetoothDevicesPopupModel,
+    };
+    use crate::app::BluetoothScanState;
+    use crate::services::controls::{
+        AudioDeviceSummary, AudioInfo, BatteryInfo, BrightnessSnapshot, ControlsSnapshot, FanInfo,
+        MicInfo,
+    };
 
     #[test]
     fn bluetooth_devices_popup_model_preserves_scan_state_and_card_flags() {
@@ -290,5 +422,111 @@ mod tests {
         assert_eq!(model.device_cards.len(), 1);
         assert!(model.device_cards[0].is_new);
         assert_eq!(model.device_cards[0].label, "WH-1000XM5");
+    }
+
+    #[test]
+    fn bluetooth_scan_status_summary_counts_down_and_finishes() {
+        assert_eq!(
+            scan_status_summary(&BluetoothScanState::Scanning {
+                remaining_secs: 3,
+                baseline_addresses: Vec::new(),
+            }),
+            "Scanning (3s left)"
+        );
+        assert_eq!(
+            scan_status_summary(&BluetoothScanState::Scanning {
+                remaining_secs: 0,
+                baseline_addresses: Vec::new(),
+            }),
+            "Finishing scan..."
+        );
+        assert_eq!(
+            scan_status_summary(&BluetoothScanState::Completed {
+                total_devices: 4,
+                newly_discovered_addresses: vec!["AA:BB".to_string(), "CC:DD".to_string()],
+                remaining_secs: 6,
+            }),
+            "4 devices known; 2 newly discovered • idle in 6s"
+        );
+    }
+
+    #[test]
+    fn bluetooth_device_is_new_only_for_completed_scan_results() {
+        assert!(bluetooth_device_is_new(
+            &BluetoothScanState::Completed {
+                total_devices: 2,
+                newly_discovered_addresses: vec!["AA:BB".to_string()],
+                remaining_secs: 5,
+            },
+            "AA:BB"
+        ));
+        assert!(!bluetooth_device_is_new(&BluetoothScanState::Idle, "AA:BB"));
+    }
+
+    #[test]
+    fn bluetooth_popup_model_builder_maps_state_and_marks_new_devices() {
+        let controls = ControlsSnapshot {
+            brightness: BrightnessSnapshot {
+                percent: 50,
+                label: "50%".to_string(),
+            },
+            audio: AudioInfo {
+                volume: 0,
+                muted: false,
+            },
+            mic: MicInfo {
+                volume: 0,
+                muted: false,
+            },
+            fan: FanInfo {
+                speed: "---".to_string(),
+                level: "auto".to_string(),
+            },
+            battery: BatteryInfo {
+                capacity: 0,
+                status: "Unknown".to_string(),
+                time_remaining: None,
+                ac_online: None,
+                health_percent: None,
+                power_rate_mw: None,
+                pack_voltage_mv: None,
+                cycle_count: None,
+                full_charge_mwh: None,
+                design_capacity_mwh: None,
+                charge_start_threshold: None,
+                charge_end_threshold: None,
+            },
+            power_profile: "balanced".to_string(),
+            bluetooth_enabled: true,
+            bluetooth_devices: crate::services::controls::BluetoothDeviceSummary {
+                connected_devices: vec!["WH-1000XM5".to_string()],
+                device_details: vec![crate::services::controls::BluetoothConnectedDevice {
+                    address: "AA:BB:CC:DD:EE:FF".to_string(),
+                    name: "WH-1000XM5".to_string(),
+                    connected: true,
+                    paired: true,
+                    trusted: true,
+                    battery_percent: Some(87),
+                    audio_profiles: vec!["A2DP".to_string()],
+                }],
+            },
+            audio_devices: AudioDeviceSummary::default(),
+        };
+        let scan_state = BluetoothScanState::Completed {
+            total_devices: 1,
+            newly_discovered_addresses: vec!["AA:BB:CC:DD:EE:FF".to_string()],
+            remaining_secs: 4,
+        };
+
+        let model = BluetoothDevicesPopupModel::from_state(&controls, &scan_state);
+
+        assert_eq!(model.adapter_summary, "1 connected");
+        assert_eq!(
+            model.scan_status,
+            "1 devices known; 1 newly discovered • idle in 4s"
+        );
+        assert!(model.bluetooth_enabled);
+        assert!(!model.scan_running);
+        assert!(model.device_cards[0].is_new);
     }
 }

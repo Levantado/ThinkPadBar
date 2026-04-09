@@ -16,10 +16,19 @@ pub struct TrayItem {
     pub icon_name: Option<String>,
     pub icon_handle: Option<Handle>,
     pub icon_signature: Option<u64>,
+    pub icon_source: TrayIconSource,
     pub item_is_menu: bool,
     pub menu_path: Option<String>,
     pub menu_layout: Option<TrayMenu>,
     pub owned_menu: Option<crate::services::tray_menu::OwnedTrayMenu>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrayIconSource {
+    #[default]
+    None,
+    Theme,
+    Pixmap,
 }
 
 impl TrayItem {
@@ -106,7 +115,7 @@ pub enum TrayMessage {
     RuntimeUpdate(TrayRuntimeUpdate),
     ActivateItem(String),
     ActivateItemSecondary(String),
-    ActivateMenuItem(String, i32, Vec<i32>),
+    ActivateMenuItem(String, i32),
     Initialize(tokio::sync::mpsc::UnboundedSender<TrayCommand>),
 }
 
@@ -114,11 +123,7 @@ pub enum TrayMessage {
 pub enum TrayCommand {
     Default(String),
     Secondary(String),
-    MenuItem {
-        id: String,
-        menu_item_id: i32,
-        prefetch_path: Vec<i32>,
-    },
+    MenuItem { id: String, menu_item_id: i32 },
 }
 
 pub struct Tray {
@@ -174,12 +179,20 @@ impl Tray {
         match message {
             TrayMessage::ItemAdded(id, item) => {
                 let (mut icon_handle, icon_signature) = get_icon_handle_and_signature(&item);
+                let mut icon_source = if icon_handle.is_some() {
+                    TrayIconSource::Pixmap
+                } else {
+                    TrayIconSource::None
+                };
                 if icon_handle.is_none() {
                     icon_handle = self.resolve_item_icon(
                         item.icon_name.as_deref(),
                         item.title.as_deref(),
                         item.icon_theme_path.as_deref(),
                     );
+                    if icon_handle.is_some() {
+                        icon_source = TrayIconSource::Theme;
+                    }
                 }
                 self.items.insert(
                     id.clone(),
@@ -189,6 +202,7 @@ impl Tray {
                         icon_name: item.icon_name.clone(),
                         icon_handle,
                         icon_signature,
+                        icon_source,
                         item_is_menu: item.item_is_menu,
                         menu_path: item.menu.clone(),
                         menu_layout: None,
@@ -247,6 +261,9 @@ impl Tray {
                     if let Some(item) = self.items.get_mut(&id) {
                         if item.icon_handle.is_none() {
                             item.icon_handle = resolved;
+                            if item.icon_handle.is_some() {
+                                item.icon_source = TrayIconSource::Theme;
+                            }
                         }
                     }
                 } else if let Some(title) = cache_lookup_title {
@@ -254,6 +271,9 @@ impl Tray {
                     if let Some(item) = self.items.get_mut(&id) {
                         if item.icon_handle.is_none() {
                             item.icon_handle = resolved;
+                            if item.icon_handle.is_some() {
+                                item.icon_source = TrayIconSource::Theme;
+                            }
                         }
                     }
                 }
@@ -296,13 +316,9 @@ impl Tray {
                     let _ = tx.send(TrayCommand::Secondary(id));
                 }
             }
-            TrayMessage::ActivateMenuItem(id, menu_item_id, prefetch_path) => {
+            TrayMessage::ActivateMenuItem(id, menu_item_id) => {
                 if let Some(tx) = &self.activate_tx {
-                    let _ = tx.send(TrayCommand::MenuItem {
-                        id,
-                        menu_item_id,
-                        prefetch_path,
-                    });
+                    let _ = tx.send(TrayCommand::MenuItem { id, menu_item_id });
                 }
             }
             TrayMessage::Initialize(tx) => {
@@ -473,8 +489,16 @@ fn update_item_pixmap_icon(item: &mut TrayItem, pixmaps: &[IconPixmap]) -> bool 
     if signature == item.icon_signature {
         return false;
     }
+    if item.icon_source == TrayIconSource::Pixmap && item.icon_signature.is_some() {
+        return false;
+    }
     item.icon_signature = signature;
     item.icon_handle = pixmap_to_handle(pixmaps);
+    item.icon_source = if item.icon_handle.is_some() {
+        TrayIconSource::Pixmap
+    } else {
+        TrayIconSource::None
+    };
     true
 }
 
@@ -522,7 +546,7 @@ fn parse_status_notifier_address(address: &str) -> (&str, String) {
         })
 }
 
-fn destination_from_item_address(address: &str) -> &str {
+pub(crate) fn destination_from_item_address(address: &str) -> &str {
     address
         .split_once('/')
         .map_or(address, |(destination, _)| destination)
@@ -697,7 +721,7 @@ impl std::fmt::Display for ActivationResult {
     }
 }
 
-async fn ensure_context_connection(
+pub(crate) async fn ensure_context_connection(
     cached: &mut Option<zbus::Connection>,
 ) -> Result<&zbus::Connection, zbus::Error> {
     if cached.is_none() {
@@ -930,8 +954,8 @@ mod tests {
         choose_secondary_plan, destination_from_item_address, parse_cursor_pos,
         parse_status_notifier_address, pixmap_signature_for_best_pixmap,
         select_registered_item_address, update_item_pixmap_icon, update_secondary_preference,
-        ActivationResult, SecondaryAction, SecondaryPlan, Tray, TrayItem, TrayMenu, TrayMessage,
-        TrayRuntimeUpdate, UpdateEvent,
+        ActivationResult, SecondaryAction, SecondaryPlan, Tray, TrayIconSource, TrayItem, TrayMenu,
+        TrayMessage, TrayRuntimeUpdate, UpdateEvent,
     };
     use iced::widget::image::Handle;
     use std::collections::HashMap;
@@ -949,6 +973,7 @@ mod tests {
                 icon_name: None,
                 icon_handle: None,
                 icon_signature: None,
+                icon_source: TrayIconSource::None,
                 item_is_menu: false,
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {
@@ -986,6 +1011,7 @@ mod tests {
             icon_name: Some("org.example.raw-icon".to_string()),
             icon_handle: None,
             icon_signature: None,
+            icon_source: TrayIconSource::None,
             item_is_menu: false,
             menu_path: None,
             menu_layout: None,
@@ -999,6 +1025,7 @@ mod tests {
             icon_name: Some("org.example.myapp-panel-symbolic".to_string()),
             icon_handle: None,
             icon_signature: None,
+            icon_source: TrayIconSource::None,
             item_is_menu: false,
             menu_path: None,
             menu_layout: None,
@@ -1012,6 +1039,7 @@ mod tests {
             icon_name: None,
             icon_handle: None,
             icon_signature: None,
+            icon_source: TrayIconSource::None,
             item_is_menu: true,
             menu_path: None,
             menu_layout: None,
@@ -1031,6 +1059,7 @@ mod tests {
                 icon_name: Some("resolved".to_string()),
                 icon_handle: Some(Handle::from_path("/tmp/resolved.png")),
                 icon_signature: None,
+                icon_source: TrayIconSource::Theme,
                 item_is_menu: false,
                 menu_path: None,
                 menu_layout: None,
@@ -1045,6 +1074,7 @@ mod tests {
                 icon_name: None,
                 icon_handle: None,
                 icon_signature: None,
+                icon_source: TrayIconSource::None,
                 item_is_menu: false,
                 menu_path: None,
                 menu_layout: None,
@@ -1177,6 +1207,7 @@ mod tests {
                 icon_name: None,
                 icon_handle: None,
                 icon_signature: None,
+                icon_source: TrayIconSource::None,
                 item_is_menu: false,
                 menu_path: None,
                 menu_layout: None,
@@ -1225,6 +1256,7 @@ mod tests {
             icon_name: None,
             icon_handle: None,
             icon_signature: None,
+            icon_source: TrayIconSource::None,
             item_is_menu: false,
             menu_path: None,
             menu_layout: None,
@@ -1256,6 +1288,7 @@ mod tests {
             icon_name: None,
             icon_handle: None,
             icon_signature: None,
+            icon_source: TrayIconSource::None,
             item_is_menu: false,
             menu_path: None,
             menu_layout: None,
@@ -1264,8 +1297,42 @@ mod tests {
 
         assert!(update_item_pixmap_icon(&mut item, &first));
         let first_signature = item.icon_signature;
-        assert!(update_item_pixmap_icon(&mut item, &second));
-        assert_ne!(item.icon_signature, first_signature);
+        assert!(!update_item_pixmap_icon(&mut item, &second));
+        assert_eq!(item.icon_signature, first_signature);
+    }
+
+    #[test]
+    fn pixmap_updates_are_frozen_after_first_dynamic_handle() {
+        let first = vec![IconPixmap {
+            width: 24,
+            height: 24,
+            pixels: vec![255; 24 * 24 * 4],
+        }];
+        let second = vec![IconPixmap {
+            width: 24,
+            height: 24,
+            pixels: vec![127; 24 * 24 * 4],
+        }];
+        let mut item = TrayItem {
+            _id: "item".to_string(),
+            title: None,
+            icon_name: None,
+            icon_handle: None,
+            icon_signature: None,
+            icon_source: TrayIconSource::None,
+            item_is_menu: false,
+            menu_path: None,
+            menu_layout: None,
+            owned_menu: None,
+        };
+
+        assert!(update_item_pixmap_icon(&mut item, &first));
+        let first_handle = item.icon_handle.clone();
+        let first_signature = item.icon_signature;
+
+        assert!(!update_item_pixmap_icon(&mut item, &second));
+        assert_eq!(item.icon_signature, first_signature);
+        assert_eq!(item.icon_handle, first_handle);
     }
 
     #[test]
@@ -1298,6 +1365,7 @@ mod tests {
                 icon_name: None,
                 icon_handle: None,
                 icon_signature: None,
+                icon_source: TrayIconSource::None,
                 item_is_menu: true,
                 menu_path: Some("/menu".to_string()),
                 owned_menu: Some(crate::services::tray_menu::OwnedTrayMenu::from_layout(

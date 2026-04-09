@@ -1,5 +1,5 @@
-use crate::services::capabilities::CapabilityMode;
 use super::PowerSessionBackend;
+use crate::services::capabilities::CapabilityMode;
 
 pub struct HyprlandSessionBackend;
 

@@ -144,14 +144,14 @@ impl super::BluetoothBackend for BluezBluetoothBackend {
             };
 
             info!("Attempting to toggle bluetooth power via BlueZ: {}", enable);
-            let result = match AdapterProxy::builder(connection.as_ref()).path(adapter_path.as_str())
-            {
-                Ok(builder) => match builder.build().await {
-                    Ok(proxy) => proxy.set_powered(enable).await,
+            let result =
+                match AdapterProxy::builder(connection.as_ref()).path(adapter_path.as_str()) {
+                    Ok(builder) => match builder.build().await {
+                        Ok(proxy) => proxy.set_powered(enable).await,
+                        Err(error) => Err(error),
+                    },
                     Err(error) => Err(error),
-                },
-                Err(error) => Err(error),
-            };
+                };
 
             match result {
                 Ok(()) => {

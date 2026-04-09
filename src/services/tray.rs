@@ -1,21 +1,16 @@
 use crate::services::tray_model::{
     activate_secondary_with_plan, choose_secondary_plan, current_cursor_pos_with_fallback,
-    get_secondary_capabilities, resolve_item_address, update_secondary_preference, SecondaryAction,
-    TrayCommand, TrayMessage, TrayRuntimeUpdate,
+    destination_from_item_address, ensure_context_connection, get_secondary_capabilities,
+    resolve_item_address, update_secondary_preference, SecondaryAction, TrayCommand, TrayMessage,
+    TrayRuntimeUpdate,
 };
 use std::collections::HashMap;
 use system_tray::client::{Client, Event};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
-pub(crate) fn menu_prefetch_sequence(prefetch_path: &[i32]) -> Vec<i32> {
-    let mut sequence = vec![0];
-    for id in prefetch_path {
-        if *id >= 0 && !sequence.iter().any(|existing| existing == id) {
-            sequence.push(*id);
-        }
-    }
-    sequence
+fn tray_menu_destination(address: &str) -> Option<zbus::names::BusName<'_>> {
+    zbus::names::BusName::try_from(destination_from_item_address(address)).ok()
 }
 
 fn reset_runtime_activation_state(
@@ -186,7 +181,6 @@ pub fn subscription() -> iced::Subscription<TrayMessage> {
                                 TrayCommand::MenuItem {
                                     id,
                                     menu_item_id,
-                                    prefetch_path,
                                 } => {
                                     let resolved_address = resolve_item_address(
                                         &mut context_connection,
@@ -194,42 +188,114 @@ pub fn subscription() -> iced::Subscription<TrayMessage> {
                                         &id,
                                     )
                                     .await;
-                                    let (_, _, menu_path) = get_secondary_capabilities(&client, &id);
-                                    if let Some(menu_path) = menu_path {
-                                        for prefetch_id in menu_prefetch_sequence(&prefetch_path) {
-                                            let _ = client
-                                                .about_to_show_menuitem(
-                                                    resolved_address.clone(),
-                                                    menu_path.clone(),
-                                                    prefetch_id,
-                                                )
-                                                .await;
-                                        }
-                                        if let Err(err) = client
-                                            .activate(system_tray::client::ActivateRequest::MenuItem {
-                                                address: resolved_address,
-                                                menu_path,
-                                                submenu_id: menu_item_id,
-                                            })
-                                            .await
-                                        {
+                                    let conn = match ensure_context_connection(&mut context_connection).await {
+                                        Ok(conn) => conn,
+                                        Err(err) => {
                                             let _ = tx.send(TrayMessage::RuntimeUpdate(
                                                 TrayRuntimeUpdate::MenuActivationError(Some(
                                                     format!(
-                                                        "{} item={} {}",
+                                                        "{} item={} session-bus-connect {}",
                                                         id, menu_item_id, err
                                                     ),
                                                 )),
                                             ));
-                                            warn!(
-                                                "tray menu item activation failed for {} item={} err={}",
-                                                id, menu_item_id, err
-                                            );
+                                            continue;
+                                        }
+                                    };
+                                    let (_, _, menu_path) = get_secondary_capabilities(&client, &id);
+                                    if let Some(menu_path) = menu_path {
+                                        let dest = tray_menu_destination(&resolved_address);
+                                        let path = zbus::zvariant::ObjectPath::try_from(menu_path);
+                                        let interface = zbus::names::InterfaceName::from_static_str_unchecked(
+                                            "com.canonical.dbusmenu",
+                                        );
+
+                                        if let (Some(dest), Ok(path)) = (dest, path) {
+                                            match zbus::Proxy::new(conn, dest, path, interface).await {
+                                                Ok(proxy) => {
+                                                    let timestamp = chrono::offset::Local::now()
+                                                        .timestamp_subsec_micros();
+
+                                                    debug!(
+                                                        "tray menu item direct event id={} item={} timestamp={}",
+                                                        id, menu_item_id, timestamp
+                                                    );
+
+                                                    let value = zbus::zvariant::Value::I32(32)
+                                                        .try_to_owned()
+                                                        .unwrap_or_else(|_| {
+                                                            zbus::zvariant::OwnedValue::from(32)
+                                                        });
+
+                                                    if let Err(err) = proxy
+                                                        .call::<_, _, ()>(
+                                                            "Event",
+                                                            &(
+                                                                menu_item_id,
+                                                                "clicked",
+                                                                &value,
+                                                                timestamp,
+                                                            ),
+                                                        )
+                                                        .await
+                                                    {
+                                                        let _ = tx.send(TrayMessage::RuntimeUpdate(
+                                                            TrayRuntimeUpdate::MenuActivationError(
+                                                                Some(format!(
+                                                                    "{} item={} {}",
+                                                                    id, menu_item_id, err
+                                                                )),
+                                                            ),
+                                                        ));
+                                                        warn!(
+                                                            "tray menu item direct event failed for {} item={} err={}",
+                                                            id, menu_item_id, err
+                                                        );
+                                                    } else {
+                                                        let _ = proxy
+                                                            .call::<_, _, zbus::zvariant::OwnedValue>(
+                                                                "GetLayout",
+                                                                &(0, -1, &[] as &[&str]),
+                                                            )
+                                                            .await;
+
+                                                        let _ = tx.send(TrayMessage::RuntimeUpdate(
+                                                            TrayRuntimeUpdate::MenuActivationError(
+                                                                None,
+                                                            ),
+                                                        ));
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    let _ = tx.send(TrayMessage::RuntimeUpdate(
+                                                        TrayRuntimeUpdate::MenuActivationError(
+                                                            Some(format!(
+                                                                "{} item={} proxy-create {}",
+                                                                id, menu_item_id, err
+                                                            )),
+                                                        ),
+                                                    ));
+                                                }
+                                            }
                                         } else {
                                             let _ = tx.send(TrayMessage::RuntimeUpdate(
-                                                TrayRuntimeUpdate::MenuActivationError(None),
+                                                TrayRuntimeUpdate::MenuActivationError(
+                                                    Some(format!(
+                                                        "{} item={} invalid-destination-or-menu-path",
+                                                        id, menu_item_id
+                                                    )),
+                                                ),
                                             ));
                                         }
+                                    } else {
+                                        let _ = tx.send(TrayMessage::RuntimeUpdate(
+                                            TrayRuntimeUpdate::MenuActivationError(Some(
+                                                format!(
+                                                    "{} item={} missing-menu-path",
+                                                    id, menu_item_id
+                                                ),
+                                            )),
+                                        ));
                                     }
                                 }
                             }
@@ -246,23 +312,8 @@ pub fn subscription() -> iced::Subscription<TrayMessage> {
 
 #[cfg(test)]
 mod tests {
-    use super::{menu_prefetch_sequence, reset_runtime_activation_state, SecondaryAction};
+    use super::{reset_runtime_activation_state, tray_menu_destination, SecondaryAction};
     use std::collections::HashMap;
-
-    #[test]
-    fn menu_prefetch_sequence_includes_root_and_selected_item() {
-        assert_eq!(menu_prefetch_sequence(&[42]), vec![0, 42]);
-    }
-
-    #[test]
-    fn menu_prefetch_sequence_root_only_for_root_selection() {
-        assert_eq!(menu_prefetch_sequence(&[0]), vec![0]);
-    }
-
-    #[test]
-    fn menu_prefetch_sequence_keeps_ancestor_path_without_duplicates() {
-        assert_eq!(menu_prefetch_sequence(&[10, 42, 42]), vec![0, 10, 42]);
-    }
 
     #[test]
     fn reconnect_state_reset_clears_cached_routes_and_addresses() {
@@ -283,5 +334,13 @@ mod tests {
         assert!(context_connection.is_none());
         assert!(resolved_item_addresses.is_empty());
         assert!(preferred_secondary_actions.is_empty());
+    }
+
+    #[test]
+    fn tray_menu_destination_strips_item_object_path() {
+        let dest = tray_menu_destination(":1.42/org/ayatana/NotificationItem/app")
+            .expect("expected valid bus name");
+
+        assert_eq!(dest.as_str(), ":1.42");
     }
 }

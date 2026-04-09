@@ -38,6 +38,80 @@ impl DisplaysPopupModel {
     }
 }
 
+pub fn summary_rows(
+    wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
+) -> Vec<PopupMetricRow> {
+    vec![
+        PopupMetricRow::new(
+            "DSP",
+            "Display Mode",
+            wayland_snapshot.display_mode_summary(),
+        ),
+        PopupMetricRow::new(
+            "TOP",
+            "Display Topology",
+            wayland_snapshot.output_topology_summary(),
+        ),
+        PopupMetricRow::new(
+            "SCL",
+            "Display Scale",
+            wayland_snapshot.output_scale_summary(),
+        ),
+        PopupMetricRow::new("OUT", "Display Outputs", wayland_snapshot.output_summary()),
+    ]
+}
+
+pub fn output_cards(
+    wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
+) -> Vec<DisplayOutputCard> {
+    if wayland_snapshot.outputs.is_empty() {
+        return vec![DisplayOutputCard {
+            label: if wayland_snapshot.available {
+                "No outputs".to_string()
+            } else {
+                "Wayland unavailable".to_string()
+            },
+            summary: wayland_snapshot
+                .unavailable_reason
+                .clone()
+                .unwrap_or_else(|| "No wl_output state available".to_string()),
+            badges: Vec::new(),
+        }];
+    }
+
+    wayland_snapshot
+        .outputs
+        .iter()
+        .map(|output| {
+            let mut badges = vec![if output.is_internal() {
+                "INTERNAL".to_string()
+            } else {
+                "EXTERNAL".to_string()
+            }];
+            if let (Some(width), Some(height)) = (output.width, output.height) {
+                badges.push(format!("{width}x{height}"));
+            }
+            if let Some(refresh_mhz) = output.refresh_mhz {
+                let refresh_hz = refresh_mhz as f64 / 1000.0;
+                if (refresh_hz.fract() - 0.0).abs() < f64::EPSILON {
+                    badges.push(format!("{refresh_hz:.0}Hz"));
+                } else {
+                    badges.push(format!("{refresh_hz:.1}Hz"));
+                }
+            }
+            if let Some(scale_factor) = output.scale_factor.filter(|scale| *scale > 0) {
+                badges.push(format!("{scale_factor}x SCALE"));
+            }
+
+            DisplayOutputCard {
+                label: output.label(),
+                summary: output.detail_label(),
+                badges,
+            }
+        })
+        .collect()
+}
+
 pub fn view(
     theme: ThemeTokens,
     opacity: f32,

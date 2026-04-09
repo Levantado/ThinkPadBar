@@ -1,8 +1,8 @@
 use crate::services::capabilities::CapabilityMode;
 
-pub mod systemd;
-pub mod rofi;
 pub mod hyprland;
+pub mod rofi;
+pub mod systemd;
 
 pub trait PowerSessionBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;

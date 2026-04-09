@@ -116,7 +116,11 @@ impl TrayUiService {
         true
     }
 
-    pub fn handle_menu_selection(&mut self, menu_item_id: i32) -> TrayUiSelectionAction {
+    pub fn handle_menu_selection(
+        &mut self,
+        menu_item_id: i32,
+        _cursor: Option<(i32, i32)>,
+    ) -> TrayUiSelectionAction {
         let Some(id) = self.open_menu_id.clone() else {
             self.close_transient_ui();
             return TrayUiSelectionAction::CloseMenu;
@@ -136,7 +140,6 @@ impl TrayUiService {
             .update(crate::services::tray_model::TrayMessage::ActivateMenuItem(
                 id.clone(),
                 menu_item_id,
-                action.prefetch_path.clone(),
             ));
         TrayUiSelectionAction::ActivateMenuItem {
             menu_item_id,
@@ -199,12 +202,39 @@ impl TrayUiService {
         }
         out
     }
+
+    #[cfg(test)]
+    pub fn set_open_menu_for_tests(
+        &mut self,
+        menu: Option<crate::services::tray_menu::OwnedTrayMenu>,
+    ) {
+        self.close_transient_ui();
+        if let Some(menu) = menu {
+            let id = "test-menu".to_string();
+            self.tray.items.insert(
+                id.clone(),
+                crate::services::tray_model::TrayItem {
+                    _id: id.clone(),
+                    title: Some("Test Menu".to_string()),
+                    icon_name: None,
+                    icon_handle: None,
+                    icon_signature: None,
+                    icon_source: crate::services::tray_model::TrayIconSource::None,
+                    item_is_menu: true,
+                    menu_path: None,
+                    menu_layout: None,
+                    owned_menu: Some(menu),
+                },
+            );
+            self.open_menu_id = Some(id);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{TrayRuntimeEvent, TrayUiSecondaryAction, TrayUiSelectionAction, TrayUiService};
-    use crate::services::tray_model::{TrayItem, TrayMenu, TrayMessage};
+    use crate::services::tray_model::{TrayIconSource, TrayItem, TrayMenu, TrayMessage};
 
     #[test]
     fn tray_candidate_generation_is_generic_and_normalized() {
@@ -214,6 +244,7 @@ mod tests {
             icon_name: Some("org.example.myapp-panel-symbolic".to_string()),
             icon_handle: None,
             icon_signature: None,
+            icon_source: TrayIconSource::None,
             item_is_menu: false,
             menu_path: None,
             menu_layout: None,
@@ -231,7 +262,7 @@ mod tests {
     #[test]
     fn invalid_menu_selection_closes_menu() {
         let mut service = TrayUiService::new();
-        let action = service.handle_menu_selection(42);
+        let action = service.handle_menu_selection(42, None);
         assert_eq!(action, TrayUiSelectionAction::CloseMenu);
         assert!(service.menu_cursor().is_none());
     }
@@ -247,6 +278,7 @@ mod tests {
                 icon_name: None,
                 icon_handle: None,
                 icon_signature: None,
+                icon_source: TrayIconSource::None,
                 item_is_menu: false,
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {
@@ -296,6 +328,7 @@ mod tests {
                 icon_name: None,
                 icon_handle: None,
                 icon_signature: None,
+                icon_source: TrayIconSource::None,
                 item_is_menu: true,
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {
@@ -358,6 +391,7 @@ mod tests {
                 icon_name: None,
                 icon_handle: None,
                 icon_signature: None,
+                icon_source: TrayIconSource::None,
                 item_is_menu: false,
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {
@@ -374,7 +408,7 @@ mod tests {
         );
         let _ = service.handle_secondary_click("item".to_string(), Some((1, 2)));
 
-        let action = service.handle_menu_selection(7);
+        let action = service.handle_menu_selection(7, None);
         assert_eq!(
             action,
             TrayUiSelectionAction::ActivateMenuItem {
@@ -413,6 +447,7 @@ mod tests {
                 icon_name: None,
                 icon_handle: None,
                 icon_signature: None,
+                icon_source: TrayIconSource::None,
                 item_is_menu: false,
                 menu_path: Some("/menu".to_string()),
                 menu_layout: Some(TrayMenu {
@@ -429,7 +464,7 @@ mod tests {
         );
         let _ = service.handle_secondary_click("item".to_string(), Some((1, 2)));
 
-        let action = service.handle_menu_selection(41);
+        let action = service.handle_menu_selection(41, None);
 
         assert_eq!(action, TrayUiSelectionAction::CloseMenu);
         assert_eq!(service.open_menu_id, None);

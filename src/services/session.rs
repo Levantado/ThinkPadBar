@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use crate::services::session_backends::{PowerSessionBackend, LauncherBackend};
 use crate::services::session_backends::hyprland::HyprlandSessionBackend;
 use crate::services::session_backends::rofi::RofiLauncherBackend;
+use crate::services::session_backends::{LauncherBackend, PowerSessionBackend};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionCommand {
@@ -50,7 +50,11 @@ impl SessionService {
             key: "ses",
             label: "Session Actions",
             mode: self.power.capability_mode(),
-            provider: format!("{}+{}", self.launcher.backend_name(), self.power.backend_name()),
+            provider: format!(
+                "{}+{}",
+                self.launcher.backend_name(),
+                self.power.backend_name()
+            ),
             detail: Some("provider-backed session service".to_string()),
         }
     }
@@ -105,10 +109,10 @@ impl Default for SessionService {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-    use crate::services::capabilities::CapabilityMode;
-    use crate::services::session_backends::{PowerSessionBackend, LauncherBackend};
     use super::{SessionCommand, SessionFollowUp, SessionService};
+    use crate::services::capabilities::CapabilityMode;
+    use crate::services::session_backends::{LauncherBackend, PowerSessionBackend};
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct MockPowerBackend {
@@ -116,14 +120,30 @@ mod tests {
     }
 
     impl PowerSessionBackend for MockPowerBackend {
-        fn backend_name(&self) -> &'static str { "mock-power" }
-        fn capability_mode(&self) -> CapabilityMode { CapabilityMode::Native }
-        fn lock(&self) { self.calls.lock().unwrap().push("lock".to_string()); }
-        fn logout(&self) { self.calls.lock().unwrap().push("logout".to_string()); }
-        fn suspend(&self) { self.calls.lock().unwrap().push("suspend".to_string()); }
-        fn hibernate(&self) { self.calls.lock().unwrap().push("hibernate".to_string()); }
-        fn reboot(&self) { self.calls.lock().unwrap().push("reboot".to_string()); }
-        fn shutdown(&self) { self.calls.lock().unwrap().push("shutdown".to_string()); }
+        fn backend_name(&self) -> &'static str {
+            "mock-power"
+        }
+        fn capability_mode(&self) -> CapabilityMode {
+            CapabilityMode::Native
+        }
+        fn lock(&self) {
+            self.calls.lock().unwrap().push("lock".to_string());
+        }
+        fn logout(&self) {
+            self.calls.lock().unwrap().push("logout".to_string());
+        }
+        fn suspend(&self) {
+            self.calls.lock().unwrap().push("suspend".to_string());
+        }
+        fn hibernate(&self) {
+            self.calls.lock().unwrap().push("hibernate".to_string());
+        }
+        fn reboot(&self) {
+            self.calls.lock().unwrap().push("reboot".to_string());
+        }
+        fn shutdown(&self) {
+            self.calls.lock().unwrap().push("shutdown".to_string());
+        }
     }
 
     #[derive(Default)]
@@ -132,7 +152,9 @@ mod tests {
     }
 
     impl LauncherBackend for MockLauncherBackend {
-        fn backend_name(&self) -> &'static str { "mock-launcher" }
+        fn backend_name(&self) -> &'static str {
+            "mock-launcher"
+        }
         fn toggle_launcher(&self) -> bool {
             self.calls.lock().unwrap().push("toggle".to_string());
             true
@@ -140,7 +162,10 @@ mod tests {
     }
 
     impl SessionService {
-        fn with_backends(power: Arc<dyn PowerSessionBackend>, launcher: Arc<dyn LauncherBackend>) -> Self {
+        fn with_backends(
+            power: Arc<dyn PowerSessionBackend>,
+            launcher: Arc<dyn LauncherBackend>,
+        ) -> Self {
             Self {
                 snapshot: super::SessionSnapshot::default(),
                 power,
@@ -163,9 +188,13 @@ mod tests {
     async fn launcher_command_routes_to_launcher_backend() {
         let power_calls = Arc::new(Mutex::new(Vec::new()));
         let launcher_calls = Arc::new(Mutex::new(Vec::new()));
-        
-        let power = Arc::new(MockPowerBackend { calls: power_calls.clone() });
-        let launcher = Arc::new(MockLauncherBackend { calls: launcher_calls.clone() });
+
+        let power = Arc::new(MockPowerBackend {
+            calls: power_calls.clone(),
+        });
+        let launcher = Arc::new(MockLauncherBackend {
+            calls: launcher_calls.clone(),
+        });
         let service = SessionService::with_backends(power, launcher);
 
         assert_eq!(
@@ -180,9 +209,13 @@ mod tests {
     async fn lock_command_routes_to_power_backend_and_requests_refresh() {
         let power_calls = Arc::new(Mutex::new(Vec::new()));
         let launcher_calls = Arc::new(Mutex::new(Vec::new()));
-        
-        let power = Arc::new(MockPowerBackend { calls: power_calls.clone() });
-        let launcher = Arc::new(MockLauncherBackend { calls: launcher_calls.clone() });
+
+        let power = Arc::new(MockPowerBackend {
+            calls: power_calls.clone(),
+        });
+        let launcher = Arc::new(MockLauncherBackend {
+            calls: launcher_calls.clone(),
+        });
         let service = SessionService::with_backends(power, launcher);
 
         assert_eq!(
@@ -203,6 +236,9 @@ mod tests {
             crate::services::capabilities::CapabilityMode::Native
         );
         assert_eq!(status.provider, "rofi+hyprland");
-        assert_eq!(status.detail.as_deref(), Some("provider-backed session service"));
+        assert_eq!(
+            status.detail.as_deref(),
+            Some("provider-backed session service")
+        );
     }
 }

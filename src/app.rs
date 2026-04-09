@@ -1,23 +1,16 @@
 use crate::{
+    popup_coordinator::{PopupTransitionPlan, PopupVisibilityAction},
     services::capabilities::RuntimeCapabilities,
     ui::{
-        chrome,
-        popups::{self, audio_routes, PopupMetricRow},
+        bar, popup_host,
+        popups::{self},
         theme::ThemeTokens,
     },
+    update_coordinator,
 };
 use chrono::Local;
-use iced::{
-    mouse,
-    widget::{
-        button, container, image, mouse_area, scrollable, slider, stack, text, text_input, Column,
-        Row, Space,
-    },
-    window::Id,
-    Alignment, Color, Element, Length, Padding, Task, Theme,
-};
+use iced::{widget::Row, window::Id, Color, Element, Task, Theme};
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::time::Duration;
 use tracing::info;
 
@@ -46,16 +39,8 @@ pub enum PowerAction {
     Logout,
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ControlCenterDeviceItem {
-    icon: &'static str,
-    label: &'static str,
-    value: String,
-    detail: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 struct PopupDomainState {
     is_power_popup: bool,
     is_controls_popup: bool,
@@ -66,7 +51,7 @@ const BLUETOOTH_SCAN_WINDOW_SECS: u8 = 5;
 const BLUETOOTH_SCAN_RESULT_WINDOW_SECS: u8 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-enum BluetoothScanState {
+pub(crate) enum BluetoothScanState {
     #[default]
     Idle,
     Scanning {
@@ -85,12 +70,11 @@ pub struct ThinkPadBar {
     dbus_conn: Option<zbus::Connection>,
     clock: String,
     controls: crate::services::controls::ControlsSnapshot,
+    audio_visualizer: crate::services::audio_visualizer::AudioVisualizerSnapshot,
     network_service: crate::services::network::NetworkService,
     idle_inhibitor_service: crate::services::idle_inhibitor::IdleInhibitorService,
     wayland_runtime_service: crate::services::wayland_runtime::WaylandRuntimeService,
     popup: Popup,
-    battery_str: String,
-    audio_str: String,
     main_window_id: Option<Id>,
     popup_window_id: Option<Id>,
     calendar_offset: i32,
@@ -100,6 +84,7 @@ pub struct ThinkPadBar {
     session_service: crate::services::session::SessionService,
     system_info_service: crate::services::system_info::SystemInfoService,
     tray_ui_service: crate::services::tray_ui::TrayUiService,
+    audio_visualizer_service: crate::services::audio_visualizer::AudioVisualizerService,
     bluetooth_scan_state: BluetoothScanState,
     controls_coalescing: ControlsCoalescing,
     controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer<
@@ -146,6 +131,7 @@ pub enum Message {
     ControlsEvent(crate::services::controls::ControlsEvent),
     ControlsCommandCompleted(crate::services::controls::ControlsFollowUp),
     BackgroundWifiInfoSynced(crate::services::network::WifiInfo),
+    AudioVisualizerFrame(crate::services::audio_visualizer::AudioVisualizerSnapshot),
     WaylandRuntimeEvent(crate::services::wayland_runtime::WaylandRuntimeEvent),
     RefreshCompositor,
     CompositorEvent(crate::services::compositor::CompositorEvent),
@@ -254,8 +240,8 @@ impl ControlsCoalescing {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AppCoalescingDiagnostics {
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct AppCoalescingDiagnostics {
     pending_control_flushes: usize,
     pending_slow_tick: bool,
     inflight_control_refreshes: usize,
@@ -265,7 +251,7 @@ struct AppCoalescingDiagnostics {
 }
 
 impl AppCoalescingDiagnostics {
-    fn summary(&self) -> String {
+    pub(crate) fn summary(&self) -> String {
         format!(
             "ctrl pending:{} refresh {}/{} bg {}/{} slow:{}",
             self.pending_control_flushes,
@@ -331,19 +317,6 @@ impl ThinkPadBar {
         RuntimeCapabilities::new(items)
     }
 
-    fn trunc_with_ellipsis(input: &str, max_chars: usize) -> String {
-        let count = input.chars().count();
-        if count <= max_chars {
-            return input.to_string();
-        }
-        if max_chars <= 1 {
-            return "…".to_string();
-        }
-        let mut out: String = input.chars().take(max_chars - 1).collect();
-        out.push('…');
-        out
-    }
-
     fn popup_surface_kind(popup: &Popup) -> crate::services::popup_anchor::PopupSurfaceKind {
         match popup {
             Popup::None => crate::services::popup_anchor::PopupSurfaceKind::Hidden,
@@ -362,6 +335,7 @@ impl ThinkPadBar {
         }
     }
 
+    #[cfg(test)]
     fn popup_domain_state(popup: &Popup) -> PopupDomainState {
         match popup {
             Popup::Power => PopupDomainState {
@@ -384,6 +358,331 @@ impl ThinkPadBar {
                 is_controls_popup: false,
                 is_connectivity_popup: false,
             },
+        }
+    }
+
+    fn build_power_popup_model(&self) -> popups::power::PowerPopupModel {
+        popups::power::PowerPopupModel::new(
+            &self.controls,
+            &self.config.performance,
+            self.idle_inhibitor_service.snapshot(),
+            self.session_service.snapshot().power_menu_open,
+            self.config.appearance.opacity,
+        )
+    }
+
+    fn build_controls_popup_model(&self) -> popups::controls::ControlsPopupModel {
+        popups::controls::ControlsPopupModel::new(&self.controls, self.config.appearance.opacity)
+    }
+
+    fn build_stats_popup_model(&self) -> popups::stats::StatsPopupModel {
+        let sys_data = self.system_info_service.snapshot();
+        let cpu_summary = popups::power::cpu_usage_summary(sys_data);
+        let mem_summary = if sys_data.mem_str.trim().is_empty() {
+            if sys_data.mem_total > 0 {
+                let percent =
+                    (sys_data.mem_used as f64 / sys_data.mem_total as f64 * 100.0).round() as i32;
+                format!("{percent}%")
+            } else {
+                "0%".to_string()
+            }
+        } else {
+            sys_data.mem_str.clone()
+        };
+        let temp_summary = if sys_data.temp_str.trim().is_empty() {
+            format!("{}°C", sys_data.temp.round() as i32)
+        } else {
+            sys_data.temp_str.clone()
+        };
+
+        popups::stats::StatsPopupModel::new(
+            popups::stats::opaque_background_alpha(self.config.appearance.opacity),
+            cpu_summary,
+            mem_summary,
+            temp_summary,
+            popups::power::fan_runtime_summary(&self.controls.fan),
+        )
+    }
+
+    fn build_displays_popup_model(
+        &self,
+        wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
+    ) -> popups::displays::DisplaysPopupModel {
+        popups::displays::DisplaysPopupModel::new(
+            popups::displays::summary_rows(wayland_snapshot),
+            wayland_snapshot.missing_capabilities(),
+            popups::displays::output_cards(wayland_snapshot),
+        )
+    }
+
+    fn build_audio_routes_popup_model(&self) -> popups::audio_routes::AudioRoutesPopupModel {
+        let output_routes = popups::audio_routes::popup_items(
+            &self.controls.audio_devices.output_routes,
+            &self.controls.audio_devices.input_routes,
+            self.controls.audio_devices.output_route.as_deref(),
+            "SINK",
+            "No output routes discovered",
+        );
+        let input_routes = popups::audio_routes::popup_items(
+            &self.controls.audio_devices.input_routes,
+            &self.controls.audio_devices.output_routes,
+            self.controls.audio_devices.input_route.as_deref(),
+            "SOURCE",
+            "No input routes discovered",
+        );
+
+        popups::audio_routes::AudioRoutesPopupModel::new(
+            popups::audio_routes::current_route_summary(
+                &self.controls.audio_devices.output_routes,
+                self.controls.audio_devices.output_route.as_deref(),
+                "No output route selected",
+            ),
+            popups::audio_routes::current_route_summary(
+                &self.controls.audio_devices.input_routes,
+                self.controls.audio_devices.input_route.as_deref(),
+                "No input route selected",
+            ),
+            output_routes,
+            input_routes,
+        )
+    }
+
+    fn build_bluetooth_devices_popup_model(
+        &self,
+    ) -> popups::bluetooth_devices::BluetoothDevicesPopupModel {
+        popups::bluetooth_devices::BluetoothDevicesPopupModel::from_state(
+            &self.controls,
+            &self.bluetooth_scan_state,
+        )
+    }
+
+    fn build_connectivity_popup_model(&self) -> popups::connectivity::ConnectivityPopupModel {
+        popups::connectivity::ConnectivityPopupModel::new(
+            self.network_service.snapshot(),
+            &self.controls,
+            self.config.appearance.opacity,
+        )
+    }
+
+    fn build_tray_menu_popup_model(&self) -> popups::tray_menu::TrayMenuPopupModel {
+        popups::tray_menu::TrayMenuPopupModel::from_owned_menu(self.tray_ui_service.open_menu())
+    }
+
+    fn build_calendar_popup_model(&self) -> Option<popups::calendar::CalendarPopupModel> {
+        popups::calendar::CalendarPopupModel::from_offset(
+            self.calendar_offset,
+            chrono::Local::now(),
+        )
+    }
+
+    fn build_system_info_popup_model(
+        &self,
+        compositor: &crate::services::compositor::CompositorSnapshot,
+        wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
+    ) -> popups::system_info::SystemInfoPopupModel {
+        let sys_data = self.system_info_service.snapshot();
+        let system_diagnostics = self.system_info_service.diagnostics();
+        let compositor_diagnostics = self.compositor_service.diagnostics();
+        let controls_diagnostics = self.controls_service.diagnostics();
+        let network_diagnostics = self.network_service.diagnostics();
+        let idle_snapshot = self.idle_inhibitor_service.snapshot();
+        let tray_diagnostics = self.tray_ui_service.diagnostics();
+        let coalescing_diagnostics = self.coalescing_diagnostics();
+        let runtime_capabilities = self.runtime_capabilities();
+
+        crate::ui::adapters::build_system_info_popup_model(
+            crate::ui::adapters::SystemInfoPopupInputs {
+                version: env!("CARGO_PKG_VERSION"),
+                debug_ui_enabled: self.debug_ui_enabled,
+                sys_data,
+                battery: &self.controls.battery,
+                power_profile: &self.controls.power_profile,
+                fan: &self.controls.fan,
+                idle_snapshot: &idle_snapshot,
+                wayland_snapshot,
+                system_diagnostics: &system_diagnostics,
+                compositor_diagnostics: &compositor_diagnostics,
+                controls_diagnostics: &controls_diagnostics,
+                network_diagnostics: &network_diagnostics,
+                tray_diagnostics: &tray_diagnostics,
+                coalescing_diagnostics: &coalescing_diagnostics,
+                audio_visualizer_runtime: self
+                    .audio_visualizer_service
+                    .diagnostics_summary()
+                    .unwrap_or_else(|| "n/a".to_string()),
+                runtime_capabilities_summary: runtime_capabilities.summary(),
+                capability_providers_summary: runtime_capabilities.provider_summary(),
+                capability_degradations_summary: runtime_capabilities
+                    .degraded_summary()
+                    .unwrap_or_else(|| "none".to_string()),
+                service_backends_summary: format!(
+                    "cmp {:?}->{:?} net {:?}->{:?}",
+                    compositor.configured_backend,
+                    compositor.active_backend,
+                    self.network_service.configured_backend(),
+                    self.network_service.active_backend()
+                ),
+            },
+        )
+    }
+
+    fn build_popup_host_model(&self) -> popup_host::PopupHostModel {
+        let compositor = self.compositor_service.snapshot();
+        let wayland_snapshot = self.wayland_runtime_service.snapshot();
+
+        match self.popup {
+            Popup::None => popup_host::PopupHostModel::Hidden,
+            Popup::TrayMenu => {
+                popup_host::PopupHostModel::TrayMenu(self.build_tray_menu_popup_model())
+            }
+            Popup::Stats => popup_host::PopupHostModel::Stats(self.build_stats_popup_model()),
+            Popup::Displays => popup_host::PopupHostModel::Displays(
+                self.build_displays_popup_model(wayland_snapshot),
+            ),
+            Popup::AudioRoutes => {
+                popup_host::PopupHostModel::AudioRoutes(self.build_audio_routes_popup_model())
+            }
+            Popup::BluetoothDevices => popup_host::PopupHostModel::BluetoothDevices(
+                self.build_bluetooth_devices_popup_model(),
+            ),
+            Popup::Calendar => self
+                .build_calendar_popup_model()
+                .map(popup_host::PopupHostModel::Calendar)
+                .unwrap_or(popup_host::PopupHostModel::Hidden),
+            Popup::SystemMonitor => popup_host::PopupHostModel::SystemMonitor(
+                self.build_system_info_popup_model(compositor, wayland_snapshot),
+            ),
+            Popup::Power => popup_host::PopupHostModel::Power(self.build_power_popup_model()),
+            Popup::Connectivity => {
+                popup_host::PopupHostModel::Connectivity(self.build_connectivity_popup_model())
+            }
+            Popup::Controls => {
+                popup_host::PopupHostModel::Controls(self.build_controls_popup_model())
+            }
+        }
+    }
+
+    fn build_main_bar_model(&self) -> crate::ui::bar::MainBarModel {
+        let compositor = self.compositor_service.snapshot();
+        let sys_data = self.system_info_service.snapshot();
+        let wifi_snapshot = self.network_service.snapshot();
+        let idle_snapshot = self.idle_inhibitor_service.snapshot();
+        let pill_fg = Color::from_rgb8(0xc0, 0xca, 0xf5);
+        let temp_val = sys_data.temp.round() as i32;
+        let (battery_icon, battery_color) =
+            popups::power::battery_icon_and_color(&self.controls.battery);
+        let (power_profile_label, power_profile_color) =
+            popups::power::power_profile_visual(&self.controls.power_profile);
+
+        bar::MainBarModel {
+            opacity: self.config.appearance.opacity,
+            bar_height: self.config.appearance.bar_height as f32,
+            workspaces: compositor
+                .workspaces
+                .iter()
+                .map(|ws| bar::WorkspaceChip {
+                    id: ws.id,
+                    name: ws.name.clone(),
+                    active: ws.active,
+                    special: Self::is_special_workspace(&ws.name),
+                })
+                .collect(),
+            tray_items: self
+                .tray_ui_service
+                .items()
+                .iter()
+                .map(|(id, item)| bar::TrayItemModel {
+                    id: id.clone(),
+                    icon_handle: item.icon_handle.clone(),
+                    fallback_label: item.fallback_label(),
+                })
+                .collect(),
+            center_title: bar::trunc_with_ellipsis(compositor.active_window.as_str(), 34),
+            special_workspace_visible: compositor.special_workspace_visible,
+            visualizer: bar::AudioVisualizerModel {
+                enabled: self.config.appearance.audio_visualizer.enabled,
+                bars: self.audio_visualizer.bars[..usize::from(self.audio_visualizer.visible_bars)
+                    .min(self.audio_visualizer.bars.len())]
+                    .to_vec(),
+                active: self.audio_visualizer.active,
+                min_height: self
+                    .config
+                    .appearance
+                    .audio_visualizer
+                    .normalized_min_height(),
+                max_height: self
+                    .config
+                    .appearance
+                    .audio_visualizer
+                    .normalized_max_height(),
+                bar_width: self
+                    .config
+                    .appearance
+                    .audio_visualizer
+                    .normalized_bar_width(),
+                gap: self.config.appearance.audio_visualizer.normalized_gap(),
+                padding_x: self
+                    .config
+                    .appearance
+                    .audio_visualizer
+                    .normalized_padding_x(),
+                padding_y: self
+                    .config
+                    .appearance
+                    .audio_visualizer
+                    .normalized_padding_y(),
+                color_profile:
+                    crate::services::audio_visualizer::VisualizerColorProfile::from_config(
+                        self.config
+                            .appearance
+                            .audio_visualizer
+                            .normalized_color_profile(),
+                    ),
+            },
+            stats: bar::StatsPillModel {
+                cpu_summary: popups::power::cpu_usage_summary(sys_data),
+                temp_summary: bar::temperature_summary(sys_data),
+                temp_color: bar::temperature_color(temp_val, pill_fg),
+                fan_speed: self.controls.fan.speed.clone(),
+            },
+            controls: bar::ControlsPillModel {
+                brightness_label: self.controls.brightness.label.clone(),
+                volume_icon: bar::volume_icon(&self.controls.audio),
+                volume_label: crate::ui::chrome::audio_percent_label(&self.controls.audio),
+                mic_icon: bar::mic_icon(&self.controls.mic),
+                mic_label: format!("{}%", self.controls.mic.volume),
+            },
+            connectivity: bar::ConnectivityPillModel {
+                wifi_icon: bar::wifi_icon(wifi_snapshot.wifi.enabled),
+                wifi_label: bar::wifi_label(
+                    wifi_snapshot.wifi.enabled,
+                    &wifi_snapshot.wifi.ssid,
+                    8,
+                ),
+                bluetooth_icon: bar::bluetooth_icon(self.controls.bluetooth_enabled),
+                bluetooth_label: crate::ui::chrome::bluetooth_pill_summary(&self.controls),
+            },
+            battery: bar::BatteryPillModel {
+                battery_icon,
+                battery_color,
+                battery_label: crate::ui::chrome::battery_percent_label(&self.controls.battery),
+                power_profile_label: power_profile_label.to_string(),
+                power_profile_color,
+                idle_enabled: idle_snapshot.enabled,
+            },
+            keyboard_layout: compositor.keyboard_layout.clone(),
+            clock: self.clock.clone(),
+            show_debug_toggle: self.debug_ui_enabled,
+            show_debug_overlay: self.debug_ui_enabled && self.show_debug_overlay,
+            debug_overlay_text: format!(
+                "ws req:{} coal:{} last:{}ms avg:{}ms dbus ok/fail:{}/{}",
+                self.perf.workspace_refresh_requested,
+                self.perf.workspace_refresh_coalesced,
+                self.perf.workspace_refresh_last_ms,
+                self.perf.workspace_refresh_avg_ms(),
+                self.perf.dbus_connect_successes,
+                self.perf.dbus_connect_failures
+            ),
         }
     }
 
@@ -460,189 +759,43 @@ impl ThinkPadBar {
         *popup != Popup::None && popup_window_id.is_some_and(|id| id == unfocused_window)
     }
 
+    fn apply_popup_transition_plan(&mut self, plan: PopupTransitionPlan) -> Vec<Task<Message>> {
+        let mut tasks = Vec::new();
+
+        for refresh_kind in plan.controls_refreshes {
+            tasks.push(self.request_controls_refresh(refresh_kind));
+        }
+
+        if let Some(refresh_kind) = plan.system_info_refresh {
+            self.system_info_service.refresh(refresh_kind);
+        }
+
+        self.popup = plan.next_popup;
+
+        if plan.close_transient_ui {
+            self.tray_ui_service.close_transient_ui();
+            self.session_service.close_transient_ui();
+            self.network_service.close_transient_ui();
+        }
+
+        if plan.reset_bluetooth_scan {
+            self.bluetooth_scan_state = BluetoothScanState::Idle;
+        }
+        if plan.reset_calendar_offset {
+            self.calendar_offset = 0;
+        }
+
+        match plan.visibility_action {
+            PopupVisibilityAction::Hide => tasks.extend(self.popup_hide_tasks()),
+            PopupVisibilityAction::Show(popup) => tasks.extend(self.popup_show_tasks(popup)),
+        }
+
+        tasks
+    }
+
     fn is_special_workspace(name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
         lower == "special" || lower.starts_with("special:")
-    }
-
-    fn battery_runtime_summary(battery: &crate::services::controls::BatteryInfo) -> String {
-        match battery.time_remaining.as_deref() {
-            Some(time_remaining) => {
-                format!(
-                    "{}% {} ({time_remaining})",
-                    battery.capacity, battery.status
-                )
-            }
-            None => format!("{}% {}", battery.capacity, battery.status),
-        }
-    }
-
-    fn battery_ac_summary(battery: &crate::services::controls::BatteryInfo) -> String {
-        match battery.ac_online {
-            Some(true) => "Connected".to_string(),
-            Some(false) => "Disconnected".to_string(),
-            None => "Unknown".to_string(),
-        }
-    }
-
-    fn battery_health_summary(battery: &crate::services::controls::BatteryInfo) -> String {
-        battery
-            .health_percent
-            .map(|percent| format!("{percent}% of design"))
-            .unwrap_or_else(|| "N/A".to_string())
-    }
-
-    fn battery_wear_summary(battery: &crate::services::controls::BatteryInfo) -> String {
-        let Some(health_percent) = battery.health_percent else {
-            return "N/A".to_string();
-        };
-        let wear_percent = 100u8.saturating_sub(health_percent);
-        match (battery.full_charge_mwh, battery.design_capacity_mwh) {
-            (Some(full), Some(design)) if design >= full => format!(
-                "{wear_percent}% worn (-{:.1} Wh)",
-                (design - full) as f64 / 1000.0
-            ),
-            _ => format!("{wear_percent}% worn"),
-        }
-    }
-
-    fn battery_power_summary(battery: &crate::services::controls::BatteryInfo) -> String {
-        let Some(power_rate_mw) = battery.power_rate_mw else {
-            return "N/A".to_string();
-        };
-
-        let label = match battery.status.as_str() {
-            "Charging" => "charging",
-            "Discharging" => "draw",
-            _ => "rate",
-        };
-        format!("{:.1} W {label}", power_rate_mw as f64 / 1000.0)
-    }
-
-    fn battery_voltage_summary(battery: &crate::services::controls::BatteryInfo) -> String {
-        battery
-            .pack_voltage_mv
-            .map(|mv| format!("{:.1} V", mv as f64 / 1000.0))
-            .unwrap_or_else(|| "N/A".to_string())
-    }
-
-    fn battery_pack_summary(battery: &crate::services::controls::BatteryInfo) -> String {
-        match (battery.full_charge_mwh, battery.design_capacity_mwh) {
-            (Some(full), Some(design)) if design >= full => {
-                format!(
-                    "{:.1} / {:.1} Wh (-{:.1} Wh)",
-                    full as f64 / 1000.0,
-                    design as f64 / 1000.0,
-                    (design - full) as f64 / 1000.0
-                )
-            }
-            (Some(full), Some(design)) => {
-                format!(
-                    "{:.1} / {:.1} Wh",
-                    full as f64 / 1000.0,
-                    design as f64 / 1000.0
-                )
-            }
-            (Some(full), None) => format!("{:.1} Wh current full", full as f64 / 1000.0),
-            _ => "N/A".to_string(),
-        }
-    }
-
-    fn battery_cycle_summary(battery: &crate::services::controls::BatteryInfo) -> String {
-        battery
-            .cycle_count
-            .map(|count| format!("{count} cycles"))
-            .unwrap_or_else(|| "N/A".to_string())
-    }
-
-    fn battery_threshold_summary(battery: &crate::services::controls::BatteryInfo) -> String {
-        match (battery.charge_start_threshold, battery.charge_end_threshold) {
-            (Some(0), Some(100)) => "Full charge allowed".to_string(),
-            (Some(start), Some(end)) if start == end => format!("Pinned at {end}%"),
-            (Some(start), Some(end)) => format!("{start}% -> {end}%"),
-            (Some(start), None) => format!("Start at {start}%"),
-            (None, Some(end)) => format!("Stop at {end}%"),
-            (None, None) => "N/A".to_string(),
-        }
-    }
-
-    fn battery_charge_state_summary(battery: &crate::services::controls::BatteryInfo) -> String {
-        match battery.status.as_str() {
-            "Charging" => battery
-                .charge_end_threshold
-                .map(|end| format!("Charging toward {end}% ceiling"))
-                .unwrap_or_else(|| "Charging".to_string()),
-            "Discharging" => "Discharging".to_string(),
-            "Full" => "Full".to_string(),
-            _ => match (
-                battery.ac_online,
-                battery.charge_start_threshold,
-                battery.charge_end_threshold,
-            ) {
-                (Some(true), Some(_start), Some(end)) if battery.capacity >= end => {
-                    format!("Holding at {end}% ceiling")
-                }
-                (Some(true), Some(start), Some(end))
-                    if battery.capacity >= start && battery.capacity < end =>
-                {
-                    format!("Within {start}-{end}% hold window")
-                }
-                (Some(true), Some(start), Some(_end)) if battery.capacity < start => {
-                    format!("Waiting to resume below {start}%")
-                }
-                (Some(true), _, _) => "AC idle".to_string(),
-                (Some(false), _, _) => battery.status.clone(),
-                (None, _, _) => battery.status.clone(),
-            },
-        }
-    }
-
-    fn fan_runtime_summary(fan: &crate::services::controls::FanInfo) -> String {
-        format!("{} RPM ({})", fan.speed, fan.level)
-    }
-
-    fn thermal_state_summary(sys_data: &crate::modules::system::SysData) -> String {
-        let temp = sys_data.temp;
-        if temp <= 0.0 {
-            return "Sensor unavailable".to_string();
-        }
-
-        let state = if temp >= 85.0 {
-            "Critical"
-        } else if temp >= 70.0 {
-            "Hot"
-        } else if temp >= 55.0 {
-            "Warm"
-        } else {
-            "Cool"
-        };
-        format!("{state} ({})", sys_data.temp_str)
-    }
-
-    fn cpu_usage_summary(sys_data: &crate::modules::system::SysData) -> String {
-        let normalized = sys_data.cpu_str.trim();
-        if normalized.is_empty() || !normalized.chars().any(|ch| ch.is_ascii_digit()) {
-            format!("{}%", sys_data.cpu_usage.round() as i32)
-        } else {
-            normalized.to_string()
-        }
-    }
-
-    fn calendar_nav_labels() -> (&'static str, &'static str) {
-        ("<", ">")
-    }
-
-    fn scroll_direction(delta: mouse::ScrollDelta) -> i8 {
-        let y = match delta {
-            mouse::ScrollDelta::Lines { y, .. } | mouse::ScrollDelta::Pixels { y, .. } => y,
-        };
-        if y > 0.0 {
-            1
-        } else if y < 0.0 {
-            -1
-        } else {
-            0
-        }
     }
 
     fn step_adjust_percent(current: u32, direction: i8, min: u32, max: u32) -> u32 {
@@ -658,586 +811,6 @@ impl ThinkPadBar {
         next.clamp(min, max)
     }
 
-    fn power_profile_visual(profile: &str) -> (&'static str, Color) {
-        match profile {
-            "low-power" => ("󰾆", Color::from_rgb8(0x9e, 0xce, 0x6a)),
-            "balanced" => ("󰾅", Color::from_rgb8(0xe0, 0xaf, 0x68)),
-            "performance" => ("󰓅", Color::from_rgb8(0xf7, 0x76, 0x8e)),
-            _ => ("󰓅 ?", Color::WHITE),
-        }
-    }
-
-    fn power_profile_caption(profile: &str) -> &'static str {
-        match profile {
-            "low-power" => "LOW",
-            "balanced" => "BAL",
-            "performance" => "HIGH",
-            _ => "?",
-        }
-    }
-
-    fn hardware_summary_rows(
-        battery: &crate::services::controls::BatteryInfo,
-        power_profile: &str,
-        fan: &crate::services::controls::FanInfo,
-        sys_data: &crate::modules::system::SysData,
-        idle_snapshot: &crate::services::idle_inhibitor::IdleInhibitorSnapshot,
-    ) -> Vec<(&'static str, &'static str, String)> {
-        vec![
-            (
-                "󰁹",
-                "Battery Runtime",
-                Self::battery_runtime_summary(battery),
-            ),
-            ("󰚥", "AC Adapter", Self::battery_ac_summary(battery)),
-            ("", "Battery Health", Self::battery_health_summary(battery)),
-            ("󰾹", "Battery Wear", Self::battery_wear_summary(battery)),
-            ("󱤅", "Pack Capacity", Self::battery_pack_summary(battery)),
-            ("󱈸", "Pack Voltage", Self::battery_voltage_summary(battery)),
-            ("󰂄", "Cycle Count", Self::battery_cycle_summary(battery)),
-            (
-                "󱞊",
-                "Charge Thresholds",
-                Self::battery_threshold_summary(battery),
-            ),
-            (
-                "󱐌",
-                "Charge State",
-                Self::battery_charge_state_summary(battery),
-            ),
-            (
-                "󱐋",
-                "Charge / Draw Power",
-                Self::battery_power_summary(battery),
-            ),
-            ("󰾆", "Power Profile", power_profile.to_string()),
-            ("󰈐", "Fan Runtime", Self::fan_runtime_summary(fan)),
-            ("", "Thermal State", Self::thermal_state_summary(sys_data)),
-            ("", "Idle Inhibitor", idle_snapshot.label().to_string()),
-        ]
-    }
-
-    #[cfg(test)]
-    fn control_center_power_items(
-        battery: &crate::services::controls::BatteryInfo,
-    ) -> Vec<(&'static str, &'static str, String)> {
-        vec![
-            (
-                "󰁹",
-                "Battery Runtime",
-                Self::battery_runtime_summary(battery),
-            ),
-            (
-                "󱐌",
-                "Charge State",
-                Self::battery_charge_state_summary(battery),
-            ),
-            ("󰚥", "AC Adapter", Self::battery_ac_summary(battery)),
-            (
-                "󱐋",
-                "Charge / Draw Power",
-                Self::battery_power_summary(battery),
-            ),
-            (
-                "󱞊",
-                "Charge Thresholds",
-                Self::battery_threshold_summary(battery),
-            ),
-        ]
-    }
-
-    #[cfg(test)]
-    fn control_center_device_items(
-        controls: &crate::services::controls::ControlsSnapshot,
-    ) -> Vec<ControlCenterDeviceItem> {
-        let output_summary = if controls.audio.muted {
-            "Muted".to_string()
-        } else {
-            format!("{}% output", controls.audio.volume)
-        };
-        let mic_summary = if controls.mic.muted {
-            "Muted".to_string()
-        } else {
-            format!("{}% input", controls.mic.volume)
-        };
-        let bluetooth_summary = if controls.bluetooth_enabled
-            && !controls.bluetooth_devices.connected_devices.is_empty()
-        {
-            format!(
-                "{} connected",
-                controls.bluetooth_devices.connected_devices.len()
-            )
-        } else if controls.bluetooth_enabled
-            && !controls.bluetooth_devices.device_details.is_empty()
-        {
-            format!("{} known", controls.bluetooth_devices.device_details.len())
-        } else if controls.bluetooth_enabled {
-            "Adapter enabled".to_string()
-        } else {
-            "Adapter disabled".to_string()
-        };
-
-        vec![
-            ControlCenterDeviceItem {
-                icon: "",
-                label: "Speakers",
-                value: output_summary,
-                detail: controls
-                    .audio_devices
-                    .output_route
-                    .clone()
-                    .or_else(|| Some("No output route discovered".to_string())),
-            },
-            ControlCenterDeviceItem {
-                icon: "",
-                label: "Microphone",
-                value: mic_summary,
-                detail: controls
-                    .audio_devices
-                    .input_route
-                    .clone()
-                    .or_else(|| Some("No input route discovered".to_string())),
-            },
-            ControlCenterDeviceItem {
-                icon: "󰂯",
-                label: "Bluetooth",
-                value: bluetooth_summary,
-                detail: if controls.bluetooth_devices.connected_devices.is_empty() {
-                    None
-                } else {
-                    Some(controls.bluetooth_devices.connected_devices.join(", "))
-                },
-            },
-        ]
-    }
-
-    fn control_center_bluetooth_device_cards(
-        bluetooth: &crate::services::controls::BluetoothDeviceSummary,
-    ) -> Vec<popups::bluetooth_devices::BluetoothDeviceCard> {
-        bluetooth
-            .device_details
-            .iter()
-            .map(|device| {
-                let summary = match (device.connected, device.battery_percent) {
-                    (true, Some(percent)) => format!("Connected • Battery {percent}%"),
-                    (true, None) => "Connected".to_string(),
-                    (false, Some(percent)) => format!("Disconnected • Battery {percent}%"),
-                    (false, None) => "Disconnected".to_string(),
-                };
-                let detail_parts = std::iter::once(device.address.clone())
-                    .chain(
-                        (!device.audio_profiles.is_empty())
-                            .then(|| device.audio_profiles.join(" • ")),
-                    )
-                    .collect::<Vec<_>>();
-                let detail = (!detail_parts.is_empty()).then(|| detail_parts.join(" • "));
-                let mut badges = vec![if device.connected {
-                    "CONNECTED".to_string()
-                } else {
-                    "DISCONNECTED".to_string()
-                }];
-                if device.paired {
-                    badges.push("PAIRED".to_string());
-                }
-                if device.trusted {
-                    badges.push("TRUSTED".to_string());
-                }
-                if let Some(percent) = device.battery_percent {
-                    badges.push(format!("BAT {percent}%"));
-                }
-
-                popups::bluetooth_devices::BluetoothDeviceCard {
-                    address: device.address.clone(),
-                    label: device.name.clone(),
-                    summary,
-                    detail,
-                    badges,
-                    connected: device.connected,
-                    paired: device.paired,
-                    trusted: device.trusted,
-                    is_new: false,
-                }
-            })
-            .collect()
-    }
-
-    fn bluetooth_pill_summary(
-        controls: &crate::services::controls::ControlsSnapshot,
-    ) -> Option<String> {
-        if !controls.bluetooth_enabled {
-            return None;
-        }
-
-        let connected = controls.bluetooth_devices.connected_devices.len();
-        if connected > 0 {
-            Some(connected.to_string())
-        } else {
-            None
-        }
-    }
-
-    fn audio_route_popup_items(
-        routes: &[crate::services::controls::AudioRouteInfo],
-        opposite_routes: &[crate::services::controls::AudioRouteInfo],
-        current: Option<&str>,
-        capability_label: &'static str,
-        unavailable_label: &'static str,
-    ) -> Vec<popups::audio_routes::AudioRoutePopupItem> {
-        if routes.is_empty() {
-            return vec![popups::audio_routes::AudioRoutePopupItem {
-                id: String::new(),
-                label: unavailable_label.to_string(),
-                icon: "󰖪",
-                capability_label,
-                origin_label: "N/A",
-                profile_label: "N/A",
-                status_label: "UNAVAILABLE",
-                warning_label: Some("WHY"),
-                detail: Self::audio_route_unavailable_detail(opposite_routes, capability_label),
-                is_default: false,
-                available: false,
-            }];
-        }
-
-        routes
-            .iter()
-            .map(|route| {
-                let is_default = current == Some(route.name.as_str());
-                audio_routes::AudioRoutePopupItem {
-                    id: route.id.clone(),
-                    label: route.name.clone(),
-                    icon: Self::audio_route_origin_icon(route.origin),
-                    capability_label,
-                    origin_label: route.origin.badge_label(),
-                    profile_label: Self::audio_route_profile_label(route),
-                    status_label: if is_default { "ACTIVE" } else { "AVAILABLE" },
-                    warning_label: Self::audio_route_warning_label(route),
-                    detail: Self::audio_route_detail(route),
-                    is_default,
-                    available: true,
-                }
-            })
-            .collect()
-    }
-
-    fn audio_route_origin_icon(
-        origin: crate::services::controls::AudioRouteOrigin,
-    ) -> &'static str {
-        match origin {
-            crate::services::controls::AudioRouteOrigin::Bluetooth => "󰂯",
-            crate::services::controls::AudioRouteOrigin::Usb => "󰕓",
-            crate::services::controls::AudioRouteOrigin::Internal => "󰓃",
-            crate::services::controls::AudioRouteOrigin::Hdmi => "󰡁",
-            crate::services::controls::AudioRouteOrigin::Virtual => "󰕮",
-            crate::services::controls::AudioRouteOrigin::Unknown => "󰟢",
-        }
-    }
-
-    fn current_audio_route_summary(
-        routes: &[crate::services::controls::AudioRouteInfo],
-        current: Option<&str>,
-        empty_label: &'static str,
-    ) -> String {
-        match current {
-            Some(current_name) => routes
-                .iter()
-                .find(|route| route.name == current_name)
-                .map(|route| format!("{} • {}", route.name, Self::audio_route_detail(route)))
-                .unwrap_or_else(|| format!("{current_name} • Active default")),
-            None => empty_label.to_string(),
-        }
-    }
-
-    fn audio_route_profile_label(
-        route: &crate::services::controls::AudioRouteInfo,
-    ) -> &'static str {
-        let lower = route.name.to_ascii_lowercase();
-        match route.origin {
-            crate::services::controls::AudioRouteOrigin::Bluetooth => {
-                if lower.contains("a2dp") {
-                    "A2DP"
-                } else if lower.contains("handsfree") || lower.contains("hfp") {
-                    "HFP"
-                } else if lower.contains("headset") || lower.contains("hsp") {
-                    "HSP"
-                } else {
-                    "BT"
-                }
-            }
-            crate::services::controls::AudioRouteOrigin::Usb => "USB",
-            crate::services::controls::AudioRouteOrigin::Internal => {
-                if lower.contains("mic") || lower.contains("microphone") {
-                    "MIC"
-                } else {
-                    "ANALOG"
-                }
-            }
-            crate::services::controls::AudioRouteOrigin::Hdmi => "DIGITAL",
-            crate::services::controls::AudioRouteOrigin::Virtual => "VIRTUAL",
-            crate::services::controls::AudioRouteOrigin::Unknown => "UNKNOWN",
-        }
-    }
-
-    fn audio_route_latency_label(
-        route: &crate::services::controls::AudioRouteInfo,
-    ) -> &'static str {
-        let lower = route.name.to_ascii_lowercase();
-        match route.origin {
-            crate::services::controls::AudioRouteOrigin::Bluetooth => {
-                if lower.contains("a2dp") {
-                    "Higher-latency media path"
-                } else if lower.contains("handsfree")
-                    || lower.contains("hfp")
-                    || lower.contains("headset")
-                    || lower.contains("hsp")
-                {
-                    "Low-latency call path"
-                } else {
-                    "Wireless path"
-                }
-            }
-            crate::services::controls::AudioRouteOrigin::Usb => "Low-latency external path",
-            crate::services::controls::AudioRouteOrigin::Internal => "Integrated device path",
-            crate::services::controls::AudioRouteOrigin::Hdmi => "Display audio path",
-            crate::services::controls::AudioRouteOrigin::Virtual => "Software-routed path",
-            crate::services::controls::AudioRouteOrigin::Unknown => "Latency unknown",
-        }
-    }
-
-    fn audio_route_warning_label(
-        route: &crate::services::controls::AudioRouteInfo,
-    ) -> Option<&'static str> {
-        let lower = route.name.to_ascii_lowercase();
-        match route.origin {
-            crate::services::controls::AudioRouteOrigin::Bluetooth => {
-                if lower.contains("a2dp") {
-                    Some("NO MIC")
-                } else if lower.contains("handsfree")
-                    || lower.contains("hfp")
-                    || lower.contains("headset")
-                    || lower.contains("hsp")
-                {
-                    Some("LOW FIDELITY")
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn audio_route_conflict_detail(
-        route: &crate::services::controls::AudioRouteInfo,
-    ) -> Option<&'static str> {
-        let lower = route.name.to_ascii_lowercase();
-        match route.origin {
-            crate::services::controls::AudioRouteOrigin::Bluetooth => {
-                if lower.contains("a2dp") {
-                    Some("microphone path unavailable")
-                } else if lower.contains("handsfree")
-                    || lower.contains("hfp")
-                    || lower.contains("headset")
-                    || lower.contains("hsp")
-                {
-                    Some("reduced media quality")
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn audio_route_detail(route: &crate::services::controls::AudioRouteInfo) -> String {
-        let mut detail = format!(
-            "{} • {}",
-            route.origin.summary_label(),
-            Self::audio_route_latency_label(route)
-        );
-        if let Some(conflict) = Self::audio_route_conflict_detail(route) {
-            detail.push_str(" • ");
-            detail.push_str(conflict);
-        }
-        detail
-    }
-
-    fn audio_route_unavailable_detail(
-        opposite_routes: &[crate::services::controls::AudioRouteInfo],
-        capability_label: &'static str,
-    ) -> String {
-        let has_bt_media = opposite_routes.iter().any(|route| {
-            route.origin == crate::services::controls::AudioRouteOrigin::Bluetooth
-                && route.name.to_ascii_lowercase().contains("a2dp")
-        });
-        let has_bt_call = opposite_routes.iter().any(|route| {
-            route.origin == crate::services::controls::AudioRouteOrigin::Bluetooth && {
-                let lower = route.name.to_ascii_lowercase();
-                lower.contains("handsfree")
-                    || lower.contains("hfp")
-                    || lower.contains("headset")
-                    || lower.contains("hsp")
-            }
-        });
-
-        match capability_label {
-            "SOURCE" if has_bt_media => {
-                "SOURCE unavailable: Bluetooth media profile hides microphone path".to_string()
-            }
-            "SINK" if has_bt_call => {
-                "SINK unavailable: Bluetooth call profile did not expose media output".to_string()
-            }
-            _ if has_bt_media || has_bt_call => {
-                format!("{capability_label} unavailable on active Bluetooth profile")
-            }
-            _ => format!("{capability_label} unavailable on current runtime"),
-        }
-    }
-
-    fn bluetooth_scan_status_summary(state: &BluetoothScanState) -> String {
-        match state {
-            BluetoothScanState::Idle => "Idle".to_string(),
-            BluetoothScanState::Scanning { remaining_secs, .. } => {
-                if *remaining_secs == 0 {
-                    "Finishing scan...".to_string()
-                } else {
-                    format!("Scanning ({remaining_secs}s left)")
-                }
-            }
-            BluetoothScanState::Completed {
-                total_devices,
-                newly_discovered_addresses,
-                remaining_secs,
-            } => {
-                if newly_discovered_addresses.is_empty() {
-                    format!(
-                        "{total_devices} devices known; no new devices • idle in {remaining_secs}s"
-                    )
-                } else {
-                    format!(
-                        "{total_devices} devices known; {} newly discovered • idle in {remaining_secs}s",
-                        newly_discovered_addresses.len(),
-                    )
-                }
-            }
-        }
-    }
-
-    fn bluetooth_device_is_new(scan_state: &BluetoothScanState, address: &str) -> bool {
-        match scan_state {
-            BluetoothScanState::Completed {
-                newly_discovered_addresses,
-                ..
-            } => newly_discovered_addresses
-                .iter()
-                .any(|candidate| candidate == address),
-            _ => false,
-        }
-    }
-
-    #[cfg(test)]
-    fn audio_route_button_label(controls: &crate::services::controls::ControlsSnapshot) -> String {
-        let has_output = !controls.audio_devices.output_routes.is_empty();
-        let has_input = !controls.audio_devices.input_routes.is_empty();
-        match (has_output, has_input) {
-            (true, true) => "Audio Routes".to_string(),
-            (true, false) | (false, true) => "Partial Routes".to_string(),
-            (false, false) => "Routes Unavailable".to_string(),
-        }
-    }
-
-    fn display_summary_rows(
-        wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
-    ) -> Vec<(&'static str, &'static str, String)> {
-        vec![
-            (
-                "DSP",
-                "Display Mode",
-                wayland_snapshot.display_mode_summary(),
-            ),
-            (
-                "TOP",
-                "Display Topology",
-                wayland_snapshot.output_topology_summary(),
-            ),
-            (
-                "SCL",
-                "Display Scale",
-                wayland_snapshot.output_scale_summary(),
-            ),
-            ("OUT", "Display Outputs", wayland_snapshot.output_summary()),
-        ]
-    }
-
-    fn display_popup_output_cards(
-        wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
-    ) -> Vec<popups::displays::DisplayOutputCard> {
-        if wayland_snapshot.outputs.is_empty() {
-            return vec![popups::displays::DisplayOutputCard {
-                label: if wayland_snapshot.available {
-                    "No outputs".to_string()
-                } else {
-                    "Wayland unavailable".to_string()
-                },
-                summary: wayland_snapshot
-                    .unavailable_reason
-                    .clone()
-                    .unwrap_or_else(|| "No wl_output state available".to_string()),
-                badges: Vec::new(),
-            }];
-        }
-
-        wayland_snapshot
-            .outputs
-            .iter()
-            .map(|output| {
-                let mut badges = vec![if output.is_internal() {
-                    "INTERNAL".to_string()
-                } else {
-                    "EXTERNAL".to_string()
-                }];
-                if let (Some(width), Some(height)) = (output.width, output.height) {
-                    badges.push(format!("{width}x{height}"));
-                }
-                if let Some(refresh_mhz) = output.refresh_mhz {
-                    let refresh_hz = refresh_mhz as f64 / 1000.0;
-                    if (refresh_hz.fract() - 0.0).abs() < f64::EPSILON {
-                        badges.push(format!("{refresh_hz:.0}Hz"));
-                    } else {
-                        badges.push(format!("{refresh_hz:.1}Hz"));
-                    }
-                }
-                if let Some(scale_factor) = output.scale_factor.filter(|scale| *scale > 0) {
-                    badges.push(format!("{scale_factor}x SCALE"));
-                }
-
-                popups::displays::DisplayOutputCard {
-                    label: output.label(),
-                    summary: output.detail_label(),
-                    badges,
-                }
-            })
-            .collect()
-    }
-
-    #[cfg(test)]
-    fn display_pill_summary(
-        wayland_snapshot: &crate::services::wayland_runtime::WaylandRuntimeSnapshot,
-    ) -> Option<(&'static str, String)> {
-        if !wayland_snapshot.available {
-            return None;
-        }
-
-        let mode = wayland_snapshot.display_mode_summary();
-        let icon = match mode.as_str() {
-            "Laptop" => "󰌢",
-            "Docked" => "󰍹",
-            "Hybrid" => "󰍺",
-            "Headless" => "󰹑",
-            _ => "󰍹",
-        };
-        Some((icon, mode))
-    }
-
     fn coalescing_diagnostics(&self) -> AppCoalescingDiagnostics {
         AppCoalescingDiagnostics {
             pending_control_flushes: self.controls_coalescing.pending_count(),
@@ -1247,21 +820,6 @@ impl ThinkPadBar {
             inflight_background_requests: self.background_request_coalescing.inflight_count(),
             queued_background_requests: self.background_request_coalescing.queued_count(),
         }
-    }
-
-    fn set_battery_percent_string(&mut self, value: u8) {
-        self.battery_str.clear();
-        let _ = write!(&mut self.battery_str, "{}%", value);
-    }
-
-    fn set_audio_summary_string(&mut self) {
-        self.audio_str.clear();
-        let _ = write!(&mut self.audio_str, "{}%", self.controls.audio.volume);
-    }
-
-    fn sync_control_summary_strings(&mut self) {
-        self.set_battery_percent_string(self.controls.battery.capacity);
-        self.set_audio_summary_string();
     }
 
     fn spawn_controls_refresh(
@@ -1294,6 +852,19 @@ impl ThinkPadBar {
             async move { controls_service.execute(command).await },
             Message::ControlsCommandCompleted,
         )
+    }
+
+    fn preview_controls_command(&mut self, command: &crate::services::controls::ControlsCommand) {
+        self.controls_service.preview_command(command);
+        self.controls = self.controls_service.snapshot().clone();
+    }
+
+    fn preview_and_execute_controls_command(
+        &mut self,
+        command: crate::services::controls::ControlsCommand,
+    ) -> Task<Message> {
+        self.preview_controls_command(&command);
+        self.execute_controls_command(command)
     }
 
     fn schedule_coalesced_control_flush(
@@ -1452,23 +1023,29 @@ impl ThinkPadBar {
             let session_service = crate::services::session::SessionService::new();
             let system_info_service = crate::services::system_info::SystemInfoService::new();
             let tray_ui_service = crate::services::tray_ui::TrayUiService::new();
+            let audio_visualizer_service =
+                crate::services::audio_visualizer::AudioVisualizerService::new(
+                    crate::services::audio_visualizer::AudioVisualizerConfig::from_appearance(
+                        &cfg.appearance.audio_visualizer,
+                    ),
+                );
 
             // Try to connect to D-Bus synchronously for initialization if possible,
             // or just let it be None and connect later.
             // Since we are in a tokio-enabled FnOnce, we can't easily await here without block_on.
             // But iced's run_with expects a Task.
 
-            let mut app = Self {
+            let app = Self {
                 config: cfg,
                 dbus_conn: None,
                 clock: Local::now().format("%a %d %b %H:%M").to_string(),
                 controls: controls_snapshot,
+                audio_visualizer:
+                    crate::services::audio_visualizer::AudioVisualizerSnapshot::default(),
                 network_service,
                 idle_inhibitor_service,
                 wayland_runtime_service,
                 popup: Popup::None,
-                battery_str: String::new(),
-                audio_str: String::new(),
                 main_window_id: Some(main_id),
                 popup_window_id: Some(popup_id),
                 calendar_offset: 0,
@@ -1478,6 +1055,7 @@ impl ThinkPadBar {
                 session_service,
                 system_info_service,
                 tray_ui_service,
+                audio_visualizer_service,
                 bluetooth_scan_state: BluetoothScanState::default(),
                 controls_coalescing: ControlsCoalescing::default(),
                 controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(
@@ -1489,7 +1067,6 @@ impl ThinkPadBar {
                 show_debug_overlay: false,
                 debug_ui_enabled: Self::debug_ui_enabled(),
             };
-            app.sync_control_summary_strings();
 
             (app, Task::batch(vec![main_task, popup_task]))
         }
@@ -1524,8 +1101,10 @@ impl ThinkPadBar {
                     }
                     BluetoothScanState::Idle => {}
                 }
-                self.system_info_service
-                    .refresh(crate::services::system_info::SystemInfoRefreshKind::Fast);
+                if self.system_info_fast_updates_enabled() {
+                    self.system_info_service
+                        .refresh(crate::services::system_info::SystemInfoRefreshKind::Fast);
+                }
                 return Task::none();
             }
             Message::RefreshControls(kind) => {
@@ -1571,7 +1150,6 @@ impl ThinkPadBar {
                         remaining_secs: BLUETOOTH_SCAN_RESULT_WINDOW_SECS,
                     };
                 }
-                self.sync_control_summary_strings();
                 if self.controls_refresh_coalescing.complete(&kind) {
                     return self.spawn_controls_refresh(kind);
                 }
@@ -1630,6 +1208,9 @@ impl ThinkPadBar {
                     return self.request_wifi_info_sync();
                 }
             }
+            Message::AudioVisualizerFrame(snapshot) => {
+                self.audio_visualizer = snapshot;
+            }
             Message::WaylandRuntimeEvent(
                 crate::services::wayland_runtime::WaylandRuntimeEvent::SnapshotUpdated(snapshot),
             ) => {
@@ -1638,31 +1219,22 @@ impl ThinkPadBar {
             Message::PopupWindowUnfocused(window_id) => {
                 if Self::should_close_popup_on_unfocus(self.popup_window_id, &self.popup, window_id)
                 {
-                    self.popup = Popup::None;
-                    self.tray_ui_service.close_transient_ui();
-                    self.session_service.close_transient_ui();
-                    self.network_service.close_transient_ui();
-                    self.calendar_offset = 0;
-                    return Task::batch(self.popup_hide_tasks());
+                    return Task::batch(
+                        self.apply_popup_transition_plan(PopupTransitionPlan::close_on_unfocus()),
+                    );
                 }
             }
             Message::OpenLauncher => {
-                let session_service = self.session_service.clone();
-                return Task::perform(
-                    async move {
-                        session_service
-                            .execute(crate::services::session::SessionCommand::OpenLauncher)
-                            .await
-                    },
-                    Message::SessionCommandCompleted,
+                return update_coordinator::perform_session_command(
+                    self.session_service.clone(),
+                    crate::services::session::SessionCommand::OpenLauncher,
                 );
             }
-            Message::SessionCommandCompleted(follow_up) => match follow_up {
-                crate::services::session::SessionFollowUp::None => {}
-                crate::services::session::SessionFollowUp::RefreshCompositor => {
+            Message::SessionCommandCompleted(follow_up) => {
+                if update_coordinator::session_follow_up_requests_refresh(follow_up) {
                     return self.request_compositor_refresh();
                 }
-            },
+            }
             Message::ToggleDebugOverlay => {
                 if self.debug_ui_enabled {
                     self.show_debug_overlay = !self.show_debug_overlay;
@@ -1692,67 +1264,16 @@ impl ThinkPadBar {
                 );
             }
             Message::TogglePopup(target) => {
-                let mut tasks = Vec::new();
-
-                // Refresh fast-changing control-center surfaces on open so the popup does not
-                // rely on an arbitrary slow-tick snapshot.
-                if (target == Popup::Controls || target == Popup::AudioRoutes)
-                    && self.popup != target
-                {
-                    tasks.push(self.request_controls_refresh(
-                        crate::services::controls::ControlsRefreshKind::AudioMic,
-                    ));
-                }
-                if (target == Popup::Connectivity || target == Popup::BluetoothDevices)
-                    && self.popup != target
-                {
-                    tasks.push(self.request_controls_refresh(
-                        crate::services::controls::ControlsRefreshKind::Bluetooth,
-                    ));
-                }
-                if target == Popup::Power && self.popup != target {
-                    tasks.push(self.request_controls_refresh(
-                        crate::services::controls::ControlsRefreshKind::BatteryPower,
-                    ));
-                }
-                if (target == Popup::Stats || target == Popup::SystemMonitor)
-                    && self.popup != target
-                {
-                    self.system_info_service
-                        .refresh(crate::services::system_info::SystemInfoRefreshKind::Fast);
-                }
-
-                if self.popup == target {
-                    self.popup = Popup::None;
-                    self.tray_ui_service.close_transient_ui();
-                    self.session_service.close_transient_ui();
-                    self.network_service.close_transient_ui();
-                    if target == Popup::BluetoothDevices {
-                        self.bluetooth_scan_state = BluetoothScanState::Idle;
-                    }
-                    if target == Popup::Calendar {
-                        self.calendar_offset = 0;
-                    }
-                    tasks.extend(self.popup_hide_tasks());
-                } else {
-                    let is_calendar = target == Popup::Calendar;
-                    let is_bluetooth = target == Popup::BluetoothDevices;
-                    self.popup = target.clone();
-                    if is_bluetooth {
-                        self.bluetooth_scan_state = BluetoothScanState::Idle;
-                    }
-                    if is_calendar {
-                        self.calendar_offset = 0;
-                    }
-                    tasks.extend(self.popup_show_tasks(target));
-                }
-                return Task::batch(tasks);
+                return Task::batch(
+                    self.apply_popup_transition_plan(PopupTransitionPlan::toggle(
+                        &self.popup,
+                        target,
+                    )),
+                );
             }
             Message::SetVolume(val) => {
                 let command = crate::services::controls::ControlsCommand::SetVolume(val);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
-                self.sync_control_summary_strings();
+                self.preview_controls_command(&command);
                 let generation = self
                     .controls_coalescing
                     .push(CoalescedControlKind::Volume, val);
@@ -1775,14 +1296,11 @@ impl ThinkPadBar {
             Message::SetAudioOutputRoute(route_id) => {
                 let command =
                     crate::services::controls::ControlsCommand::SetAudioOutputRoute(route_id);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                return self.preview_and_execute_controls_command(command);
             }
             Message::SetMicVolume(val) => {
                 let command = crate::services::controls::ControlsCommand::SetMicVolume(val);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
+                self.preview_controls_command(&command);
                 let generation = self
                     .controls_coalescing
                     .push(CoalescedControlKind::MicVolume, val);
@@ -1805,14 +1323,11 @@ impl ThinkPadBar {
             Message::SetAudioInputRoute(route_id) => {
                 let command =
                     crate::services::controls::ControlsCommand::SetAudioInputRoute(route_id);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                return self.preview_and_execute_controls_command(command);
             }
             Message::SetBrightness(val) => {
                 let command = crate::services::controls::ControlsCommand::SetBrightness(val);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
+                self.preview_controls_command(&command);
                 let generation = self
                     .controls_coalescing
                     .push(CoalescedControlKind::Brightness, val);
@@ -1847,102 +1362,42 @@ impl ThinkPadBar {
             }
             Message::SetFanLevel(level) => {
                 let command = crate::services::controls::ControlsCommand::SetFanLevel(level);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                return self.preview_and_execute_controls_command(command);
             }
             Message::SetPowerProfile(prof) => {
                 let command = crate::services::controls::ControlsCommand::SetPowerProfile(prof);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                return self.preview_and_execute_controls_command(command);
             }
             Message::CyclePerformanceProfile => {
                 self.config.performance.cycle_profile_runtime();
             }
             Message::NetworkCommand(command) => {
-                match self
-                    .network_service
-                    .handle_command(command, self.dbus_conn.is_some())
-                {
-                    crate::services::network::NetworkFollowUp::Scan => {
-                        if let Some(conn) = &self.dbus_conn {
-                            let conn = conn.clone();
-                            let network_service = self.network_service.clone();
-                            return Task::perform(
-                                async move { network_service.scan_networks(&conn).await },
-                                |networks| {
-                                    Message::NetworkEvent(
-                                        crate::services::network::NetworkEvent::ScanCompleted(
-                                            networks,
-                                        ),
-                                    )
-                                },
-                            );
-                        }
-                    }
-                    crate::services::network::NetworkFollowUp::Connect { ssid, passphrase } => {
-                        if let Some(conn) = &self.dbus_conn {
-                            let conn = conn.clone();
-                            let network_service = self.network_service.clone();
-                            return Task::perform(
-                                async move {
-                                    let success = network_service
-                                        .connect_network(&conn, ssid.clone(), passphrase)
-                                        .await;
-                                    crate::services::network::NetworkEvent::ConnectCompleted {
-                                        ssid,
-                                        success,
-                                    }
-                                },
-                                Message::NetworkEvent,
-                            );
-                        }
-                    }
-                    crate::services::network::NetworkFollowUp::TogglePower(enable) => {
-                        if let Some(conn) = &self.dbus_conn {
-                            let conn = conn.clone();
-                            let network_service = self.network_service.clone();
-                            return Task::perform(
-                                async move {
-                                    network_service.toggle_wifi(&conn, enable).await;
-                                    network_service.get_wifi_info(&conn).await
-                                },
-                                |info| {
-                                    Message::NetworkEvent(
-                                        crate::services::network::NetworkEvent::WifiInfoSynced(
-                                            info,
-                                        ),
-                                    )
-                                },
-                            );
-                        }
-                    }
-                    crate::services::network::NetworkFollowUp::None => {}
-                }
+                let plan = update_coordinator::NetworkRuntimePlan::from(
+                    self.network_service
+                        .handle_command(command, self.dbus_conn.is_some()),
+                );
+                return update_coordinator::perform_network_plan(
+                    self.network_service.clone(),
+                    self.dbus_conn.clone(),
+                    plan,
+                );
             }
             Message::NetworkEvent(event) => {
                 self.network_service.handle_event(event);
             }
             Message::ToggleBluetooth(enable) => {
                 let command = crate::services::controls::ControlsCommand::ToggleBluetooth(enable);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                return self.preview_and_execute_controls_command(command);
             }
             Message::ConnectBluetoothDevice(address) => {
                 let command =
                     crate::services::controls::ControlsCommand::ConnectBluetoothDevice(address);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                return self.preview_and_execute_controls_command(command);
             }
             Message::DisconnectBluetoothDevice(address) => {
                 let command =
                     crate::services::controls::ControlsCommand::DisconnectBluetoothDevice(address);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                return self.preview_and_execute_controls_command(command);
             }
             Message::ScanBluetoothDevices => {
                 let baseline_addresses = self
@@ -1969,29 +1424,23 @@ impl ThinkPadBar {
             Message::PairBluetoothDevice(address) => {
                 let command =
                     crate::services::controls::ControlsCommand::PairBluetoothDevice(address);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                return self.preview_and_execute_controls_command(command);
             }
             Message::TrustBluetoothDevice(address) => {
                 let command =
                     crate::services::controls::ControlsCommand::TrustBluetoothDevice(address);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                return self.preview_and_execute_controls_command(command);
             }
             Message::RemoveBluetoothDevice(address) => {
                 let command =
                     crate::services::controls::ControlsCommand::RemoveBluetoothDevice(address);
-                self.controls_service.preview_command(&command);
-                self.controls = self.controls_service.snapshot().clone();
-                return self.execute_controls_command(command);
+                return self.preview_and_execute_controls_command(command);
             }
             Message::ToggleIdleInhibitor => {
                 self.idle_inhibitor_service.toggle();
             }
             Message::OpenOverskride => {
-                return self.execute_controls_command(
+                return self.preview_and_execute_controls_command(
                     crate::services::controls::ControlsCommand::OpenOverskride,
                 );
             }
@@ -2012,28 +1461,20 @@ impl ThinkPadBar {
                 self.calendar_offset += 1;
             }
             Message::PowerAction(action) => {
-                let command = match action {
-                    PowerAction::Lock => crate::services::session::SessionCommand::Lock,
-                    PowerAction::Sleep => crate::services::session::SessionCommand::Sleep,
-                    PowerAction::Hibernate => crate::services::session::SessionCommand::Hibernate,
-                    PowerAction::Restart => crate::services::session::SessionCommand::Restart,
-                    PowerAction::Shutdown => crate::services::session::SessionCommand::Shutdown,
-                    PowerAction::Logout => crate::services::session::SessionCommand::Logout,
-                };
-                self.popup = Popup::None;
-                self.session_service.close_transient_ui();
-                let mut tasks = self.popup_hide_tasks();
-                let session_service = self.session_service.clone();
-                tasks.push(Task::perform(
-                    async move { session_service.execute(command).await },
-                    Message::SessionCommandCompleted,
+                let command = update_coordinator::session_command_from_power_action(action);
+                let mut tasks =
+                    self.apply_popup_transition_plan(PopupTransitionPlan::close_for_power_action());
+                tasks.push(update_coordinator::perform_session_command(
+                    self.session_service.clone(),
+                    command,
                 ));
                 return Task::batch(tasks);
             }
             Message::TrayEvent(msg) => {
                 if self.tray_ui_service.handle_runtime_message(msg) {
-                    self.popup = Popup::None;
-                    return Task::batch(self.popup_hide_tasks());
+                    return Task::batch(
+                        self.apply_popup_transition_plan(PopupTransitionPlan::close_popup()),
+                    );
                 }
             }
             Message::TrayItemClicked(id) => {
@@ -2042,35 +1483,31 @@ impl ThinkPadBar {
                     ..
                 }) = self.tray_ui_service.handle_primary_click(&id)
                 {
-                    let id_for_result = id.clone();
-                    let compositor_service = self.compositor_service.clone();
-                    return Task::perform(
-                        async move {
-                            for c in candidates {
-                                if compositor_service.find_and_switch_to_app(c).await {
-                                    return true;
-                                }
-                            }
-                            false
-                        },
-                        move |found| Message::TrayItemClickResolved(id_for_result.clone(), found),
+                    return update_coordinator::perform_tray_candidate_resolution(
+                        self.compositor_service.clone(),
+                        candidates,
+                        id,
                     );
                 }
             }
             Message::TrayItemRightClicked(id) => {
-                match self
-                    .tray_ui_service
-                    .handle_secondary_click(id.clone(), self.compositor_service.cursor_position())
-                {
-                    crate::services::tray_ui::TrayUiSecondaryAction::OpenMenu => {
-                        self.popup = Popup::TrayMenu;
-                        return Task::batch(self.popup_show_tasks(self.popup.clone()));
+                match update_coordinator::tray_popup_plan_from_secondary(
+                    self.tray_ui_service.handle_secondary_click(
+                        id.clone(),
+                        self.compositor_service.cursor_position(),
+                    ),
+                ) {
+                    update_coordinator::TrayPopupPlan::OpenMenu => {
+                        return Task::batch(
+                            self.apply_popup_transition_plan(PopupTransitionPlan::open_tray_menu()),
+                        );
                     }
-                    crate::services::tray_ui::TrayUiSecondaryAction::CloseMenu => {
-                        self.popup = Popup::None;
-                        return Task::batch(self.popup_hide_tasks());
+                    update_coordinator::TrayPopupPlan::CloseMenu => {
+                        return Task::batch(
+                            self.apply_popup_transition_plan(PopupTransitionPlan::close_popup()),
+                        );
                     }
-                    crate::services::tray_ui::TrayUiSecondaryAction::ActivateSecondary => {
+                    update_coordinator::TrayPopupPlan::None => {
                         return Task::none();
                     }
                 }
@@ -2081,17 +1518,18 @@ impl ThinkPadBar {
                 }
             }
             Message::TrayMenuItemSelected(menu_item_id) => {
-                match self.tray_ui_service.handle_menu_selection(menu_item_id) {
-                    crate::services::tray_ui::TrayUiSelectionAction::CloseMenu => {
-                        self.popup = Popup::None;
-                        return Task::batch(self.popup_hide_tasks());
+                let cursor = self.tray_ui_service.menu_cursor();
+                match update_coordinator::tray_popup_plan_from_selection(
+                    self.tray_ui_service
+                        .handle_menu_selection(menu_item_id, cursor),
+                ) {
+                    update_coordinator::TrayPopupPlan::CloseMenu => {
+                        return Task::batch(
+                            self.apply_popup_transition_plan(PopupTransitionPlan::close_popup()),
+                        )
                     }
-                    crate::services::tray_ui::TrayUiSelectionAction::ActivateMenuItem {
-                        ..
-                    } => {
-                        self.popup = Popup::None;
-                        return Task::batch(self.popup_hide_tasks());
-                    }
+                    update_coordinator::TrayPopupPlan::None
+                    | update_coordinator::TrayPopupPlan::OpenMenu => {}
                 }
             }
         }
@@ -2113,2240 +1551,38 @@ impl ThinkPadBar {
     }
 
     fn view_main_bar(&self) -> Element<'_, Message, Theme, iced::Renderer> {
-        let compositor = self.compositor_service.snapshot();
-        // Build Workspaces widget
-        let mut ws_row = Row::new().spacing(6).align_y(Alignment::Center);
-        for ws in &compositor.workspaces {
-            let ws_id = ws.id;
-            let ws_name = ws.name.clone();
-            let is_active = ws.active;
-            let is_special = Self::is_special_workspace(&ws.name);
-
-            let btn = button(text(ws.name.clone()).size(12))
-                .padding(Padding::from([1, 6]))
-                .on_press(Message::SwitchWorkspace(ws_id, ws_name))
-                .style(move |_, _| {
-                    if is_active {
-                        let (bg, fg) = if is_special {
-                            (
-                                Color::from_rgb8(0xff, 0xa0, 0x3d),
-                                Color::from_rgb8(0x1a, 0x1b, 0x26),
-                            )
-                        } else {
-                            (
-                                Color::from_rgb8(0x7a, 0xa2, 0xf7),
-                                Color::from_rgb8(0x1a, 0x1b, 0x26),
-                            )
-                        };
-                        iced::widget::button::Style {
-                            background: Some(iced::Background::Color(Color {
-                                a: self.config.appearance.opacity,
-                                ..bg
-                            })), // Tokyo Night Blue
-                            text_color: fg,
-                            border: iced::Border {
-                                radius: 8.0.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }
-                    } else {
-                        let (bg, fg) = if is_special {
-                            (
-                                Color::from_rgb8(0x5f, 0x3a, 0x1f),
-                                Color::from_rgb8(0xff, 0xd1, 0x9a),
-                            )
-                        } else {
-                            (
-                                Color::from_rgb8(0x29, 0x2e, 0x42),
-                                Color::from_rgb8(0xc0, 0xca, 0xf5),
-                            )
-                        };
-                        iced::widget::button::Style {
-                            background: Some(iced::Background::Color(Color {
-                                a: self.config.appearance.opacity,
-                                ..bg
-                            })),
-                            text_color: fg,
-                            border: iced::Border {
-                                radius: 8.0.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }
-                    }
-                });
-            ws_row = ws_row.push(btn);
-        }
-        let mut tray_row = Row::new().spacing(6).align_y(Alignment::Center);
-        for (id, item) in self.tray_ui_service.items() {
-            let id_clone = id.clone();
-            let id_right = id.clone();
-            if let Some(handle) = &item.icon_handle {
-                tray_row = tray_row.push(
-                    mouse_area(
-                        image(handle.clone())
-                            .width(Length::Fixed(16.0))
-                            .height(Length::Fixed(16.0)),
-                    )
-                    .on_press(Message::TrayItemClicked(id_clone))
-                    .on_right_press(Message::TrayItemRightClicked(id_right)),
-                );
-            } else {
-                let label = item.fallback_label();
-                tray_row = tray_row.push(
-                    mouse_area(
-                        container(text(label).size(14))
-                            .width(Length::Fixed(16.0))
-                            .height(Length::Fixed(16.0))
-                            .align_x(iced::alignment::Horizontal::Center),
-                    )
-                    .on_press(Message::TrayItemClicked(id_clone))
-                    .on_right_press(Message::TrayItemRightClicked(id_right)),
-                );
-            }
-        }
-
-        let left = Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                button(text("").size(13))
-                    .padding(Padding::from([2, 8]))
-                    .on_press(Message::OpenLauncher)
-                    .style(|_, _| iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color {
-                            a: self.config.appearance.opacity,
-                            ..Color::from_rgb8(0x29, 0x2e, 0x42)
-                        })),
-                        text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                        border: iced::Border {
-                            radius: 10.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            )
-            .push(container(ws_row).width(Length::Fixed(280.0)));
-
-        // Center: Active Window Title
-        let center_title = Self::trunc_with_ellipsis(compositor.active_window.as_str(), 34);
-        let center_bg = if compositor.special_workspace_visible {
-            Color::from_rgb8(0x64, 0x2f, 0x37)
-        } else {
-            Color::from_rgb8(0x29, 0x2e, 0x42)
-        };
-        let center = container(
-            container(
-                text(center_title)
-                    .size(11)
-                    .style(|_| iced::widget::text::Style {
-                        color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                    }),
-            )
-            .padding(Padding::from([2, 12]))
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(Color {
-                    a: self.config.appearance.opacity,
-                    ..center_bg
-                })),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-        )
-        .width(Length::Shrink);
-
-        // Right side: Pills
-        let pill_bg = Color {
-            a: self.config.appearance.opacity,
-            ..Color::from_rgb8(0x29, 0x2e, 0x42)
-        };
-        let pill_fg = Color::from_rgb8(0xc0, 0xca, 0xf5);
-        let pill_border_radius = 12.0;
-
-        let sys_data = self.system_info_service.snapshot();
-        let cpu_summary = Self::cpu_usage_summary(sys_data);
-        let temp_summary = if sys_data.temp_str.trim().is_empty() {
-            format!("{}°C", sys_data.temp.round() as i32)
-        } else {
-            sys_data.temp_str.clone()
-        };
-        let temp_val = sys_data.temp.round() as i32;
-        let temp_color = if temp_val >= 80 {
-            Color::from_rgb8(0xf7, 0x76, 0x8e) // Red
-        } else if temp_val >= 60 {
-            Color::from_rgb8(0xe0, 0xaf, 0x68) // Yellow
-        } else {
-            pill_fg
-        };
-
-        let volume_icon = if self.controls.audio.muted || self.controls.audio.volume == 0 {
-            "󰝟"
-        } else {
-            ""
-        };
-        let mic_icon = if self.controls.mic.muted || self.controls.mic.volume == 0 {
-            "󰍭"
-        } else {
-            ""
-        };
-        let mic_percent = format!("{}%", self.controls.mic.volume);
-        let wifi_snapshot = self.network_service.snapshot();
-        let wifi_icon = if wifi_snapshot.wifi.enabled {
-            "󰖩"
-        } else {
-            "󰖪"
-        };
-        let bt_icon = if self.controls.bluetooth_enabled {
-            "󰂯"
-        } else {
-            "󰂲"
-        };
-        let idle_snapshot = self.idle_inhibitor_service.snapshot();
-
-        let bat_cap = self.controls.battery.capacity;
-        let bat_status = &self.controls.battery.status;
-
-        let (bat_icon, bat_color) = if bat_status.contains("Charging") {
-            ("󰂄", Color::from_rgb8(0x9e, 0xce, 0x6a)) // Green
-        } else if bat_status.contains("Full") || bat_status.contains("Not charging") {
-            ("", pill_fg) // Plug icon, default color
-        } else {
-            // Discharging
-            let icon = if bat_cap >= 90 {
-                "󰁹"
-            } else if bat_cap >= 80 {
-                "󰂂"
-            } else if bat_cap >= 70 {
-                "󰂁"
-            } else if bat_cap >= 60 {
-                "󰂀"
-            } else if bat_cap >= 50 {
-                "󰁿"
-            } else if bat_cap >= 40 {
-                "󰁾"
-            } else if bat_cap >= 30 {
-                "󰁽"
-            } else if bat_cap >= 20 {
-                "󰁼"
-            } else if bat_cap >= 10 {
-                "󰁻"
-            } else {
-                "󰁺"
-            };
-
-            let color = if bat_cap <= 10 {
-                Color::from_rgb8(0xf7, 0x76, 0x8e) // Red
-            } else if bat_cap <= 20 {
-                Color::from_rgb8(0xe0, 0xaf, 0x68) // Yellow
-            } else {
-                pill_fg
-            };
-            (icon, color)
-        };
-
-        let stats_pill = container(
-            Row::new()
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .push(text("").size(14))
-                .push(text(cpu_summary).size(14))
-                .push(
-                    text("")
-                        .size(14)
-                        .style(move |_| iced::widget::text::Style {
-                            color: Some(temp_color),
-                        }),
-                )
-                .push(
-                    text(temp_summary)
-                        .size(14)
-                        .style(move |_| iced::widget::text::Style {
-                            color: Some(temp_color),
-                        }),
-                )
-                .push(text("󰈐").size(14))
-                .push(text(self.controls.fan.speed.to_string()).size(14)),
-        )
-        .padding(Padding::from([4, 12]))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(pill_bg)),
-            text_color: Some(pill_fg),
-            border: iced::Border {
-                radius: pill_border_radius.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-
-        let (power_profile_label, power_profile_color) =
-            Self::power_profile_visual(&self.controls.power_profile);
-        let battery_pill = container({
-            let mut battery_row = Row::new()
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .push(
-                    text(bat_icon)
-                        .size(14)
-                        .style(move |_| iced::widget::text::Style {
-                            color: Some(bat_color),
-                        }),
-                )
-                .push(text(self.battery_str.as_str()).size(14).style(move |_| {
-                    iced::widget::text::Style {
-                        color: Some(bat_color),
-                    }
-                }))
-                .push(
-                    container(text(power_profile_label).size(13).style(move |_| {
-                        iced::widget::text::Style {
-                            color: Some(power_profile_color),
-                        }
-                    }))
-                    .height(Length::Fixed(16.0))
-                    .align_y(iced::alignment::Vertical::Center),
-                );
-
-            if idle_snapshot.enabled {
-                battery_row = battery_row.push(text("").size(13));
-            }
-
-            battery_row
-        })
-        .padding(Padding::from([4, 12]))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(pill_bg)),
-            text_color: Some(pill_fg),
-            border: iced::Border {
-                radius: pill_border_radius.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-
-        let controls_pill = container(
-            Row::new()
-                .spacing(3)
-                .align_y(Alignment::Center)
-                .push(
-                    mouse_area(
-                        Row::new()
-                            .spacing(2)
-                            .align_y(Alignment::Center)
-                            .push(text("󰃠").size(14))
-                            .push(text(self.controls.brightness.label.as_str()).size(14)),
-                    )
-                    .on_press(Message::TogglePopup(Popup::Controls))
-                    .on_scroll(|delta| Message::AdjustBrightnessBy(Self::scroll_direction(delta))),
-                )
-                .push(text("·").size(9).style(|_| iced::widget::text::Style {
-                    color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
-                }))
-                .push(
-                    mouse_area(
-                        Row::new()
-                            .spacing(2)
-                            .align_y(Alignment::Center)
-                            .push(text(volume_icon).size(14))
-                            .push(text(self.audio_str.as_str()).size(14)),
-                    )
-                    .on_press(Message::TogglePopup(Popup::Controls))
-                    .on_scroll(|delta| Message::AdjustVolumeBy(Self::scroll_direction(delta))),
-                )
-                .push(text("·").size(9).style(|_| iced::widget::text::Style {
-                    color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
-                }))
-                .push(
-                    mouse_area(
-                        Row::new()
-                            .spacing(2)
-                            .align_y(Alignment::Center)
-                            .push(text(mic_icon).size(14))
-                            .push(text(mic_percent).size(14)),
-                    )
-                    .on_press(Message::TogglePopup(Popup::Controls))
-                    .on_scroll(|delta| Message::AdjustMicVolumeBy(Self::scroll_direction(delta))),
-                ),
-        )
-        .padding(Padding::from([4, 8]))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(pill_bg)),
-            text_color: Some(pill_fg),
-            border: iced::Border {
-                radius: pill_border_radius.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-
-        let wifi_ssid = wifi_snapshot.wifi.ssid.trim();
-        let wifi_label = if wifi_snapshot.wifi.enabled {
-            if wifi_ssid.is_empty() || wifi_ssid == "Disconnected" || wifi_ssid == "Loading..." {
-                "On".to_string()
-            } else {
-                Self::trunc_with_ellipsis(wifi_ssid, 8)
-            }
-        } else {
-            "Off".to_string()
-        };
-        let bt_summary = Self::bluetooth_pill_summary(&self.controls);
-        let connectivity_pill = container(
-            Row::new()
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .push(text(wifi_icon).size(14))
-                .push(text(wifi_label).size(14))
-                .push(text(bt_icon).size(14))
-                .push_maybe(bt_summary.map(|summary| text(summary).size(12))),
-        )
-        .padding(Padding::from([4, 12]))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(pill_bg)),
-            text_color: Some(pill_fg),
-            border: iced::Border {
-                radius: pill_border_radius.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-
-        // Keyboard Layout Pill
-        let kbd_pill = container(text(compositor.keyboard_layout.as_str()).size(14))
-            .padding(Padding::from([4, 12]))
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(pill_bg)),
-                text_color: Some(pill_fg),
-                border: iced::Border {
-                    radius: pill_border_radius.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-
-        // Clock Pill
-        let clock_pill = container(text(self.clock.as_str()).size(14))
-            .padding(Padding::from([4, 12]))
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(pill_bg)),
-                text_color: Some(pill_fg),
-                border: iced::Border {
-                    radius: pill_border_radius.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-
-        let mut right_row = Row::new()
-            .spacing(4)
-            .align_y(Alignment::Center)
-            .push(tray_row)
-            .push(mouse_area(stats_pill).on_press(Message::TogglePopup(Popup::Stats)))
-            .push(controls_pill)
-            .push(mouse_area(connectivity_pill).on_press(Message::TogglePopup(Popup::Connectivity)))
-            .push(mouse_area(battery_pill).on_press(Message::TogglePopup(Popup::Power)))
-            .push(mouse_area(kbd_pill).on_press(Message::NextKeyboardLayout));
-
-        if self.debug_ui_enabled {
-            // Debug toggle pill (shown only in debug mode).
-            let dbg_pill = container(text("DBG").size(12))
-                .padding(Padding::from([4, 10]))
-                .style(move |_| container::Style {
-                    background: Some(iced::Background::Color(pill_bg)),
-                    text_color: Some(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
-                    border: iced::Border {
-                        radius: pill_border_radius.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                });
-            right_row = right_row.push(mouse_area(dbg_pill).on_press(Message::ToggleDebugOverlay));
-        }
-
-        right_row =
-            right_row.push(mouse_area(clock_pill).on_press(Message::TogglePopup(Popup::Calendar)));
-
-        let right = container(right_row).width(Length::Shrink);
-
-        let center_overlay = container(center)
-            .width(Length::Fixed(340.0))
-            .align_x(iced::alignment::Horizontal::Center)
-            .align_y(iced::alignment::Vertical::Center);
-
-        let mut layers = Vec::new();
-        layers.push(
-            container(
-                Row::new()
-                    .align_y(Alignment::Center)
-                    .push(left)
-                    .push(Space::with_width(Length::Fill))
-                    .push(right),
-            )
-            .width(Length::Fill)
-            .into(),
-        );
-        layers.push(
-            container(center_overlay)
-                .width(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .align_y(iced::alignment::Vertical::Center)
-                .into(),
-        );
-        if self.debug_ui_enabled && self.show_debug_overlay {
-            let overlay = container(
-                container(
-                    text(format!(
-                        "ws req:{} coal:{} last:{}ms avg:{}ms dbus ok/fail:{}/{}",
-                        self.perf.workspace_refresh_requested,
-                        self.perf.workspace_refresh_coalesced,
-                        self.perf.workspace_refresh_last_ms,
-                        self.perf.workspace_refresh_avg_ms(),
-                        self.perf.dbus_connect_successes,
-                        self.perf.dbus_connect_failures
-                    ))
-                    .size(10),
-                )
-                .padding(Padding::from([2, 8]))
-                .style(move |_| container::Style {
-                    background: Some(iced::Background::Color(Color {
-                        a: self.config.appearance.opacity,
-                        ..Color::from_rgb8(0x1f, 0x23, 0x33)
-                    })),
-                    text_color: Some(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
-                    border: iced::Border {
-                        radius: 8.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-            )
-            .align_x(iced::alignment::Horizontal::Left)
-            .align_y(iced::alignment::Vertical::Center)
-            .padding(Padding::from([2, 8]));
-            layers.push(overlay.into());
-        }
-
-        container(stack(layers))
-            .width(Length::Fill)
-            .height(Length::Fixed(self.config.appearance.bar_height as f32))
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::TRANSPARENT)),
-                ..Default::default()
-            })
-            .into()
+        crate::ui::bar::view(self.build_main_bar_model())
     }
 
     fn view_popup(&self) -> Element<'_, Message, Theme, iced::Renderer> {
-        let compositor = self.compositor_service.snapshot();
-        let wayland_snapshot = self.wayland_runtime_service.snapshot();
-        let theme = self.theme_tokens();
-        if let Popup::TrayMenu = &self.popup {
-            let mut content = Column::new()
-                .spacing(6)
-                .push(
-                    text("Tray Menu")
-                        .size(16)
-                        .style(|_| iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        }),
-                );
-            if let Some(menu) = self.tray_ui_service.open_menu() {
-                for node in menu.nodes() {
-                    match node {
-                        crate::services::tray_menu::OwnedTrayMenuNode::Separator => {
-                            content = content.push(iced::widget::horizontal_rule(1));
-                        }
-                        crate::services::tray_menu::OwnedTrayMenuNode::Action(action) => {
-                            let mut label = String::new();
-                            for _ in 0..action.depth {
-                                label.push_str("  ");
-                            }
-                            label.push_str(&action.label);
-                            if !action.activatable {
-                                label.push_str("  ›");
-                            }
-
-                            let mut btn = button(text(label).size(13))
-                                .width(Length::Fill)
-                                .padding(Padding::from([4, 8]));
-                            if action.enabled && action.activatable {
-                                btn = btn.on_press(Message::TrayMenuItemSelected(action.id));
-                            }
-                            content = content.push(btn);
-                        }
-                    }
-                }
-            }
-            return container(
-                container(scrollable(content))
-                    .width(Length::Fill)
-                    .padding(Padding::from([12, 12]))
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color {
-                            a: self.config.appearance.opacity,
-                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                        })),
-                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        border: iced::Border {
-                            radius: 12.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-        }
-
-        if self.popup == Popup::Stats {
-            let sys_data = self.system_info_service.snapshot();
-            let cpu_summary = Self::cpu_usage_summary(sys_data);
-            let mem_summary = if sys_data.mem_str.trim().is_empty() {
-                if sys_data.mem_total > 0 {
-                    let percent = (sys_data.mem_used as f64 / sys_data.mem_total as f64 * 100.0)
-                        .round() as i32;
-                    format!("{percent}%")
-                } else {
-                    "0%".to_string()
-                }
-            } else {
-                sys_data.mem_str.clone()
-            };
-            let temp_summary = if sys_data.temp_str.trim().is_empty() {
-                format!("{}°C", sys_data.temp.round() as i32)
-            } else {
-                sys_data.temp_str.clone()
-            };
-            let model = popups::stats::StatsPopupModel::new(
-                popups::stats::opaque_background_alpha(self.config.appearance.opacity),
-                cpu_summary,
-                mem_summary,
-                temp_summary,
-                Self::fan_runtime_summary(&self.controls.fan),
-            );
-
-            return popups::stats::view(theme, model);
-        }
-
-        if self.popup == Popup::Displays {
-            let model = popups::displays::DisplaysPopupModel::new(
-                Self::display_summary_rows(wayland_snapshot)
-                    .into_iter()
-                    .map(|(icon, label, value)| PopupMetricRow::new(icon, label, value))
-                    .collect(),
-                wayland_snapshot.missing_capabilities(),
-                Self::display_popup_output_cards(wayland_snapshot),
-            );
-
-            return popups::displays::view(theme, self.config.appearance.opacity, model);
-        }
-
-        if self.popup == Popup::AudioRoutes {
-            let output_routes = Self::audio_route_popup_items(
-                &self.controls.audio_devices.output_routes,
-                &self.controls.audio_devices.input_routes,
-                self.controls.audio_devices.output_route.as_deref(),
-                "SINK",
-                "No output routes discovered",
-            );
-            let input_routes = Self::audio_route_popup_items(
-                &self.controls.audio_devices.input_routes,
-                &self.controls.audio_devices.output_routes,
-                self.controls.audio_devices.input_route.as_deref(),
-                "SOURCE",
-                "No input routes discovered",
-            );
-
-            let model = popups::audio_routes::AudioRoutesPopupModel::new(
-                Self::current_audio_route_summary(
-                    &self.controls.audio_devices.output_routes,
-                    self.controls.audio_devices.output_route.as_deref(),
-                    "No output route selected",
-                ),
-                Self::current_audio_route_summary(
-                    &self.controls.audio_devices.input_routes,
-                    self.controls.audio_devices.input_route.as_deref(),
-                    "No input route selected",
-                ),
-                output_routes,
-                input_routes,
-            );
-
-            return popups::audio_routes::view(
-                theme,
-                self.config.appearance.opacity,
-                self.popup.clone(),
-                model,
-            );
-        }
-
-        if self.popup == Popup::BluetoothDevices {
-            let adapter_summary = if self.controls.bluetooth_enabled {
-                if self.controls.bluetooth_devices.connected_devices.is_empty() {
-                    "Adapter enabled".to_string()
-                } else {
-                    format!(
-                        "{} connected",
-                        self.controls.bluetooth_devices.connected_devices.len()
-                    )
-                }
-            } else {
-                "Adapter disabled".to_string()
-            };
-
-            let bluetooth_cards =
-                Self::control_center_bluetooth_device_cards(&self.controls.bluetooth_devices)
-                    .into_iter()
-                    .map(|mut card| {
-                        card.is_new = Self::bluetooth_device_is_new(
-                            &self.bluetooth_scan_state,
-                            &card.address,
-                        );
-                        card
-                    })
-                    .collect();
-            let scan_running = matches!(
-                self.bluetooth_scan_state,
-                BluetoothScanState::Scanning { .. }
-            );
-            let model = popups::bluetooth_devices::BluetoothDevicesPopupModel::new(
-                adapter_summary,
-                Self::bluetooth_scan_status_summary(&self.bluetooth_scan_state),
-                self.controls.bluetooth_enabled,
-                scan_running,
-                bluetooth_cards,
-            );
-
-            return popups::bluetooth_devices::view(theme, self.config.appearance.opacity, model);
-        }
-
-        if self.popup == Popup::Calendar {
-            let now = chrono::Local::now();
-
-            // Calculate displayed month/year based on offset
-            use chrono::{Datelike, TimeZone};
-            let mut display_month = now.month() as i32 + self.calendar_offset;
-            let mut display_year = now.year();
-
-            while display_month > 12 {
-                display_month -= 12;
-                display_year += 1;
-            }
-            while display_month < 1 {
-                display_month += 12;
-                display_year -= 1;
-            }
-
-            let Some(display_date) = chrono::Local
-                .with_ymd_and_hms(display_year, display_month as u32, 1, 0, 0, 0)
-                .single()
-            else {
-                return container(Space::with_width(Length::Shrink)).into();
-            };
-            let month_name = display_date.format("%B %Y").to_string();
-            let (prev_month_icon, next_month_icon) = Self::calendar_nav_labels();
-
-            let current_day = if display_year == now.year() && display_month as u32 == now.month() {
-                Some(now.day())
-            } else {
-                None
-            };
-
-            // Calculate first day of month and days in month
-            let weekday_offset = (display_date.weekday().number_from_monday() - 1) as usize;
-
-            let days_in_month = match display_date.month() {
-                1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-                4 | 6 | 9 | 11 => 30,
-                2 => {
-                    if display_date.year() % 4 == 0
-                        && (display_date.year() % 100 != 0 || display_date.year() % 400 == 0)
-                    {
-                        29
-                    } else {
-                        28
-                    }
-                }
-                _ => 30,
-            };
-
-            let title_row = Row::new()
-                .spacing(10)
-                .align_y(Alignment::Center)
-                .push(
-                    button(text(prev_month_icon).size(20))
-                        .on_press(Message::CalendarPrevMonth)
-                        .style(|_, _| button::Style {
-                            text_color: Color::from_rgb8(0x7a, 0xa2, 0xf7),
-                            ..Default::default()
-                        }),
-                )
-                .push(
-                    text(month_name)
-                        .size(18)
-                        .width(Length::Fill)
-                        .align_x(iced::alignment::Horizontal::Center),
-                )
-                .push(
-                    button(text(next_month_icon).size(20))
-                        .on_press(Message::CalendarNextMonth)
-                        .style(|_, _| button::Style {
-                            text_color: Color::from_rgb8(0x7a, 0xa2, 0xf7),
-                            ..Default::default()
-                        }),
-                );
-
-            let mut header_row = Row::new().spacing(0);
-            for day in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"] {
-                header_row = header_row.push(
-                    container(text(day).size(12).style(|_| iced::widget::text::Style {
-                        color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
-                    }))
-                    .width(Length::Fill)
-                    .align_x(iced::alignment::Horizontal::Center),
-                );
-            }
-
-            let mut days_col = Column::new().spacing(8);
-            let mut current_row = Row::new().spacing(0);
-
-            // Empty spaces for offset
-            for _ in 0..weekday_offset {
-                current_row = current_row.push(Space::with_width(Length::Fill));
-            }
-
-            for d in 1..=days_in_month {
-                let is_today = Some(d) == current_day;
-                let day_btn = container(text(d.to_string()).size(14))
-                    .width(Length::Fill)
-                    .padding(8)
-                    .align_x(iced::alignment::Horizontal::Center)
-                    .style(move |_| {
-                        if is_today {
-                            container::Style {
-                                background: Some(iced::Background::Color(Color::from_rgb8(
-                                    0x7a, 0xa2, 0xf7,
-                                ))),
-                                text_color: Some(Color::from_rgb8(0x1a, 0x1b, 0x26)),
-                                border: iced::Border {
-                                    radius: 8.0.into(),
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            }
-                        } else {
-                            container::Style::default()
-                        }
-                    });
-
-                current_row = current_row.push(day_btn);
-
-                if (weekday_offset + (d as usize)).is_multiple_of(7) || d == days_in_month {
-                    // Fill the last row if needed
-                    if d == days_in_month {
-                        let remaining = 7 - ((weekday_offset + (d as usize)) % 7);
-                        if remaining < 7 {
-                            for _ in 0..remaining {
-                                current_row = current_row.push(Space::with_width(Length::Fill));
-                            }
-                        }
-                    }
-                    days_col = days_col.push(current_row);
-                    current_row = Row::new().spacing(0);
-                }
-            }
-
-            let content = Column::new()
-                .spacing(16)
-                .push(title_row)
-                .push(header_row)
-                .push(days_col);
-
-            return container(
-                container(content)
-                    .width(Length::Fill)
-                    .padding(24)
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color {
-                            a: self.config.appearance.opacity,
-                            ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                        })),
-                        text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        border: iced::Border {
-                            radius: 12.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-        }
-
-        if self.popup == Popup::SystemMonitor {
-            let sys_data = self.system_info_service.snapshot();
-            let system_diagnostics = self.system_info_service.diagnostics();
-            let compositor_diagnostics = self.compositor_service.diagnostics();
-            let controls_diagnostics = self.controls_service.diagnostics();
-            let network_diagnostics = self.network_service.diagnostics();
-            let idle_snapshot = self.idle_inhibitor_service.snapshot();
-            let tray_diagnostics = self.tray_ui_service.diagnostics();
-            let coalescing_diagnostics = self.coalescing_diagnostics();
-            let hardware_rows = Self::hardware_summary_rows(
-                &self.controls.battery,
-                &self.controls.power_profile,
-                &self.controls.fan,
-                sys_data,
-                &idle_snapshot,
-            );
-            let display_rows = Self::display_summary_rows(wayland_snapshot);
-            let mut overview_rows = vec![
-                PopupMetricRow::new("", "CPU Usage", sys_data.cpu_str.clone()),
-                PopupMetricRow::new("󰍛", "Memory Usage", sys_data.mem_str.clone()),
-                PopupMetricRow::new("󰍛", "Swap Usage", sys_data.swap_str.clone()),
-                PopupMetricRow::new("", "Temperature", sys_data.temp_str.clone()),
-                PopupMetricRow::new("DSK", "Disk Usage /", sys_data.disk_root_str.clone()),
-                PopupMetricRow::new("BOT", "Disk Usage /boot", sys_data.disk_boot_str.clone()),
-                PopupMetricRow::new("NET", "IP Address", sys_data.ip_address.clone()),
-                PopupMetricRow::new("DL", "Download Speed", sys_data.net_down_str.clone()),
-                PopupMetricRow::new("UL", "Upload Speed", sys_data.net_up_str.clone()),
-            ];
-            overview_rows.extend(
-                display_rows
-                    .into_iter()
-                    .map(|(icon, label, value)| PopupMetricRow::new(icon, label, value)),
-            );
-            let hardware_rows = hardware_rows
-                .into_iter()
-                .map(|(icon, label, value)| PopupMetricRow::new(icon, label, value))
-                .collect::<Vec<_>>();
-            let mut observability_rows = Vec::new();
-            let mut warning_rows = Vec::new();
-
-            if self.debug_ui_enabled {
-                let runtime_capabilities = self.runtime_capabilities();
-                observability_rows.push(PopupMetricRow::new(
-                    "TIM",
-                    "Workspace Refresh (last/avg ms)",
-                    format!(
-                        "{}/{}",
-                        self.perf.workspace_refresh_last_ms,
-                        self.perf.workspace_refresh_avg_ms()
-                    ),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "REQ",
-                    "Workspace Refresh (req/coalesced)",
-                    format!(
-                        "{}/{}",
-                        self.perf.workspace_refresh_requested,
-                        self.perf.workspace_refresh_coalesced
-                    ),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "BUS",
-                    "D-Bus Connect (ok/fail)",
-                    format!(
-                        "{}/{}",
-                        self.perf.dbus_connect_successes, self.perf.dbus_connect_failures
-                    ),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "MOD",
-                    "Runtime Capabilities",
-                    runtime_capabilities.summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "PRV",
-                    "Capability Providers",
-                    runtime_capabilities.provider_summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "API",
-                    "Capability Degradations",
-                    runtime_capabilities
-                        .degraded_summary()
-                        .unwrap_or_else(|| "none".to_string()),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "SVC",
-                    "Service Backends",
-                    format!(
-                        "cmp {:?}->{:?} net {:?}->{:?}",
-                        compositor.configured_backend,
-                        compositor.active_backend,
-                        self.network_service.configured_backend(),
-                        self.network_service.active_backend()
-                    ),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "CMP",
-                    "Compositor Runtime",
-                    compositor_diagnostics.summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "CTL",
-                    "Controls Backends",
-                    controls_diagnostics.summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "COL",
-                    "Coalescing Runtime",
-                    coalescing_diagnostics.summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "NET",
-                    "Network Runtime",
-                    network_diagnostics.summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "AUD",
-                    "Audio Runtime",
-                    controls_diagnostics
-                        .audio_runtime
-                        .clone()
-                        .unwrap_or_else(|| "n/a".to_string()),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "󰾆",
-                    "Power Runtime",
-                    controls_diagnostics
-                        .power_runtime
-                        .clone()
-                        .unwrap_or_else(|| "n/a".to_string()),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "SYS",
-                    "System Runtime",
-                    system_diagnostics.summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "WAY",
-                    "Wayland Runtime",
-                    wayland_snapshot.runtime_summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "CAP",
-                    "Wayland Capabilities",
-                    wayland_snapshot.capability_summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "OUT",
-                    "Wayland Outputs",
-                    wayland_snapshot.output_summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "DET",
-                    "Wayland Outputs Detail",
-                    wayland_snapshot.output_detail_summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "IDL",
-                    "Idle Inhibitor Runtime",
-                    idle_snapshot.debug_summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "TRY",
-                    "Tray Icons",
-                    tray_diagnostics.summary(),
-                ));
-                observability_rows.push(PopupMetricRow::new(
-                    "TRT",
-                    "Tray Runtime",
-                    tray_diagnostics.runtime.summary(),
-                ));
-
-                if let Some(last_unresolved) = tray_diagnostics.last_unresolved_item {
-                    warning_rows.push(PopupMetricRow::new(
-                        "WRN",
-                        "Tray Icon Last Unresolved",
-                        last_unresolved,
-                    ));
-                }
-                if let Some(unavailable_reason) = compositor_diagnostics.unavailable_reason {
-                    warning_rows.push(PopupMetricRow::new(
-                        "WRN",
-                        "Compositor Unavailable",
-                        unavailable_reason,
-                    ));
-                }
-                if let Some(last_error) = network_diagnostics.last_error {
-                    warning_rows.push(PopupMetricRow::new("WRN", "Network Last Error", last_error));
-                }
-                if let Some(unavailable_reason) = network_diagnostics.unavailable_reason {
-                    warning_rows.push(PopupMetricRow::new(
-                        "WRN",
-                        "Network Unavailable",
-                        unavailable_reason,
-                    ));
-                }
-                if let Some(unavailable_reason) = wayland_snapshot.unavailable_reason.clone() {
-                    warning_rows.push(PopupMetricRow::new(
-                        "WRN",
-                        "Wayland Unavailable",
-                        unavailable_reason,
-                    ));
-                }
-                if let Some(missing_caps) = wayland_snapshot.missing_capabilities() {
-                    warning_rows.push(PopupMetricRow::new(
-                        "WRN",
-                        "Wayland Missing Caps",
-                        missing_caps,
-                    ));
-                }
-                if let Some(last_failure) = tray_diagnostics.runtime.last_dispatch_failure {
-                    warning_rows.push(PopupMetricRow::new(
-                        "WRN",
-                        "Tray Dispatch Failure",
-                        last_failure,
-                    ));
-                }
-                if let Some(menu_error) = tray_diagnostics.runtime.last_menu_activation_error {
-                    warning_rows.push(PopupMetricRow::new("WRN", "Tray Menu Error", menu_error));
-                }
-            }
-
-            let model = popups::system_info::SystemInfoPopupModel::new(
-                env!("CARGO_PKG_VERSION"),
-                overview_rows,
-                hardware_rows,
-                observability_rows,
-                warning_rows,
-            );
-
-            return popups::system_info::view(theme, self.config.appearance.opacity, model);
-        }
-
-        let domain_state = Self::popup_domain_state(&self.popup);
-        let is_power_popup = domain_state.is_power_popup;
-        let is_controls_popup = domain_state.is_controls_popup;
-        let is_connectivity_popup = domain_state.is_connectivity_popup;
-        if !(is_power_popup || is_controls_popup || is_connectivity_popup) {
-            return container(Space::with_width(Length::Shrink))
-                .width(Length::Shrink)
-                .height(Length::Shrink)
-                .into();
-        }
-
-        let popup_title = match self.popup {
-            Popup::Power => "Power",
-            Popup::Controls => "Controls",
-            Popup::Connectivity => "Connectivity",
-            _ => "Controls",
-        };
-
-        // Control domain popups
-        let vol_muted = self.controls.audio.muted;
-        let vol_row = Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                button(
-                    container(text(if vol_muted { "󰝟" } else { "" }).size(18))
-                        .width(28)
-                        .height(28)
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .align_y(iced::alignment::Vertical::Center),
-                )
-                .on_press(Message::ToggleAudioMute)
-                .style(move |_, _| {
-                    if vol_muted {
-                        iced::widget::button::Style {
-                            text_color: Color::from_rgb8(0x56, 0x5f, 0x89),
-                            ..Default::default()
-                        }
-                    } else {
-                        iced::widget::button::Style {
-                            text_color: Color::WHITE,
-                            ..Default::default()
-                        }
-                    }
-                }),
-            )
-            .push(
-                slider(0..=100, self.controls.audio.volume, Message::SetVolume)
-                    .width(Length::Fill)
-                    .style(move |_, _| {
-                        if vol_muted {
-                            iced::widget::slider::Style {
-                                rail: iced::widget::slider::Rail {
-                                    backgrounds: (
-                                        iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68)),
-                                        iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
-                                    ),
-                                    width: 4.0,
-                                    border: iced::Border {
-                                        radius: 2.0.into(),
-                                        width: 0.0,
-                                        color: Color::TRANSPARENT,
-                                    },
-                                },
-                                handle: iced::widget::slider::Handle {
-                                    shape: iced::widget::slider::HandleShape::Circle {
-                                        radius: 6.0,
-                                    },
-                                    background: iced::Background::Color(Color::from_rgb8(
-                                        0x56, 0x5f, 0x89,
-                                    )),
-                                    border_width: 0.0,
-                                    border_color: Color::TRANSPARENT,
-                                },
-                                breakpoint: iced::widget::slider::Breakpoint {
-                                    color: Color::TRANSPARENT,
-                                },
-                            }
-                        } else {
-                            iced::widget::slider::Style {
-                                rail: iced::widget::slider::Rail {
-                                    backgrounds: (
-                                        iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
-                                        iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
-                                    ),
-                                    width: 4.0,
-                                    border: iced::Border {
-                                        radius: 2.0.into(),
-                                        width: 0.0,
-                                        color: Color::TRANSPARENT,
-                                    },
-                                },
-                                handle: iced::widget::slider::Handle {
-                                    shape: iced::widget::slider::HandleShape::Circle {
-                                        radius: 8.0,
-                                    },
-                                    background: iced::Background::Color(Color::from_rgb8(
-                                        0x7a, 0xa2, 0xf7,
-                                    )),
-                                    border_width: 0.0,
-                                    border_color: Color::TRANSPARENT,
-                                },
-                                breakpoint: iced::widget::slider::Breakpoint {
-                                    color: Color::TRANSPARENT,
-                                },
-                            }
-                        }
-                    }),
-            )
-            .push(
-                text(format!("{}%", self.controls.audio.volume))
-                    .size(13)
-                    .width(Length::Fixed(44.0))
-                    .align_x(iced::alignment::Horizontal::Right),
-            );
-
-        let mic_muted = self.controls.mic.muted;
-        let mic_row = Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                button(
-                    container(
-                        text(if mic_muted || self.controls.mic.volume == 0 {
-                            "󰍭"
-                        } else {
-                            ""
-                        })
-                        .size(18),
-                    )
-                    .width(28)
-                    .height(28)
-                    .align_x(iced::alignment::Horizontal::Center)
-                    .align_y(iced::alignment::Vertical::Center),
-                )
-                .on_press(Message::ToggleMicMute)
-                .style(move |_, _| {
-                    if mic_muted {
-                        iced::widget::button::Style {
-                            text_color: Color::from_rgb8(0x56, 0x5f, 0x89),
-                            ..Default::default()
-                        }
-                    } else {
-                        iced::widget::button::Style {
-                            text_color: Color::WHITE,
-                            ..Default::default()
-                        }
-                    }
-                }),
-            )
-            .push(
-                slider(0..=100, self.controls.mic.volume, Message::SetMicVolume)
-                    .width(Length::Fill)
-                    .style(move |_, _| {
-                        if mic_muted {
-                            iced::widget::slider::Style {
-                                rail: iced::widget::slider::Rail {
-                                    backgrounds: (
-                                        iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68)),
-                                        iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
-                                    ),
-                                    width: 4.0,
-                                    border: iced::Border {
-                                        radius: 2.0.into(),
-                                        width: 0.0,
-                                        color: Color::TRANSPARENT,
-                                    },
-                                },
-                                handle: iced::widget::slider::Handle {
-                                    shape: iced::widget::slider::HandleShape::Circle {
-                                        radius: 6.0,
-                                    },
-                                    background: iced::Background::Color(Color::from_rgb8(
-                                        0x56, 0x5f, 0x89,
-                                    )),
-                                    border_width: 0.0,
-                                    border_color: Color::TRANSPARENT,
-                                },
-                                breakpoint: iced::widget::slider::Breakpoint {
-                                    color: Color::TRANSPARENT,
-                                },
-                            }
-                        } else {
-                            iced::widget::slider::Style {
-                                rail: iced::widget::slider::Rail {
-                                    backgrounds: (
-                                        iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
-                                        iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
-                                    ),
-                                    width: 4.0,
-                                    border: iced::Border {
-                                        radius: 2.0.into(),
-                                        width: 0.0,
-                                        color: Color::TRANSPARENT,
-                                    },
-                                },
-                                handle: iced::widget::slider::Handle {
-                                    shape: iced::widget::slider::HandleShape::Circle {
-                                        radius: 8.0,
-                                    },
-                                    background: iced::Background::Color(Color::from_rgb8(
-                                        0x7a, 0xa2, 0xf7,
-                                    )),
-                                    border_width: 0.0,
-                                    border_color: Color::TRANSPARENT,
-                                },
-                                breakpoint: iced::widget::slider::Breakpoint {
-                                    color: Color::TRANSPARENT,
-                                },
-                            }
-                        }
-                    }),
-            )
-            .push(
-                text(format!("{}%", self.controls.mic.volume))
-                    .size(13)
-                    .width(Length::Fixed(44.0))
-                    .align_x(iced::alignment::Horizontal::Right),
-            );
-        let brt_row = Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                button(
-                    container(text("󰃠").size(18))
-                        .width(28)
-                        .height(28)
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .align_y(iced::alignment::Vertical::Center),
-                )
-                .on_press(Message::RefreshControls(
-                    crate::services::controls::ControlsRefreshKind::Brightness,
-                ))
-                .style(move |_, _| iced::widget::button::Style {
-                    text_color: Color::WHITE,
-                    ..Default::default()
-                }),
-            )
-            .push(
-                slider(
-                    1..=100,
-                    self.controls.brightness.percent.clamp(1, 100),
-                    Message::SetBrightness,
-                )
-                .width(Length::Fill)
-                .style(move |_, _| iced::widget::slider::Style {
-                    rail: iced::widget::slider::Rail {
-                        backgrounds: (
-                            iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
-                            iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42)),
-                        ),
-                        width: 4.0,
-                        border: iced::Border {
-                            radius: 2.0.into(),
-                            width: 0.0,
-                            color: Color::TRANSPARENT,
-                        },
-                    },
-                    handle: iced::widget::slider::Handle {
-                        shape: iced::widget::slider::HandleShape::Circle { radius: 8.0 },
-                        background: iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
-                        border_width: 0.0,
-                        border_color: Color::TRANSPARENT,
-                    },
-                    breakpoint: iced::widget::slider::Breakpoint {
-                        color: Color::TRANSPARENT,
-                    },
-                }),
-            )
-            .push(
-                text(self.controls.brightness.label.as_str())
-                    .size(13)
-                    .width(Length::Fixed(44.0))
-                    .align_x(iced::alignment::Horizontal::Right),
-            );
-
-        let mut fan_row = Row::new().width(Length::Shrink).spacing(4);
-        for l in ["1", "2", "3", "4", "5", "6", "7", "auto", "max"].iter() {
-            let lvl = if *l == "max" {
-                "full-speed".to_string()
-            } else {
-                l.to_string()
-            };
-            let current_level = self.controls.fan.level.trim();
-            let is_active =
-                current_level == lvl || (lvl == "full-speed" && current_level == "disengaged");
-
-            let btn_width = if *l == "auto" || *l == "max" {
-                Length::Fixed(42.0)
-            } else {
-                Length::Fixed(26.0)
-            };
-
-            let btn = button(
-                container(text(*l).size(11))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(iced::alignment::Horizontal::Center)
-                    .align_y(iced::alignment::Vertical::Center),
-            )
-            .on_press(Message::SetFanLevel(lvl.clone()))
-            .width(btn_width)
-            .height(Length::Fixed(26.0))
-            .padding(Padding::from([0, 0]))
-            .style(move |_, _| {
-                if is_active {
-                    iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x7a, 0xa2, 0xf7,
-                        ))),
-                        text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                        border: iced::Border {
-                            radius: 6.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }
-                } else {
-                    iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x41, 0x48, 0x68,
-                        ))),
-                        text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                        border: iced::Border {
-                            radius: 6.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }
-                }
-            });
-            fan_row = fan_row.push(btn);
-        }
-
-        let mut prof_row = Row::new().width(Length::Fill).spacing(8);
-        for vid in ["low-power", "balanced", "performance"].iter() {
-            let is_active = self.controls.power_profile == *vid;
-            let vid_str = vid.to_string();
-            let (label, profile_color) = Self::power_profile_visual(vid);
-            let caption = Self::power_profile_caption(vid);
-            let btn = button(
-                container(
-                    Row::new()
-                        .spacing(3)
-                        .align_y(Alignment::Center)
-                        .push(text(label).size(10))
-                        .push(text(caption).size(10)),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .align_y(iced::alignment::Vertical::Center),
-            )
-            .width(Length::FillPortion(1))
-            .height(Length::Fixed(32.0))
-            .padding(Padding::from([0, 4]))
-            .on_press(Message::SetPowerProfile(vid_str))
-            .style(move |_, _| {
-                if is_active {
-                    iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x3a, 0x42, 0x5f,
-                        ))),
-                        text_color: profile_color,
-                        border: iced::Border {
-                            radius: 8.0.into(),
-                            width: 1.0,
-                            color: profile_color,
-                        },
-                        ..Default::default()
-                    }
-                } else {
-                    iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x29, 0x2e, 0x42,
-                        ))),
-                        text_color: profile_color,
-                        border: iced::Border {
-                            radius: 8.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }
-                }
-            });
-            prof_row = prof_row.push(btn);
-        }
-
-        let wifi_snapshot = self.network_service.snapshot();
-        let wifi_is_active = wifi_snapshot.wifi.enabled;
-        let ssid = wifi_snapshot.wifi.ssid.trim();
-        let has_real_ssid =
-            !ssid.is_empty() && ssid != "Disconnected" && ssid != "Loading..." && ssid != "Unknown";
-        let wifi_label = if wifi_is_active {
-            if has_real_ssid {
-                if ssid.len() > 10 {
-                    format!("{}...", ssid.chars().take(8).collect::<String>())
-                } else {
-                    ssid.to_string()
-                }
-            } else {
-                "On".to_string()
-            }
-        } else {
-            "Off".to_string()
-        };
-        let wifi_btn = button(
-            Row::new()
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .push(text(if wifi_is_active { "󰖩" } else { "󰖪" }).size(18))
-                .push(text(wifi_label).size(12)),
+        popup_host::view(
+            self.theme_tokens(),
+            self.config.appearance.opacity,
+            self.build_popup_host_model(),
         )
-        .width(Length::FillPortion(1))
-        .padding(Padding::from([12, 12]))
-        .on_press(Message::NetworkCommand(
-            crate::services::network::NetworkCommand::ToggleMenu,
-        ))
-        .style(move |_, _| {
-            if wifi_is_active {
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
-                    text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                    border: iced::Border {
-                        radius: 16.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            } else {
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                    border: iced::Border {
-                        radius: 16.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            }
-        });
-
-        let bt_is_active = self.controls.bluetooth_enabled;
-        let bt_label = if bt_is_active { "On" } else { "Off" };
-        let bt_btn = button(
-            Row::new()
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .push(text(if bt_is_active { "󰂯" } else { "󰂲" }).size(18))
-                .push(text(bt_label).size(12)),
-        )
-        .width(Length::FillPortion(1))
-        .padding(Padding::from([12, 12]))
-        .on_press(Message::ToggleBluetooth(!bt_is_active))
-        .style(move |_, _| {
-            if bt_is_active {
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
-                    text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                    border: iced::Border {
-                        radius: 16.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            } else {
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                    border: iced::Border {
-                        radius: 16.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            }
-        });
-        let idle_snapshot = self.idle_inhibitor_service.snapshot();
-        let idle_btn = {
-            let mut btn = button(
-                Row::new()
-                    .spacing(4)
-                    .align_y(Alignment::Center)
-                    .push(text("").size(18))
-                    .push(text(idle_snapshot.label()).size(12)),
-            )
-            .width(Length::FillPortion(1))
-            .padding(Padding::from([12, 12]))
-            .style(move |_, _| {
-                if idle_snapshot.enabled {
-                    iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x7a, 0xa2, 0xf7,
-                        ))),
-                        text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                        border: iced::Border {
-                            radius: 16.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }
-                } else if idle_snapshot.available {
-                    iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x29, 0x2e, 0x42,
-                        ))),
-                        text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                        border: iced::Border {
-                            radius: 16.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }
-                } else {
-                    iced::widget::button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x23, 0x27, 0x38,
-                        ))),
-                        text_color: Color::from_rgb8(0x56, 0x5f, 0x89),
-                        border: iced::Border {
-                            radius: 16.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }
-                }
-            });
-            if idle_snapshot.available {
-                btn = btn.on_press(Message::ToggleIdleInhibitor);
-            }
-            btn
-        };
-        let bat_cap = self.controls.battery.capacity;
-        let bat_status = &self.controls.battery.status;
-        let (bat_icon, bat_color) = if bat_status.contains("Charging") {
-            ("󰂄", Color::from_rgb8(0x9e, 0xce, 0x6a))
-        } else if bat_status.contains("Full") || bat_status.contains("Not charging") {
-            ("", Color::from_rgb8(0xc0, 0xca, 0xf5))
-        } else {
-            let icon = if bat_cap >= 90 {
-                "󰁹"
-            } else if bat_cap >= 20 {
-                "󰁼"
-            } else {
-                "󰁺"
-            };
-            let color = if bat_cap <= 10 {
-                Color::from_rgb8(0xf7, 0x76, 0x8e)
-            } else if bat_cap <= 20 {
-                Color::from_rgb8(0xe0, 0xaf, 0x68)
-            } else {
-                Color::from_rgb8(0xc0, 0xca, 0xf5)
-            };
-            (icon, color)
-        };
-
-        let circular_btn_style =
-            |_: &Theme, _: iced::widget::button::Status| iced::widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                border: iced::Border {
-                    radius: 24.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-        let (perf_b, perf_t, perf_s) = self.config.performance.effective_intervals();
-
-        let top_row = Row::new()
-            .align_y(Alignment::Center)
-            .push(
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(
-                        text(bat_icon)
-                            .size(16)
-                            .style(move |_| iced::widget::text::Style {
-                                color: Some(bat_color),
-                            }),
-                    )
-                    .push(text(format!("{}%", bat_cap)).size(14).style(move |_| {
-                        iced::widget::text::Style {
-                            color: Some(bat_color),
-                        }
-                    }))
-                    .push(iced::widget::Space::with_width(8))
-                    .push(
-                        text(
-                            self.controls
-                                .battery
-                                .time_remaining
-                                .as_deref()
-                                .unwrap_or(""),
-                        )
-                        .size(12)
-                        .style(move |_| iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
-                        }),
-                    ),
-            )
-            .push(iced::widget::Space::with_width(Length::Fill))
-            .push(
-                button(
-                    text(format!(
-                        "Perf {} {}/{}/{}",
-                        self.config.performance.profile_badge(),
-                        perf_b,
-                        perf_t,
-                        perf_s
-                    ))
-                    .size(12),
-                )
-                .padding(8)
-                .on_press(Message::CyclePerformanceProfile)
-                .style(circular_btn_style),
-            )
-            .push(
-                button(text("󰌾").size(16))
-                    .padding(8)
-                    .on_press(Message::PowerAction(PowerAction::Lock))
-                    .style(circular_btn_style),
-            )
-            .push(
-                button(text("").size(16))
-                    .padding(8)
-                    .on_press(Message::TogglePowerMenu)
-                    .style(circular_btn_style),
-            );
-
-        if is_power_popup && self.session_service.snapshot().power_menu_open {
-            let power_action_btn = |label: &str, icon: &str, action: PowerAction| {
-                button(
-                    Row::new()
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .push(text(icon.to_string()).size(18))
-                        .push(text(label.to_string()).size(14)),
-                )
-                .width(Length::Fill)
-                .padding(12)
-                .on_press(Message::PowerAction(action))
-                .style(move |_, _| iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::TRANSPARENT)),
-                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                    border: iced::Border {
-                        radius: 8.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-            };
-
-            let separator = container(iced::widget::Space::with_height(1))
-                .width(Length::Fill)
-                .style(|_| container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                    ..Default::default()
-                });
-
-            let power_col = Column::new()
-                .spacing(4)
-                .push(
-                    Row::new()
-                        .spacing(12)
-                        .align_y(Alignment::Center)
-                        .push(text("Power Menu").size(18).width(Length::Fill))
-                        .push(
-                            button(text("󰁝 Back").size(14))
-                                .on_press(Message::TogglePowerMenu)
-                                .padding(8),
-                        ),
-                )
-                .push(iced::widget::Space::with_height(12))
-                .push(power_action_btn("Suspend", "󰒲", PowerAction::Sleep))
-                .push(power_action_btn("Hibernate", "󰖕", PowerAction::Hibernate))
-                .push(power_action_btn("Reboot", "󰑓", PowerAction::Restart))
-                .push(power_action_btn("Shutdown", "", PowerAction::Shutdown))
-                .push(iced::widget::Space::with_height(8))
-                .push(separator)
-                .push(iced::widget::Space::with_height(8))
-                .push(power_action_btn("Logout", "󰍃", PowerAction::Logout));
-
-            return container(power_col)
-                .padding(24)
-                .width(Length::Fixed(440.0))
-                .style(|_| container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x1a, 0x1b, 0x26))),
-                    border: iced::Border {
-                        radius: 16.0.into(),
-                        color: Color::from_rgb8(0x29, 0x2e, 0x42),
-                        width: 1.5,
-                    },
-                    ..Default::default()
-                })
-                .into();
-        }
-
-        let sliders_col = Column::new()
-            .spacing(8)
-            .push(brt_row)
-            .push(vol_row)
-            .push(mic_row);
-
-        let shortcut_button = |icon: &'static str, label: String, message: Message| {
-            button(
-                Row::new()
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .push(text(icon).size(14))
-                    .push(text(label).size(11)),
-            )
-            .width(Length::FillPortion(1))
-            .padding(Padding::from([12, 12]))
-            .on_press(message)
-            .style(|_, _| iced::widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
-                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                border: iced::Border {
-                    radius: 16.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-        };
-
-        let connected_bluetooth_cards =
-            Self::control_center_bluetooth_device_cards(&self.controls.bluetooth_devices)
-                .into_iter()
-                .filter(|card| card.connected)
-                .collect::<Vec<_>>();
-
-        let battery_care_card = {
-            let info_row = |icon: &'static str, label: &'static str, value: String| {
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(text(icon).size(13))
-                    .push(
-                        text(label)
-                            .size(12)
-                            .width(Length::FillPortion(2))
-                            .style(|_| iced::widget::text::Style {
-                                color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
-                            }),
-                    )
-                    .push(
-                        text(value)
-                            .size(12)
-                            .width(Length::FillPortion(3))
-                            .align_x(iced::alignment::Horizontal::Right),
-                    )
-            };
-
-            container(
-                Column::new()
-                    .spacing(8)
-                    .push(
-                        Row::new()
-                            .spacing(8)
-                            .align_y(Alignment::Center)
-                            .push(text("󰚥").size(16))
-                            .push(text("Battery Care").size(14)),
-                    )
-                    .push(info_row(
-                        "󰁹",
-                        "Charge State",
-                        Self::battery_charge_state_summary(&self.controls.battery),
-                    ))
-                    .push(info_row(
-                        "󰂄",
-                        "Thresholds",
-                        Self::battery_threshold_summary(&self.controls.battery),
-                    ))
-                    .push(info_row(
-                        "󰛨",
-                        "Control Mode",
-                        "System-managed (read-only)".to_string(),
-                    )),
-            )
-            .padding(16)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-        };
-
-        let bluetooth_quick_card = {
-            let mut column = Column::new().spacing(8).push(
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(text("󰂯").size(16))
-                    .push(text("Connected Bluetooth").size(14))
-                    .push(Space::with_width(Length::Fill))
-                    .push(
-                        button(text("Open").size(11))
-                            .padding(Padding::from([4, 8]))
-                            .on_press(Message::TogglePopup(Popup::BluetoothDevices)),
-                    ),
-            );
-
-            if connected_bluetooth_cards.is_empty() {
-                column = column.push(text("No connected Bluetooth devices").size(12).style(|_| {
-                    iced::widget::text::Style {
-                        color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
-                    }
-                }));
-            } else {
-                for card in connected_bluetooth_cards {
-                    let summary = if let Some(detail) = &card.detail {
-                        format!("{} • {}", card.summary, detail)
-                    } else {
-                        card.summary.clone()
-                    };
-                    column = column.push(
-                        container(
-                            Column::new()
-                                .spacing(6)
-                                .push(
-                                    Row::new()
-                                        .spacing(8)
-                                        .align_y(Alignment::Center)
-                                        .push(text(card.label).size(13))
-                                        .push(Space::with_width(Length::Fill))
-                                        .push(
-                                            button(text("Disconnect").size(11))
-                                                .padding(Padding::from([6, 10]))
-                                                .on_press(Message::DisconnectBluetoothDevice(
-                                                    card.address.clone(),
-                                                )),
-                                        ),
-                                )
-                                .push(text(summary).size(11).style(|_| {
-                                    iced::widget::text::Style {
-                                        color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
-                                    }
-                                })),
-                        )
-                        .padding(10)
-                        .style(|_| container::Style {
-                            background: Some(iced::Background::Color(Color::from_rgb8(
-                                0x21, 0x26, 0x38,
-                            ))),
-                            border: iced::Border {
-                                radius: 10.0.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
-                    );
-                }
-            }
-
-            container(column).padding(16).style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-        };
-
-        let popup_close_target = self.popup.clone();
-        let header_row = Row::new()
-            .align_y(Alignment::Center)
-            .push(text(popup_title).size(18))
-            .push(Space::with_width(Length::Fill))
-            .push(
-                button(text("Close").size(12))
-                    .padding(Padding::from([6, 10]))
-                    .on_press(Message::TogglePopup(popup_close_target)),
-            );
-
-        let mut container_col = Column::new()
-            .spacing(20)
-            .push(header_row)
-            .push(chrome::domain_popup_nav_row(theme, &self.popup));
-
-        if is_power_popup {
-            container_col = container_col.push(top_row);
-        }
-
-        if is_controls_popup {
-            container_col = container_col.push(sliders_col);
-        }
-
-        if is_connectivity_popup {
-            container_col = container_col.push(Row::new().spacing(16).push(wifi_btn).push(bt_btn));
-        }
-
-        if is_power_popup {
-            container_col = container_col.push(
-                Row::new()
-                    .spacing(16)
-                    .width(Length::Fill)
-                    .push(idle_btn)
-                    .push(shortcut_button(
-                        "󰈈",
-                        "System Info".to_string(),
-                        Message::TogglePopup(Popup::SystemMonitor),
-                    ))
-                    .push(shortcut_button(
-                        "󰍹",
-                        "Displays".to_string(),
-                        Message::TogglePopup(Popup::Displays),
-                    )),
-            );
-        }
-
-        if is_connectivity_popup && wifi_snapshot.menu_open {
-            let mut inner_col = Column::new().spacing(8);
-            if let Some(status_message) = wifi_snapshot.status_message() {
-                inner_col = inner_col.push(text(status_message).size(12).style(|_| {
-                    iced::widget::text::Style {
-                        color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
-                    }
-                }));
-            }
-            let toggle_power_btn = button(
-                text(if wifi_is_active {
-                    "Отключить Wi-Fi"
-                } else {
-                    "Включить Wi-Fi"
-                })
-                .size(14),
-            )
-            .on_press(Message::NetworkCommand(
-                crate::services::network::NetworkCommand::ToggleWifi(!wifi_is_active),
-            ))
-            .width(Length::Fill)
-            .padding(8)
-            .style(|_, _| iced::widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
-                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                border: iced::Border {
-                    radius: 8.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-            inner_col = inner_col.push(toggle_power_btn);
-
-            if let Some(ssid) = wifi_snapshot.awaiting_password_ssid() {
-                let input = text_input("Enter password...", &wifi_snapshot.password_input)
-                    .on_input(|value| {
-                        Message::NetworkCommand(
-                            crate::services::network::NetworkCommand::UpdatePassword(value),
-                        )
-                    })
-                    .on_submit(Message::NetworkCommand(
-                        crate::services::network::NetworkCommand::SubmitPassword,
-                    ))
-                    .secure(true)
-                    .padding(10);
-                let actions = Row::new()
-                    .spacing(8)
-                    .push(
-                        button(text("Connect"))
-                            .on_press(Message::NetworkCommand(
-                                crate::services::network::NetworkCommand::SubmitPassword,
-                            ))
-                            .padding(8),
-                    )
-                    .push(
-                        button(text("Cancel"))
-                            .on_press(Message::NetworkCommand(
-                                crate::services::network::NetworkCommand::CancelPassword,
-                            ))
-                            .padding(8),
-                    );
-                inner_col = inner_col
-                    .push(text(format!("Connect to {}", ssid)))
-                    .push(input)
-                    .push(actions);
-            } else {
-                let mut net_list = Column::new().spacing(4);
-                for net in &wifi_snapshot.available_networks {
-                    net_list = net_list.push(
-                        button(text(net.ssid.clone()))
-                            .width(Length::Fill)
-                            .on_press(Message::NetworkCommand(
-                                crate::services::network::NetworkCommand::SelectNetwork {
-                                    ssid: net.ssid.clone(),
-                                    security: net.security.clone(),
-                                },
-                            ))
-                            .style(|_, _| iced::widget::button::Style {
-                                background: Some(iced::Background::Color(Color::TRANSPARENT)),
-                                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                                ..Default::default()
-                            }),
-                    );
-                }
-                inner_col = inner_col.push(scrollable(net_list).height(Length::Fixed(150.0)));
-            }
-            container_col =
-                container_col.push(
-                    container(inner_col)
-                        .padding(16)
-                        .style(|_| container::Style {
-                            background: Some(iced::Background::Color(Color::from_rgb8(
-                                0x29, 0x2e, 0x42,
-                            ))),
-                            border: iced::Border {
-                                radius: 12.0.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
-                );
-        }
-
-        if is_power_popup {
-            container_col = container_col
-                .push(
-                    Column::new()
-                        .spacing(8)
-                        .push(
-                            Row::new()
-                                .spacing(8)
-                                .align_y(Alignment::Center)
-                                .push(text("󰒓").size(16))
-                                .push(text("Power Profiles (PPD)").size(14)),
-                        )
-                        .push(
-                            container(prof_row)
-                                .width(Length::Fill)
-                                .align_x(iced::alignment::Horizontal::Center),
-                        ),
-                )
-                .push(
-                    Column::new()
-                        .spacing(8)
-                        .push(
-                            Row::new()
-                                .spacing(8)
-                                .align_y(Alignment::Center)
-                                .push(text("󰈐").size(16))
-                                .push(
-                                    text(format!("Fan Control: {} RPM", self.controls.fan.speed))
-                                        .size(14),
-                                ),
-                        )
-                        .push(
-                            container(fan_row)
-                                .width(Length::Fill)
-                                .align_x(iced::alignment::Horizontal::Center),
-                        ),
-                )
-                .push(battery_care_card);
-        }
-
-        if is_connectivity_popup {
-            container_col = container_col.push(bluetooth_quick_card).push(
-                Row::new()
-                    .spacing(8)
-                    .push(shortcut_button(
-                        "󰂯",
-                        "Bluetooth Devices".to_string(),
-                        Message::TogglePopup(Popup::BluetoothDevices),
-                    ))
-                    .push(shortcut_button(
-                        "󰈈",
-                        "System Info".to_string(),
-                        Message::TogglePopup(Popup::SystemMonitor),
-                    )),
-            );
-        }
-
-        if is_controls_popup {
-            container_col = container_col.push(
-                Row::new()
-                    .spacing(8)
-                    .push(shortcut_button(
-                        "󰑓",
-                        "Audio Routes".to_string(),
-                        Message::TogglePopup(Popup::AudioRoutes),
-                    ))
-                    .push(shortcut_button(
-                        "󰈈",
-                        "System Info".to_string(),
-                        Message::TogglePopup(Popup::SystemMonitor),
-                    )),
-            );
-        }
-
-        container(
-            container(
-                scrollable(
-                    container(container_col)
-                        .padding(Padding::from([24, 18, 24, 24]))
-                        .width(Length::Fill),
-                )
-                .width(Length::Fill),
-            )
-            .width(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color {
-                    a: self.config.appearance.opacity,
-                    ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                })),
-                border: iced::Border {
-                    radius: 16.0.into(),
-                    color: Color::from_rgb8(0x29, 0x2e, 0x42),
-                    width: 1.5,
-                },
-                ..Default::default()
-            }),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
     }
 
     pub fn theme(&self, _id: Id) -> Theme {
         Theme::Dark
     }
 
+    fn audio_visualizer_updates_enabled(&self) -> bool {
+        self.popup == Popup::None && self.config.appearance.audio_visualizer.enabled
+    }
+
+    fn system_info_fast_updates_enabled(&self) -> bool {
+        true
+    }
+
     pub fn subscription(&self) -> iced::Subscription<Message> {
         let (_, thermal_secs, slow_secs) = self.config.performance.effective_intervals();
+        let audio_visualizer_subscription = if self.audio_visualizer_updates_enabled() {
+            self.audio_visualizer_service
+                .subscription()
+                .map(Message::AudioVisualizerFrame)
+        } else {
+            iced::Subscription::none()
+        };
 
         iced::Subscription::batch(vec![
             crate::modules::clock::tick(),
@@ -4364,6 +1600,7 @@ impl ThinkPadBar {
             self.controls_service
                 .subscription()
                 .map(Message::ControlsEvent),
+            audio_visualizer_subscription,
             iced::event::listen_with(|event, _status, window| match event {
                 iced::Event::Window(iced::window::Event::Unfocused) => {
                     Some(Message::PopupWindowUnfocused(window))
@@ -4397,10 +1634,13 @@ fn controls_event_refresh_kind(
 mod tests {
     use super::{
         controls_event_refresh_kind, BackgroundRequestKind, CoalescedControlKind,
-        ControlCenterDeviceItem, ControlsCoalescing, Message, Popup, ThinkPadBar,
+        ControlsCoalescing, Message, Popup, ThinkPadBar,
     };
-    use crate::ui::popups::audio_routes;
-    use iced::{mouse, window::Id, Color};
+    use crate::ui::{
+        bar, chrome, popup_host,
+        popups::{audio_routes, bluetooth_devices, displays, system_info},
+    };
+    use iced::window::Id;
 
     fn hermetic_bar() -> ThinkPadBar {
         ThinkPadBar {
@@ -4408,6 +1648,7 @@ mod tests {
             dbus_conn: None,
             clock: String::new(),
             controls: crate::services::controls::ControlsSnapshot::default(),
+            audio_visualizer: crate::services::audio_visualizer::AudioVisualizerSnapshot::default(),
             network_service: crate::services::network::NetworkService::new(
                 &crate::config::NetworkConfig::default(),
             ),
@@ -4416,8 +1657,6 @@ mod tests {
             wayland_runtime_service:
                 crate::services::wayland_runtime::WaylandRuntimeService::unavailable_for_tests(),
             popup: Popup::None,
-            battery_str: String::new(),
-            audio_str: String::new(),
             main_window_id: None,
             popup_window_id: None,
             calendar_offset: 0,
@@ -4434,6 +1673,15 @@ mod tests {
                 crate::modules::system::SysData::default(),
             ),
             tray_ui_service: crate::services::tray_ui::TrayUiService::new(),
+            audio_visualizer_service:
+                crate::services::audio_visualizer::AudioVisualizerService::new(
+                    crate::services::audio_visualizer::AudioVisualizerConfig::from_appearance(
+                        &crate::config::AudioVisualizerConfig {
+                            enabled: false,
+                            ..crate::config::AudioVisualizerConfig::default()
+                        },
+                    ),
+                ),
             bluetooth_scan_state: super::BluetoothScanState::default(),
             controls_coalescing: ControlsCoalescing::default(),
             controls_refresh_coalescing: crate::services::coalescing::RequestCoalescer::default(),
@@ -4481,269 +1729,6 @@ mod tests {
     }
 
     #[test]
-    fn battery_runtime_summary_includes_time_when_present() {
-        assert_eq!(
-            ThinkPadBar::battery_runtime_summary(&crate::services::controls::BatteryInfo {
-                capacity: 64,
-                status: "Discharging".to_string(),
-                time_remaining: Some("2h 6m remaining".to_string()),
-                ac_online: Some(false),
-                health_percent: Some(92),
-                power_rate_mw: Some(12_400),
-                pack_voltage_mv: None,
-                cycle_count: None,
-                full_charge_mwh: None,
-                design_capacity_mwh: None,
-                charge_start_threshold: None,
-                charge_end_threshold: None,
-            }),
-            "64% Discharging (2h 6m remaining)"
-        );
-        assert_eq!(
-            ThinkPadBar::battery_runtime_summary(&crate::services::controls::BatteryInfo {
-                capacity: 100,
-                status: "Full".to_string(),
-                time_remaining: None,
-                ac_online: Some(true),
-                health_percent: Some(100),
-                power_rate_mw: None,
-                pack_voltage_mv: None,
-                cycle_count: None,
-                full_charge_mwh: None,
-                design_capacity_mwh: None,
-                charge_start_threshold: None,
-                charge_end_threshold: None,
-            }),
-            "100% Full"
-        );
-    }
-
-    #[test]
-    fn battery_detail_summaries_format_actionable_hardware_state() {
-        let battery = crate::services::controls::BatteryInfo {
-            capacity: 64,
-            status: "Discharging".to_string(),
-            time_remaining: Some("2h 6m remaining".to_string()),
-            ac_online: Some(false),
-            health_percent: Some(92),
-            power_rate_mw: Some(12_400),
-            pack_voltage_mv: Some(15_420),
-            cycle_count: Some(187),
-            full_charge_mwh: Some(48_000),
-            design_capacity_mwh: Some(52_000),
-            charge_start_threshold: Some(40),
-            charge_end_threshold: Some(80),
-        };
-
-        assert_eq!(ThinkPadBar::battery_ac_summary(&battery), "Disconnected");
-        assert_eq!(
-            ThinkPadBar::battery_health_summary(&battery),
-            "92% of design"
-        );
-        assert_eq!(
-            ThinkPadBar::battery_wear_summary(&battery),
-            "8% worn (-4.0 Wh)"
-        );
-        assert_eq!(ThinkPadBar::battery_power_summary(&battery), "12.4 W draw");
-        assert_eq!(ThinkPadBar::battery_voltage_summary(&battery), "15.4 V");
-        assert_eq!(
-            ThinkPadBar::battery_pack_summary(&battery),
-            "48.0 / 52.0 Wh (-4.0 Wh)"
-        );
-        assert_eq!(ThinkPadBar::battery_cycle_summary(&battery), "187 cycles");
-        assert_eq!(
-            ThinkPadBar::battery_threshold_summary(&battery),
-            "40% -> 80%"
-        );
-        assert_eq!(
-            ThinkPadBar::battery_charge_state_summary(&battery),
-            "Discharging"
-        );
-    }
-
-    #[test]
-    fn battery_charge_state_summary_interprets_threshold_policy() {
-        let holding = crate::services::controls::BatteryInfo {
-            capacity: 80,
-            status: "Not charging".to_string(),
-            time_remaining: None,
-            ac_online: Some(true),
-            health_percent: None,
-            power_rate_mw: None,
-            pack_voltage_mv: None,
-            cycle_count: None,
-            full_charge_mwh: None,
-            design_capacity_mwh: None,
-            charge_start_threshold: Some(40),
-            charge_end_threshold: Some(80),
-        };
-        assert_eq!(
-            ThinkPadBar::battery_charge_state_summary(&holding),
-            "Holding at 80% ceiling"
-        );
-
-        let window = crate::services::controls::BatteryInfo {
-            capacity: 63,
-            status: "Not charging".to_string(),
-            time_remaining: None,
-            ac_online: Some(true),
-            health_percent: None,
-            power_rate_mw: None,
-            pack_voltage_mv: None,
-            cycle_count: None,
-            full_charge_mwh: None,
-            design_capacity_mwh: None,
-            charge_start_threshold: Some(40),
-            charge_end_threshold: Some(80),
-        };
-        assert_eq!(
-            ThinkPadBar::battery_charge_state_summary(&window),
-            "Within 40-80% hold window"
-        );
-
-        let resume = crate::services::controls::BatteryInfo {
-            capacity: 35,
-            status: "Not charging".to_string(),
-            time_remaining: None,
-            ac_online: Some(true),
-            health_percent: None,
-            power_rate_mw: None,
-            pack_voltage_mv: None,
-            cycle_count: None,
-            full_charge_mwh: None,
-            design_capacity_mwh: None,
-            charge_start_threshold: Some(40),
-            charge_end_threshold: Some(80),
-        };
-        assert_eq!(
-            ThinkPadBar::battery_charge_state_summary(&resume),
-            "Waiting to resume below 40%"
-        );
-    }
-
-    #[test]
-    fn battery_threshold_summary_polishes_common_policy_shapes() {
-        let full_charge = crate::services::controls::BatteryInfo {
-            capacity: 100,
-            status: "Full".to_string(),
-            time_remaining: None,
-            ac_online: Some(true),
-            health_percent: None,
-            power_rate_mw: None,
-            pack_voltage_mv: None,
-            cycle_count: None,
-            full_charge_mwh: None,
-            design_capacity_mwh: None,
-            charge_start_threshold: Some(0),
-            charge_end_threshold: Some(100),
-        };
-        assert_eq!(
-            ThinkPadBar::battery_threshold_summary(&full_charge),
-            "Full charge allowed"
-        );
-
-        let pinned = crate::services::controls::BatteryInfo {
-            capacity: 80,
-            status: "Not charging".to_string(),
-            time_remaining: None,
-            ac_online: Some(true),
-            health_percent: None,
-            power_rate_mw: None,
-            pack_voltage_mv: None,
-            cycle_count: None,
-            full_charge_mwh: None,
-            design_capacity_mwh: None,
-            charge_start_threshold: Some(80),
-            charge_end_threshold: Some(80),
-        };
-        assert_eq!(
-            ThinkPadBar::battery_threshold_summary(&pinned),
-            "Pinned at 80%"
-        );
-    }
-
-    #[test]
-    fn fan_runtime_summary_formats_speed_and_level() {
-        assert_eq!(
-            ThinkPadBar::fan_runtime_summary(&crate::services::controls::FanInfo {
-                speed: "2700".to_string(),
-                level: "auto".to_string(),
-            }),
-            "2700 RPM (auto)"
-        );
-    }
-
-    #[test]
-    fn thermal_state_summary_interprets_temperature_band() {
-        assert_eq!(
-            ThinkPadBar::thermal_state_summary(&crate::modules::system::SysData {
-                temp: 48.0,
-                temp_str: "48°C".to_string(),
-                ..crate::modules::system::SysData::default()
-            }),
-            "Cool (48°C)"
-        );
-        assert_eq!(
-            ThinkPadBar::thermal_state_summary(&crate::modules::system::SysData {
-                temp: 73.0,
-                temp_str: "73°C".to_string(),
-                ..crate::modules::system::SysData::default()
-            }),
-            "Hot (73°C)"
-        );
-    }
-
-    #[test]
-    fn cpu_usage_summary_falls_back_when_formatted_value_is_blank() {
-        assert_eq!(
-            ThinkPadBar::cpu_usage_summary(&crate::modules::system::SysData {
-                cpu_usage: 12.6,
-                cpu_str: " ".to_string(),
-                ..crate::modules::system::SysData::default()
-            }),
-            "13%"
-        );
-        assert_eq!(
-            ThinkPadBar::cpu_usage_summary(&crate::modules::system::SysData {
-                cpu_usage: 99.0,
-                cpu_str: "7%".to_string(),
-                ..crate::modules::system::SysData::default()
-            }),
-            "7%"
-        );
-    }
-
-    #[test]
-    fn calendar_nav_labels_use_chevrons() {
-        assert_eq!(ThinkPadBar::calendar_nav_labels(), ("<", ">"));
-    }
-
-    #[test]
-    fn power_profile_visual_uses_speedometer_labels() {
-        assert_eq!(ThinkPadBar::power_profile_visual("low-power").0, "󰾆");
-        assert_eq!(ThinkPadBar::power_profile_visual("balanced").0, "󰾅");
-        assert_eq!(ThinkPadBar::power_profile_visual("performance").0, "󰓅");
-        assert_eq!(ThinkPadBar::power_profile_visual("unknown").0, "󰓅 ?");
-        assert_eq!(ThinkPadBar::power_profile_visual("unknown").1, Color::WHITE);
-    }
-
-    #[test]
-    fn scroll_direction_maps_line_and_pixel_delta() {
-        assert_eq!(
-            ThinkPadBar::scroll_direction(mouse::ScrollDelta::Lines { x: 0.0, y: 1.0 }),
-            1
-        );
-        assert_eq!(
-            ThinkPadBar::scroll_direction(mouse::ScrollDelta::Pixels { x: 0.0, y: -12.0 }),
-            -1
-        );
-        assert_eq!(
-            ThinkPadBar::scroll_direction(mouse::ScrollDelta::Lines { x: 0.0, y: 0.0 }),
-            0
-        );
-    }
-
-    #[test]
     fn step_adjust_percent_enforces_step_and_bounds() {
         assert_eq!(ThinkPadBar::step_adjust_percent(40, 1, 0, 100), 45);
         assert_eq!(ThinkPadBar::step_adjust_percent(40, -1, 0, 100), 35);
@@ -4768,7 +1753,7 @@ mod tests {
 
     #[test]
     fn hardware_summary_rows_include_all_expected_lines() {
-        let rows = ThinkPadBar::hardware_summary_rows(
+        let rows = system_info::hardware_rows(
             &crate::services::controls::BatteryInfo {
                 capacity: 64,
                 status: "Discharging".to_string(),
@@ -4802,7 +1787,7 @@ mod tests {
 
         assert_eq!(rows.len(), 14);
         assert_eq!(
-            rows.iter().map(|(_, label, _)| *label).collect::<Vec<_>>(),
+            rows.iter().map(|row| row.label).collect::<Vec<_>>(),
             vec![
                 "Battery Runtime",
                 "AC Adapter",
@@ -4820,7 +1805,7 @@ mod tests {
                 "Idle Inhibitor",
             ]
         );
-        assert!(rows.iter().all(|(_, _, value)| !value.is_empty()));
+        assert!(rows.iter().all(|row| !row.value.is_empty()));
     }
 
     #[test]
@@ -4840,7 +1825,7 @@ mod tests {
             charge_end_threshold: Some(80),
         };
 
-        let items = ThinkPadBar::control_center_power_items(&battery);
+        let items = chrome::power_summary_items(&battery);
         let labels = items.iter().map(|(_, label, _)| *label).collect::<Vec<_>>();
         let values = items
             .iter()
@@ -4857,8 +1842,7 @@ mod tests {
                 "Charge Thresholds",
             ]
         );
-        assert!(values.contains(&"63% Not charging (2h 06m remaining)"));
-        assert!(values.contains(&"Within 40-80% hold window"));
+        assert!(values.contains(&"63% (2h 06m remaining)"));
         assert!(values.contains(&"Connected"));
         assert!(values.contains(&"11.8 W rate"));
         assert!(values.contains(&"40% -> 80%"));
@@ -4866,132 +1850,225 @@ mod tests {
 
     #[test]
     fn control_center_device_items_surface_audio_mic_and_bluetooth_state() {
-        let items = ThinkPadBar::control_center_device_items(
-            &crate::services::controls::ControlsSnapshot {
-                brightness: crate::services::controls::BrightnessSnapshot::from_percent(42),
-                audio: crate::services::controls::AudioInfo {
-                    volume: 73,
-                    muted: false,
-                },
-                audio_devices: crate::services::controls::AudioDeviceSummary {
-                    output_route: Some("Built-in Audio".to_string()),
-                    input_route: Some("Internal Microphone".to_string()),
-                    output_routes: vec![
-                        crate::services::controls::AudioRouteInfo {
-                            id: "52".to_string(),
-                            name: "Built-in Audio".to_string(),
-                            origin: crate::services::controls::AudioRouteOrigin::Internal,
-                        },
-                        crate::services::controls::AudioRouteInfo {
-                            id: "77".to_string(),
-                            name: "USB DAC".to_string(),
-                            origin: crate::services::controls::AudioRouteOrigin::Usb,
-                        },
-                    ],
-                    input_routes: vec![
-                        crate::services::controls::AudioRouteInfo {
-                            id: "54".to_string(),
-                            name: "Internal Microphone".to_string(),
-                            origin: crate::services::controls::AudioRouteOrigin::Internal,
-                        },
-                        crate::services::controls::AudioRouteInfo {
-                            id: "81".to_string(),
-                            name: "USB Mic".to_string(),
-                            origin: crate::services::controls::AudioRouteOrigin::Usb,
-                        },
-                    ],
-                },
-                mic: crate::services::controls::MicInfo {
-                    volume: 18,
-                    muted: true,
-                },
-                fan: crate::services::controls::FanInfo {
-                    speed: "---".to_string(),
-                    level: "auto".to_string(),
-                },
-                battery: crate::services::controls::BatteryInfo {
-                    capacity: 63,
-                    status: "Not charging".to_string(),
-                    time_remaining: None,
-                    ac_online: Some(true),
-                    health_percent: None,
-                    power_rate_mw: None,
-                    pack_voltage_mv: None,
-                    cycle_count: None,
-                    full_charge_mwh: None,
-                    design_capacity_mwh: None,
-                    charge_start_threshold: None,
-                    charge_end_threshold: None,
-                },
-                power_profile: "balanced".to_string(),
-                bluetooth_enabled: true,
-                bluetooth_devices: crate::services::controls::BluetoothDeviceSummary {
-                    connected_devices: vec!["WH-1000XM5".to_string(), "MX Master 3S".to_string()],
-                    device_details: vec![
-                        crate::services::controls::BluetoothConnectedDevice {
-                            address: "AA:BB:CC:DD:EE:FF".to_string(),
-                            name: "WH-1000XM5".to_string(),
-                            connected: true,
-                            paired: true,
-                            trusted: true,
-                            battery_percent: Some(90),
-                            audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
-                        },
-                        crate::services::controls::BluetoothConnectedDevice {
-                            address: "11:22:33:44:55:66".to_string(),
-                            name: "MX Master 3S".to_string(),
-                            connected: true,
-                            paired: true,
-                            trusted: false,
-                            battery_percent: Some(55),
-                            audio_profiles: Vec::new(),
-                        },
-                    ],
-                },
+        let items = chrome::device_summary_items(&crate::services::controls::ControlsSnapshot {
+            brightness: crate::services::controls::BrightnessSnapshot::from_percent(42),
+            audio: crate::services::controls::AudioInfo {
+                volume: 73,
+                muted: false,
             },
+            audio_devices: crate::services::controls::AudioDeviceSummary {
+                output_route: Some("Built-in Audio".to_string()),
+                input_route: Some("Internal Microphone".to_string()),
+                output_routes: vec![
+                    crate::services::controls::AudioRouteInfo {
+                        id: "52".to_string(),
+                        name: "Built-in Audio".to_string(),
+                        origin: crate::services::controls::AudioRouteOrigin::Internal,
+                    },
+                    crate::services::controls::AudioRouteInfo {
+                        id: "77".to_string(),
+                        name: "USB DAC".to_string(),
+                        origin: crate::services::controls::AudioRouteOrigin::Usb,
+                    },
+                ],
+                input_routes: vec![
+                    crate::services::controls::AudioRouteInfo {
+                        id: "54".to_string(),
+                        name: "Internal Microphone".to_string(),
+                        origin: crate::services::controls::AudioRouteOrigin::Internal,
+                    },
+                    crate::services::controls::AudioRouteInfo {
+                        id: "81".to_string(),
+                        name: "USB Mic".to_string(),
+                        origin: crate::services::controls::AudioRouteOrigin::Usb,
+                    },
+                ],
+            },
+            mic: crate::services::controls::MicInfo {
+                volume: 18,
+                muted: true,
+            },
+            fan: crate::services::controls::FanInfo {
+                speed: "---".to_string(),
+                level: "auto".to_string(),
+            },
+            battery: crate::services::controls::BatteryInfo {
+                capacity: 63,
+                status: "Not charging".to_string(),
+                time_remaining: None,
+                ac_online: Some(true),
+                health_percent: None,
+                power_rate_mw: None,
+                pack_voltage_mv: None,
+                cycle_count: None,
+                full_charge_mwh: None,
+                design_capacity_mwh: None,
+                charge_start_threshold: None,
+                charge_end_threshold: None,
+            },
+            power_profile: "balanced".to_string(),
+            bluetooth_enabled: true,
+            bluetooth_devices: crate::services::controls::BluetoothDeviceSummary {
+                connected_devices: vec!["WH-1000XM5".to_string(), "MX Master 3S".to_string()],
+                device_details: vec![
+                    crate::services::controls::BluetoothConnectedDevice {
+                        address: "AA:BB:CC:DD:EE:FF".to_string(),
+                        name: "WH-1000XM5".to_string(),
+                        connected: true,
+                        paired: true,
+                        trusted: true,
+                        battery_percent: Some(90),
+                        audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
+                    },
+                    crate::services::controls::BluetoothConnectedDevice {
+                        address: "11:22:33:44:55:66".to_string(),
+                        name: "MX Master 3S".to_string(),
+                        connected: true,
+                        paired: true,
+                        trusted: false,
+                        battery_percent: Some(55),
+                        audio_profiles: Vec::new(),
+                    },
+                ],
+            },
+        });
+
+        assert_eq!(items[0].icon, "");
+        assert_eq!(items[0].value, "73% output");
+        assert_eq!(items[0].detail.as_deref(), Some("Built-in Audio"));
+        assert_eq!(items[1].icon, "");
+        assert_eq!(items[1].value, "Muted");
+        assert_eq!(items[1].detail.as_deref(), Some("Internal Microphone"));
+        assert_eq!(items[2].icon, "󰂯");
+        assert_eq!(items[2].value, "2 connected");
+        assert_eq!(items[2].detail.as_deref(), Some("WH-1000XM5, MX Master 3S"));
+    }
+
+    #[test]
+    fn main_bar_model_preserves_top_bar_pill_state() {
+        let mut bar_state = hermetic_bar();
+        bar_state.clock = "Sat 28 Mar 00:32".to_string();
+        bar_state.controls.brightness =
+            crate::services::controls::BrightnessSnapshot::from_percent(100);
+        bar_state.controls.audio = crate::services::controls::AudioInfo {
+            volume: 40,
+            muted: false,
+        };
+        bar_state.controls.mic = crate::services::controls::MicInfo {
+            volume: 36,
+            muted: true,
+        };
+        bar_state.controls.battery.capacity = 96;
+        bar_state.controls.power_profile = "BAL".to_string();
+        bar_state.controls.bluetooth_enabled = true;
+        bar_state.controls.bluetooth_devices.connected_devices = vec!["WH-1000XM5".to_string()];
+        bar_state.audio_visualizer = crate::services::audio_visualizer::AudioVisualizerSnapshot {
+            bars: [8; 24],
+            visible_bars: 16,
+            active: true,
+        };
+        bar_state.system_info_service =
+            crate::services::system_info::SystemInfoService::with_snapshot(
+                crate::modules::system::SysData {
+                    cpu_str: "12%".to_string(),
+                    temp: 34.0,
+                    temp_str: "34°C".to_string(),
+                    ..crate::modules::system::SysData::default()
+                },
+            );
+        bar_state.network_service.handle_event(
+            crate::services::network::NetworkEvent::WifiInfoSynced(
+                crate::services::network::WifiInfo {
+                    enabled: true,
+                    ssid: "y83Etz9_Long".to_string(),
+                },
+            ),
         );
 
-        assert_eq!(
-            items,
-            vec![
-                ControlCenterDeviceItem {
-                    icon: "",
-                    label: "Speakers",
-                    value: "73% output".to_string(),
-                    detail: Some("Built-in Audio".to_string()),
-                },
-                ControlCenterDeviceItem {
-                    icon: "",
-                    label: "Microphone",
-                    value: "Muted".to_string(),
-                    detail: Some("Internal Microphone".to_string()),
-                },
-                ControlCenterDeviceItem {
-                    icon: "󰂯",
-                    label: "Bluetooth",
-                    value: "2 connected".to_string(),
-                    detail: Some("WH-1000XM5, MX Master 3S".to_string()),
-                },
-            ]
-        );
+        let model = bar_state.build_main_bar_model();
+
+        assert_eq!(model.stats.cpu_summary, "12%");
+        assert_eq!(model.controls.brightness_label, "100%");
+        assert_eq!(model.controls.volume_label, "40%");
+        assert_eq!(model.controls.mic_icon, "󰍭");
+        assert_eq!(model.connectivity.wifi_label, "y83Etz9…");
+        assert_eq!(model.connectivity.bluetooth_label, Some("1".to_string()));
+        assert_eq!(model.battery.battery_label, "96%");
+        assert!(model.visualizer.is_visible());
+        assert_eq!(model.clock, "Sat 28 Mar 00:32");
+        assert_eq!(bar::volume_icon(&bar_state.controls.audio), "");
+    }
+
+    #[test]
+    fn calendar_popup_builder_preserves_month_navigation_shape() {
+        let bar_state = hermetic_bar();
+        let model = bar_state.build_calendar_popup_model().unwrap();
+
+        assert_eq!(model.prev_icon, "<");
+        assert_eq!(model.next_icon, ">");
+        assert!(!model.month_name.is_empty());
+        assert!(!model.weeks.is_empty());
+    }
+
+    #[test]
+    fn tray_menu_popup_builder_keeps_nested_labels_and_separators() {
+        let mut bar_state = hermetic_bar();
+        bar_state.tray_ui_service.set_open_menu_for_tests(Some(
+            crate::services::tray_menu::OwnedTrayMenu::new_for_tests(vec![
+                crate::services::tray_menu::OwnedTrayMenuNode::Action(
+                    crate::services::tray_menu::OwnedTrayMenuAction {
+                        id: 1,
+                        label: "Open".to_string(),
+                        enabled: true,
+                        activatable: true,
+                        depth: 0,
+                        prefetch_path: vec![1],
+                    },
+                ),
+                crate::services::tray_menu::OwnedTrayMenuNode::Separator,
+                crate::services::tray_menu::OwnedTrayMenuNode::Action(
+                    crate::services::tray_menu::OwnedTrayMenuAction {
+                        id: 2,
+                        label: "Audio".to_string(),
+                        enabled: true,
+                        activatable: false,
+                        depth: 1,
+                        prefetch_path: vec![1, 2],
+                    },
+                ),
+            ]),
+        ));
+
+        let model = bar_state.build_tray_menu_popup_model();
+
+        assert_eq!(model.nodes.len(), 3);
+        assert!(matches!(
+            model.nodes[1],
+            crate::ui::popups::tray_menu::TrayMenuNode::Separator
+        ));
+        assert!(matches!(
+            &model.nodes[2],
+            crate::ui::popups::tray_menu::TrayMenuNode::Action(action) if action.label == "  Audio  ›"
+        ));
     }
 
     #[test]
     fn bluetooth_device_cards_surface_battery_and_profiles() {
-        let cards = ThinkPadBar::control_center_bluetooth_device_cards(
-            &crate::services::controls::BluetoothDeviceSummary {
-                connected_devices: vec!["WH-1000XM5".to_string()],
-                device_details: vec![crate::services::controls::BluetoothConnectedDevice {
-                    address: "AA:BB:CC:DD:EE:FF".to_string(),
-                    name: "WH-1000XM5".to_string(),
-                    connected: true,
-                    paired: true,
-                    trusted: true,
-                    battery_percent: Some(90),
-                    audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
-                }],
-            },
-        );
+        let cards =
+            crate::ui::popups::bluetooth_devices::BluetoothDevicesPopupModel::build_device_cards(
+                &crate::services::controls::BluetoothDeviceSummary {
+                    connected_devices: vec!["WH-1000XM5".to_string()],
+                    device_details: vec![crate::services::controls::BluetoothConnectedDevice {
+                        address: "AA:BB:CC:DD:EE:FF".to_string(),
+                        name: "WH-1000XM5".to_string(),
+                        connected: true,
+                        paired: true,
+                        trusted: true,
+                        battery_percent: Some(90),
+                        audio_profiles: vec!["A2DP".to_string(), "AVRCP".to_string()],
+                    }],
+                },
+            );
 
         assert_eq!(
             cards,
@@ -5016,7 +2093,7 @@ mod tests {
 
     #[test]
     fn audio_route_popup_items_mark_current_default() {
-        let items = ThinkPadBar::audio_route_popup_items(
+        let items = audio_routes::popup_items(
             &[
                 crate::services::controls::AudioRouteInfo {
                     id: "52".to_string(),
@@ -5070,7 +2147,7 @@ mod tests {
 
     #[test]
     fn audio_route_popup_items_surface_unavailable_capability() {
-        let items = ThinkPadBar::audio_route_popup_items(
+        let items = audio_routes::popup_items(
             &[],
             &[crate::services::controls::AudioRouteInfo {
                 id: "77".to_string(),
@@ -5103,7 +2180,7 @@ mod tests {
 
     #[test]
     fn audio_route_popup_items_surface_origin_icons_and_status() {
-        let items = ThinkPadBar::audio_route_popup_items(
+        let items = audio_routes::popup_items(
             &[crate::services::controls::AudioRouteInfo {
                 id: "77".to_string(),
                 name: "WH-1000XM5 a2dp-sink".to_string(),
@@ -5128,7 +2205,7 @@ mod tests {
 
     #[test]
     fn audio_route_popup_items_surface_call_profile_conflict() {
-        let items = ThinkPadBar::audio_route_popup_items(
+        let items = audio_routes::popup_items(
             &[crate::services::controls::AudioRouteInfo {
                 id: "80".to_string(),
                 name: "WH-1000XM5 handsfree-head-unit".to_string(),
@@ -5216,7 +2293,7 @@ mod tests {
         ];
 
         assert_eq!(
-            ThinkPadBar::current_audio_route_summary(
+            audio_routes::current_route_summary(
                 &routes,
                 Some("WH-1000XM5"),
                 "No output route selected"
@@ -5224,7 +2301,7 @@ mod tests {
             "WH-1000XM5 • Bluetooth route • Wireless path"
         );
         assert_eq!(
-            ThinkPadBar::current_audio_route_summary(&routes, None, "No output route selected"),
+            audio_routes::current_route_summary(&routes, None, "No output route selected"),
             "No output route selected"
         );
     }
@@ -5233,7 +2310,7 @@ mod tests {
     fn audio_route_button_label_reflects_availability_shape() {
         let mut controls = crate::services::controls::ControlsSnapshot::default();
         assert_eq!(
-            ThinkPadBar::audio_route_button_label(&controls),
+            audio_routes::route_button_label(&controls),
             "Routes Unavailable"
         );
 
@@ -5243,7 +2320,7 @@ mod tests {
             origin: crate::services::controls::AudioRouteOrigin::Internal,
         }];
         assert_eq!(
-            ThinkPadBar::audio_route_button_label(&controls),
+            audio_routes::route_button_label(&controls),
             "Partial Routes"
         );
 
@@ -5252,16 +2329,13 @@ mod tests {
             name: "Internal Microphone".to_string(),
             origin: crate::services::controls::AudioRouteOrigin::Internal,
         }];
-        assert_eq!(
-            ThinkPadBar::audio_route_button_label(&controls),
-            "Audio Routes"
-        );
+        assert_eq!(audio_routes::route_button_label(&controls), "Audio Routes");
     }
 
     #[test]
     fn display_summary_rows_include_mode_and_hotplug_aware_state() {
-        let rows = ThinkPadBar::display_summary_rows(
-            &crate::services::wayland_runtime::WaylandRuntimeSnapshot {
+        let rows =
+            displays::summary_rows(&crate::services::wayland_runtime::WaylandRuntimeSnapshot {
                 available: true,
                 outputs: vec![
                     crate::services::wayland_runtime::WaylandOutputInfo {
@@ -5280,15 +2354,14 @@ mod tests {
                     },
                 ],
                 ..crate::services::wayland_runtime::WaylandRuntimeSnapshot::default()
-            },
-        );
+            });
 
         assert_eq!(
-            rows.iter().map(|(icon, _, _)| *icon).collect::<Vec<_>>(),
+            rows.iter().map(|row| row.icon).collect::<Vec<_>>(),
             vec!["DSP", "TOP", "SCL", "OUT"]
         );
         assert_eq!(
-            rows.iter().map(|(_, label, _)| *label).collect::<Vec<_>>(),
+            rows.iter().map(|row| row.label).collect::<Vec<_>>(),
             vec![
                 "Display Mode",
                 "Display Topology",
@@ -5296,16 +2369,16 @@ mod tests {
                 "Display Outputs",
             ]
         );
-        assert_eq!(rows[0].2, "Hybrid");
-        assert_eq!(rows[1].2, "1 internal + 1 external");
-        assert_eq!(rows[2].2, "eDP-1 2x, DP-2 1x");
-        assert_eq!(rows[3].2, "2 outputs: eDP-1, DP-2");
+        assert_eq!(rows[0].value, "Hybrid");
+        assert_eq!(rows[1].value, "1 internal + 1 external");
+        assert_eq!(rows[2].value, "eDP-1 2x, DP-2 1x");
+        assert_eq!(rows[3].value, "2 outputs: eDP-1, DP-2");
     }
 
     #[test]
     fn display_popup_output_cards_include_status_badges() {
-        let cards = ThinkPadBar::display_popup_output_cards(
-            &crate::services::wayland_runtime::WaylandRuntimeSnapshot {
+        let cards =
+            displays::output_cards(&crate::services::wayland_runtime::WaylandRuntimeSnapshot {
                 available: true,
                 outputs: vec![
                     crate::services::wayland_runtime::WaylandOutputInfo {
@@ -5330,8 +2403,7 @@ mod tests {
                     },
                 ],
                 ..crate::services::wayland_runtime::WaylandRuntimeSnapshot::default()
-            },
-        );
+            });
 
         assert_eq!(cards[0].label, "eDP-1");
         assert_eq!(cards[0].summary, "eDP-1 1920x1200 60Hz 2x");
@@ -5421,7 +2493,7 @@ mod tests {
     #[test]
     fn display_pill_summary_uses_wayland_mode_and_hides_when_unavailable() {
         assert_eq!(
-            ThinkPadBar::display_pill_summary(
+            chrome::display_pill_summary(
                 &crate::services::wayland_runtime::WaylandRuntimeSnapshot {
                     available: false,
                     unavailable_reason: Some("no wayland".to_string()),
@@ -5432,7 +2504,7 @@ mod tests {
         );
 
         assert_eq!(
-            ThinkPadBar::display_pill_summary(
+            chrome::display_pill_summary(
                 &crate::services::wayland_runtime::WaylandRuntimeSnapshot {
                     available: true,
                     outputs: vec![
@@ -5462,15 +2534,15 @@ mod tests {
             bluetooth_enabled: false,
             ..crate::services::controls::ControlsSnapshot::default()
         };
-        assert_eq!(ThinkPadBar::bluetooth_pill_summary(&controls), None);
+        assert_eq!(chrome::bluetooth_pill_summary(&controls), None);
 
         controls.bluetooth_enabled = true;
-        assert_eq!(ThinkPadBar::bluetooth_pill_summary(&controls), None);
+        assert_eq!(chrome::bluetooth_pill_summary(&controls), None);
 
         controls.bluetooth_devices.connected_devices =
             vec!["WH-1000XM5".to_string(), "MX Anywhere 3".to_string()];
         assert_eq!(
-            ThinkPadBar::bluetooth_pill_summary(&controls),
+            chrome::bluetooth_pill_summary(&controls),
             Some("2".to_string())
         );
     }
@@ -5512,6 +2584,248 @@ mod tests {
     }
 
     #[test]
+    fn power_popup_builder_preserves_power_domain_state() {
+        let mut bar = hermetic_bar();
+        bar.controls.battery.capacity = 82;
+        bar.controls.power_profile = "low-power".to_string();
+        bar.controls.fan = crate::services::controls::FanInfo {
+            speed: "2800".to_string(),
+            level: "2".to_string(),
+        };
+
+        let model = bar.build_power_popup_model();
+
+        assert_eq!(model.battery.capacity, 82);
+        assert_eq!(model.power_profile, "low-power");
+        assert_eq!(model.fan.speed, "2800");
+    }
+
+    #[test]
+    fn controls_popup_builder_preserves_controls_domain_state() {
+        let mut bar = hermetic_bar();
+        bar.controls.brightness = crate::services::controls::BrightnessSnapshot::from_percent(64);
+        bar.controls.audio = crate::services::controls::AudioInfo {
+            volume: 44,
+            muted: false,
+        };
+        bar.controls.mic = crate::services::controls::MicInfo {
+            volume: 19,
+            muted: true,
+        };
+
+        let model = bar.build_controls_popup_model();
+
+        assert_eq!(model.brightness.percent, 64);
+        assert_eq!(model.audio.volume, 44);
+        assert_eq!(model.mic.volume, 19);
+        assert!(model.mic.muted);
+    }
+
+    #[test]
+    fn preview_controls_command_syncs_app_controls_snapshot() {
+        let mut bar = hermetic_bar();
+
+        let command =
+            crate::services::controls::ControlsCommand::SetPowerProfile("performance".to_string());
+        bar.preview_controls_command(&command);
+
+        assert_eq!(bar.controls.power_profile, "performance");
+        assert_eq!(bar.controls_service.snapshot().power_profile, "performance");
+    }
+
+    #[test]
+    fn popup_host_builder_routes_power_popup_to_power_variant() {
+        let mut bar = hermetic_bar();
+        bar.popup = Popup::Power;
+
+        assert!(matches!(
+            bar.build_popup_host_model(),
+            popup_host::PopupHostModel::Power(_)
+        ));
+    }
+
+    #[test]
+    fn closing_bluetooth_popup_resets_scan_state() {
+        let mut bar = hermetic_bar();
+        bar.popup = Popup::BluetoothDevices;
+        bar.bluetooth_scan_state = super::BluetoothScanState::Completed {
+            total_devices: 2,
+            newly_discovered_addresses: vec!["11:22:33:44:55:66".to_string()],
+            remaining_secs: 5,
+        };
+
+        let _ = bar.update(Message::TogglePopup(Popup::BluetoothDevices));
+
+        assert_eq!(bar.popup, Popup::None);
+        assert_eq!(bar.bluetooth_scan_state, super::BluetoothScanState::Idle);
+    }
+
+    #[test]
+    fn closing_calendar_popup_resets_offset() {
+        let mut bar = hermetic_bar();
+        bar.popup = Popup::Calendar;
+        bar.calendar_offset = 3;
+
+        let _ = bar.update(Message::TogglePopup(Popup::Calendar));
+
+        assert_eq!(bar.popup, Popup::None);
+        assert_eq!(bar.calendar_offset, 0);
+    }
+
+    #[test]
+    fn stats_popup_builder_normalizes_runtime_summaries() {
+        let mut bar = hermetic_bar();
+        bar.system_info_service = crate::services::system_info::SystemInfoService::with_snapshot(
+            crate::modules::system::SysData {
+                cpu_usage: 12.4,
+                cpu_str: " ".to_string(),
+                mem_str: String::new(),
+                mem_used: 4,
+                mem_total: 8,
+                temp: 39.6,
+                temp_str: String::new(),
+                ..crate::modules::system::SysData::default()
+            },
+        );
+        bar.controls.fan = crate::services::controls::FanInfo {
+            speed: "2700".to_string(),
+            level: "2".to_string(),
+        };
+
+        let model = bar.build_stats_popup_model();
+
+        assert_eq!(model.rows[0].value, "12%");
+        assert_eq!(model.rows[1].value, "50%");
+        assert_eq!(model.rows[2].value, "40°C");
+        assert_eq!(model.rows[3].value, "2700 RPM (2)");
+    }
+
+    #[test]
+    fn displays_popup_builder_preserves_summary_and_cards() {
+        let bar = hermetic_bar();
+        let snapshot = crate::services::wayland_runtime::WaylandRuntimeSnapshot {
+            available: true,
+            outputs: vec![crate::services::wayland_runtime::WaylandOutputInfo {
+                global_name: 1,
+                version: 4,
+                name: Some("eDP-1".to_string()),
+                description: None,
+                make: None,
+                model: None,
+                width: Some(1920),
+                height: Some(1200),
+                refresh_mhz: Some(60000),
+                scale_factor: Some(2),
+            }],
+            ..crate::services::wayland_runtime::WaylandRuntimeSnapshot::default()
+        };
+
+        let model = bar.build_displays_popup_model(&snapshot);
+
+        assert!(!model.summary_rows.is_empty());
+        assert_eq!(model.output_cards.len(), 1);
+        assert_eq!(model.output_cards[0].label, "eDP-1");
+    }
+
+    #[test]
+    fn audio_routes_popup_builder_preserves_active_route_summaries() {
+        let mut bar = hermetic_bar();
+        bar.controls.audio_devices.output_routes =
+            vec![crate::services::controls::AudioRouteInfo {
+                id: "52".to_string(),
+                name: "Built-in Audio".to_string(),
+                origin: crate::services::controls::AudioRouteOrigin::Internal,
+            }];
+        bar.controls.audio_devices.input_routes = vec![crate::services::controls::AudioRouteInfo {
+            id: "54".to_string(),
+            name: "Internal Microphone".to_string(),
+            origin: crate::services::controls::AudioRouteOrigin::Internal,
+        }];
+        bar.controls.audio_devices.output_route = Some("Built-in Audio".to_string());
+        bar.controls.audio_devices.input_route = Some("Internal Microphone".to_string());
+
+        let model = bar.build_audio_routes_popup_model();
+
+        assert!(model.output_summary.contains("Built-in Audio"));
+        assert!(model.input_summary.contains("Internal Microphone"));
+        assert_eq!(model.output_routes.len(), 1);
+        assert_eq!(model.input_routes.len(), 1);
+    }
+
+    #[test]
+    fn bluetooth_devices_popup_builder_marks_new_scan_results() {
+        let mut bar = hermetic_bar();
+        bar.controls.bluetooth_enabled = true;
+        bar.controls.bluetooth_devices.connected_devices = vec!["WH-1000XM5".to_string()];
+        bar.controls.bluetooth_devices.device_details =
+            vec![crate::services::controls::BluetoothConnectedDevice {
+                address: "AA:BB:CC:DD:EE:FF".to_string(),
+                name: "WH-1000XM5".to_string(),
+                connected: true,
+                paired: true,
+                trusted: true,
+                battery_percent: Some(90),
+                audio_profiles: vec!["A2DP".to_string()],
+            }];
+        bar.bluetooth_scan_state = super::BluetoothScanState::Completed {
+            total_devices: 1,
+            newly_discovered_addresses: vec!["AA:BB:CC:DD:EE:FF".to_string()],
+            remaining_secs: 5,
+        };
+
+        let model = bar.build_bluetooth_devices_popup_model();
+
+        assert_eq!(model.adapter_summary, "1 connected");
+        assert_eq!(model.device_cards.len(), 1);
+        assert!(model.device_cards[0].is_new);
+    }
+
+    #[test]
+    fn connectivity_popup_builder_preserves_wifi_and_bluetooth_state() {
+        let mut bar = hermetic_bar();
+        bar.controls.bluetooth_enabled = true;
+        bar.controls.bluetooth_devices.connected_devices = vec!["WH-1000XM5".to_string()];
+
+        let model = bar.build_connectivity_popup_model();
+
+        assert!(model.bluetooth_enabled);
+        assert_eq!(model.bluetooth_devices.connected_devices.len(), 1);
+    }
+
+    #[test]
+    fn system_info_popup_builder_includes_overview_and_hardware_rows() {
+        let mut bar = hermetic_bar();
+        bar.system_info_service = crate::services::system_info::SystemInfoService::with_snapshot(
+            crate::modules::system::SysData {
+                cpu_str: "11%".to_string(),
+                mem_str: "26%".to_string(),
+                temp_str: "40°C".to_string(),
+                disk_root_str: "54%".to_string(),
+                disk_boot_str: "50%".to_string(),
+                ip_address: "192.168.100.13".to_string(),
+                net_down_str: "0 KB/s".to_string(),
+                net_up_str: "0 KB/s".to_string(),
+                ..crate::modules::system::SysData::default()
+            },
+        );
+        let compositor = crate::services::compositor::CompositorSnapshot {
+            workspaces: Vec::new(),
+            active_window: String::new(),
+            special_workspace_visible: false,
+            keyboard_layout: "US".to_string(),
+            configured_backend: crate::services::compositor::CompositorBackendKind::Hyprland,
+            active_backend: crate::services::compositor::CompositorBackendKind::Hyprland,
+        };
+        let wayland = crate::services::wayland_runtime::WaylandRuntimeSnapshot::default();
+
+        let model = bar.build_system_info_popup_model(&compositor, &wayland);
+
+        assert_eq!(model.version, env!("CARGO_PKG_VERSION"));
+        assert!(!model.overview_rows.is_empty());
+        assert!(!model.hardware_rows.is_empty());
+    }
+
+    #[test]
     fn opening_connectivity_popup_requests_bluetooth_refresh() {
         let mut bar = hermetic_bar();
 
@@ -5550,6 +2864,31 @@ mod tests {
         );
 
         let _ = bar.update(Message::TogglePopup(Popup::SystemMonitor));
+
+        assert_eq!(
+            bar.system_info_service.diagnostics().last_refresh_kind,
+            Some(crate::services::system_info::SystemInfoRefreshKind::Fast)
+        );
+    }
+
+    #[test]
+    fn visualizer_updates_pause_while_popup_is_open() {
+        let mut bar = hermetic_bar();
+        assert!(bar.audio_visualizer_updates_enabled());
+
+        bar.popup = Popup::SystemMonitor;
+        assert!(!bar.audio_visualizer_updates_enabled());
+
+        bar.popup = Popup::None;
+        assert!(bar.audio_visualizer_updates_enabled());
+    }
+
+    #[test]
+    fn tick_refreshes_system_info_fast_while_system_monitor_is_open() {
+        let mut bar = hermetic_bar();
+        bar.popup = Popup::SystemMonitor;
+
+        let _ = bar.update(Message::Tick(chrono::Local::now()));
 
         assert_eq!(
             bar.system_info_service.diagnostics().last_refresh_kind,
@@ -5636,12 +2975,12 @@ mod tests {
                 remaining_secs: super::BLUETOOTH_SCAN_RESULT_WINDOW_SECS,
             }
         );
-        assert!(ThinkPadBar::bluetooth_device_is_new(
+        assert!(bluetooth_devices::bluetooth_device_is_new(
             &bar.bluetooth_scan_state,
             "11:22:33:44:55:66"
         ));
         assert_eq!(
-            ThinkPadBar::bluetooth_scan_status_summary(&bar.bluetooth_scan_state),
+            bluetooth_devices::scan_status_summary(&bar.bluetooth_scan_state),
             "2 devices known; 1 newly discovered • idle in 8s"
         );
     }
@@ -5649,21 +2988,21 @@ mod tests {
     #[test]
     fn bluetooth_scan_status_summary_counts_down_and_finishes() {
         assert_eq!(
-            ThinkPadBar::bluetooth_scan_status_summary(&super::BluetoothScanState::Scanning {
+            bluetooth_devices::scan_status_summary(&super::BluetoothScanState::Scanning {
                 remaining_secs: super::BLUETOOTH_SCAN_WINDOW_SECS,
                 baseline_addresses: vec![],
             }),
             "Scanning (5s left)"
         );
         assert_eq!(
-            ThinkPadBar::bluetooth_scan_status_summary(&super::BluetoothScanState::Scanning {
+            bluetooth_devices::scan_status_summary(&super::BluetoothScanState::Scanning {
                 remaining_secs: 0,
                 baseline_addresses: vec![],
             }),
             "Finishing scan..."
         );
         assert_eq!(
-            ThinkPadBar::bluetooth_scan_status_summary(&super::BluetoothScanState::Completed {
+            bluetooth_devices::scan_status_summary(&super::BluetoothScanState::Completed {
                 total_devices: 2,
                 newly_discovered_addresses: vec!["11:22:33:44:55:66".to_string()],
                 remaining_secs: super::BLUETOOTH_SCAN_RESULT_WINDOW_SECS,
@@ -5681,7 +3020,7 @@ mod tests {
         }];
 
         assert_eq!(
-            ThinkPadBar::current_audio_route_summary(
+            audio_routes::current_route_summary(
                 &routes,
                 Some("WH-1000XM5 a2dp-sink"),
                 "No output route selected"

@@ -1,5 +1,4 @@
 use iced::futures::SinkExt;
-use std::thread;
 use wayland_client::{
     protocol::{
         wl_compositor::WlCompositor,
@@ -331,8 +330,8 @@ impl WaylandRuntimeService {
         iced::Subscription::run_with_id(
             std::any::TypeId::of::<WaylandRuntimeListener>(),
             iced::stream::channel(1, move |output| async move {
-                let thread = thread::spawn(move || run_wayland_runtime_listener(output));
-                let _ = thread.join();
+                std::thread::spawn(move || run_wayland_runtime_listener(output));
+                std::future::pending::<()>().await;
             }),
         )
     }

@@ -32,6 +32,26 @@ pub struct NetworkConfig {
 pub struct AppearanceConfig {
     pub bar_height: u32,
     pub opacity: f32,
+    pub audio_visualizer: AudioVisualizerConfig,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct AudioVisualizerConfig {
+    pub enabled: bool,
+    pub mode: String,
+    pub bars: u8,
+    pub min_height: f32,
+    pub max_height: f32,
+    pub bar_width: u8,
+    pub gap: u8,
+    pub padding_x: u8,
+    pub padding_y: u8,
+    pub fps: u8,
+    pub min_freq_hz: f32,
+    pub max_freq_hz: f32,
+    pub color_profile: String,
+    pub decay_profile: String,
 }
 
 impl Default for CompositorConfig {
@@ -57,11 +77,116 @@ impl Default for AppearanceConfig {
         Self {
             bar_height: 24,
             opacity: 0.85,
+            audio_visualizer: AudioVisualizerConfig::default(),
         }
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+impl Default for AudioVisualizerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: "compact".to_string(),
+            bars: 16,
+            min_height: 4.0,
+            max_height: 18.0,
+            bar_width: 3,
+            gap: 2,
+            padding_x: 0,
+            padding_y: 0,
+            fps: 24,
+            min_freq_hz: 60.0,
+            max_freq_hz: 12_000.0,
+            color_profile: "heat".to_string(),
+            decay_profile: "smooth".to_string(),
+        }
+    }
+}
+
+impl AudioVisualizerConfig {
+    pub fn normalized_mode(&self) -> &str {
+        match self.mode.as_str() {
+            "expressive" => "expressive",
+            _ => "compact",
+        }
+    }
+
+    pub fn normalized_bars(&self) -> usize {
+        self.bars.clamp(8, 24) as usize
+    }
+
+    pub fn normalized_fps(&self) -> u8 {
+        self.fps.clamp(10, 30)
+    }
+
+    pub fn normalized_min_height(&self) -> f32 {
+        self.min_height.clamp(2.0, 10.0)
+    }
+
+    pub fn normalized_max_height(&self) -> f32 {
+        self.max_height
+            .max(self.normalized_min_height() + 2.0)
+            .clamp(8.0, 28.0)
+    }
+
+    pub fn normalized_bar_width(&self) -> f32 {
+        f32::from(self.bar_width.clamp(2, 6))
+    }
+
+    pub fn normalized_gap(&self) -> u16 {
+        u16::from(self.gap.clamp(1, 4))
+    }
+
+    pub fn normalized_padding_x(&self) -> u16 {
+        if self.padding_x > 0 {
+            return u16::from(self.padding_x.clamp(2, 16));
+        }
+
+        match self.normalized_mode() {
+            "expressive" => 10,
+            _ => 6,
+        }
+    }
+
+    pub fn normalized_padding_y(&self) -> u16 {
+        if self.padding_y > 0 {
+            return u16::from(self.padding_y.clamp(1, 8));
+        }
+
+        match self.normalized_mode() {
+            "expressive" => 4,
+            _ => 2,
+        }
+    }
+
+    pub fn normalized_min_freq_hz(&self) -> f32 {
+        self.min_freq_hz.clamp(20.0, 2_000.0)
+    }
+
+    pub fn normalized_max_freq_hz(&self) -> f32 {
+        self.max_freq_hz
+            .max(self.normalized_min_freq_hz() * 2.0)
+            .clamp(2_000.0, 20_000.0)
+    }
+
+    pub fn normalized_color_profile(&self) -> &str {
+        match self.color_profile.as_str() {
+            "accent" => "accent",
+            "mono" => "mono",
+            _ => "heat",
+        }
+    }
+
+    pub fn normalized_decay_profile(&self) -> &str {
+        match self.decay_profile.as_str() {
+            "tight" => "tight",
+            "expressive" => "expressive",
+            _ => "smooth",
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 pub struct PerformanceConfig {
     pub profile: String,
@@ -193,6 +318,8 @@ opacity = 0.9
         assert_eq!(cfg.compositor.backend, "hyprland");
         assert_eq!(cfg.network.backend, "iwd");
         assert_eq!(cfg.performance.profile, "normal");
+        assert!(cfg.appearance.audio_visualizer.enabled);
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_bars(), 16);
         assert_eq!(cfg.performance.tick_brightness_secs, 1);
         assert_eq!(cfg.performance.tick_thermal_secs, 2);
         assert_eq!(cfg.performance.tick_slow_secs, 10);
@@ -213,6 +340,22 @@ station_path = "/net/connman/iwd/0/5"
 bar_height = 24
 opacity = 0.9
 
+[appearance.audio_visualizer]
+enabled = false
+mode = "expressive"
+bars = 20
+min_height = 3.0
+max_height = 16.0
+bar_width = 4
+gap = 3
+padding_x = 12
+padding_y = 5
+fps = 20
+min_freq_hz = 80.0
+max_freq_hz = 10000.0
+color_profile = "accent"
+decay_profile = "expressive"
+
 [performance]
 profile = "low_power"
 tick_brightness_secs = 0
@@ -220,7 +363,78 @@ tick_thermal_secs = 0
 tick_slow_secs = 0
 "#;
         let cfg: Config = toml::from_str(input).expect("config parse should succeed");
+        assert!(!cfg.appearance.audio_visualizer.enabled);
+        assert_eq!(
+            cfg.appearance.audio_visualizer.normalized_mode(),
+            "expressive"
+        );
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_bars(), 20);
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_fps(), 20);
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_min_height(), 3.0);
+        assert_eq!(
+            cfg.appearance.audio_visualizer.normalized_max_height(),
+            16.0
+        );
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_bar_width(), 4.0);
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_gap(), 3);
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_padding_x(), 12);
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_padding_y(), 5);
+        assert_eq!(
+            cfg.appearance.audio_visualizer.normalized_color_profile(),
+            "accent"
+        );
+        assert_eq!(
+            cfg.appearance.audio_visualizer.normalized_decay_profile(),
+            "expressive"
+        );
         assert_eq!(cfg.performance.effective_intervals(), (2, 4, 20));
+    }
+
+    #[test]
+    fn visualizer_normalization_clamps_style_and_profiles() {
+        let input = r#"
+font_path = "/tmp/font.ttf"
+font_name = "Test Font"
+
+[appearance.audio_visualizer]
+mode = "unknown"
+bar_width = 9
+gap = 0
+padding_x = 0
+padding_y = 0
+color_profile = "unknown"
+decay_profile = "unknown"
+"#;
+
+        let cfg: Config = toml::from_str(input).expect("config parse should succeed");
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_mode(), "compact");
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_bar_width(), 6.0);
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_gap(), 1);
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_padding_x(), 6);
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_padding_y(), 2);
+        assert_eq!(
+            cfg.appearance.audio_visualizer.normalized_color_profile(),
+            "heat"
+        );
+        assert_eq!(
+            cfg.appearance.audio_visualizer.normalized_decay_profile(),
+            "smooth"
+        );
+    }
+
+    #[test]
+    fn visualizer_expressive_mode_uses_roomier_padding_defaults() {
+        let input = r#"
+font_path = "/tmp/font.ttf"
+font_name = "Test Font"
+
+[appearance.audio_visualizer]
+mode = "expressive"
+"#;
+
+        let cfg: Config = toml::from_str(input).expect("config parse should succeed");
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_padding_x(), 10);
+        assert_eq!(cfg.appearance.audio_visualizer.normalized_padding_y(), 4);
     }
 
     #[test]

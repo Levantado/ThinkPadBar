@@ -1,8 +1,10 @@
 mod app;
 mod config;
 mod modules;
+mod popup_coordinator;
 mod services;
 mod ui;
+mod update_coordinator;
 
 use app::ThinkPadBar;
 use iced::Font;

@@ -47,6 +47,76 @@ impl AudioRoutesPopupModel {
     }
 }
 
+pub fn popup_items(
+    routes: &[crate::services::controls::AudioRouteInfo],
+    opposite_routes: &[crate::services::controls::AudioRouteInfo],
+    current: Option<&str>,
+    capability_label: &'static str,
+    unavailable_label: &'static str,
+) -> Vec<AudioRoutePopupItem> {
+    if routes.is_empty() {
+        return vec![AudioRoutePopupItem {
+            id: String::new(),
+            label: unavailable_label.to_string(),
+            icon: "󰖪",
+            capability_label,
+            origin_label: "N/A",
+            profile_label: "N/A",
+            status_label: "UNAVAILABLE",
+            warning_label: Some("WHY"),
+            detail: unavailable_detail(opposite_routes, capability_label),
+            is_default: false,
+            available: false,
+        }];
+    }
+
+    routes
+        .iter()
+        .map(|route| {
+            let is_default = current == Some(route.name.as_str());
+            AudioRoutePopupItem {
+                id: route.id.clone(),
+                label: route.name.clone(),
+                icon: origin_icon(route.origin),
+                capability_label,
+                origin_label: route.origin.badge_label(),
+                profile_label: profile_label(route),
+                status_label: if is_default { "ACTIVE" } else { "AVAILABLE" },
+                warning_label: warning_label(route),
+                detail: route_detail(route),
+                is_default,
+                available: true,
+            }
+        })
+        .collect()
+}
+
+pub fn current_route_summary(
+    routes: &[crate::services::controls::AudioRouteInfo],
+    current: Option<&str>,
+    empty_label: &'static str,
+) -> String {
+    match current {
+        Some(current_name) => routes
+            .iter()
+            .find(|route| route.name == current_name)
+            .map(|route| format!("{} • {}", route.name, route_detail(route)))
+            .unwrap_or_else(|| format!("{current_name} • Active default")),
+        None => empty_label.to_string(),
+    }
+}
+
+#[cfg(test)]
+pub fn route_button_label(controls: &crate::services::controls::ControlsSnapshot) -> String {
+    let has_output = !controls.audio_devices.output_routes.is_empty();
+    let has_input = !controls.audio_devices.input_routes.is_empty();
+    match (has_output, has_input) {
+        (true, true) => "Audio Routes".to_string(),
+        (true, false) | (false, true) => "Partial Routes".to_string(),
+        (false, false) => "Routes Unavailable".to_string(),
+    }
+}
+
 pub fn view(
     theme: ThemeTokens,
     opacity: f32,
@@ -264,6 +334,154 @@ fn route_badge(
             },
             ..Default::default()
         })
+}
+
+fn origin_icon(origin: crate::services::controls::AudioRouteOrigin) -> &'static str {
+    match origin {
+        crate::services::controls::AudioRouteOrigin::Bluetooth => "󰂯",
+        crate::services::controls::AudioRouteOrigin::Usb => "󰕓",
+        crate::services::controls::AudioRouteOrigin::Internal => "󰓃",
+        crate::services::controls::AudioRouteOrigin::Hdmi => "󰡁",
+        crate::services::controls::AudioRouteOrigin::Virtual => "󰕮",
+        crate::services::controls::AudioRouteOrigin::Unknown => "󰟢",
+    }
+}
+
+fn profile_label(route: &crate::services::controls::AudioRouteInfo) -> &'static str {
+    let lower = route.name.to_ascii_lowercase();
+    match route.origin {
+        crate::services::controls::AudioRouteOrigin::Bluetooth => {
+            if lower.contains("a2dp") {
+                "A2DP"
+            } else if lower.contains("handsfree") || lower.contains("hfp") {
+                "HFP"
+            } else if lower.contains("headset") || lower.contains("hsp") {
+                "HSP"
+            } else {
+                "BT"
+            }
+        }
+        crate::services::controls::AudioRouteOrigin::Usb => "USB",
+        crate::services::controls::AudioRouteOrigin::Internal => {
+            if lower.contains("mic") || lower.contains("microphone") {
+                "MIC"
+            } else {
+                "ANALOG"
+            }
+        }
+        crate::services::controls::AudioRouteOrigin::Hdmi => "DIGITAL",
+        crate::services::controls::AudioRouteOrigin::Virtual => "VIRTUAL",
+        crate::services::controls::AudioRouteOrigin::Unknown => "UNKNOWN",
+    }
+}
+
+fn latency_label(route: &crate::services::controls::AudioRouteInfo) -> &'static str {
+    let lower = route.name.to_ascii_lowercase();
+    match route.origin {
+        crate::services::controls::AudioRouteOrigin::Bluetooth => {
+            if lower.contains("a2dp") {
+                "Higher-latency media path"
+            } else if lower.contains("handsfree")
+                || lower.contains("hfp")
+                || lower.contains("headset")
+                || lower.contains("hsp")
+            {
+                "Low-latency call path"
+            } else {
+                "Wireless path"
+            }
+        }
+        crate::services::controls::AudioRouteOrigin::Usb => "Low-latency external path",
+        crate::services::controls::AudioRouteOrigin::Internal => "Integrated device path",
+        crate::services::controls::AudioRouteOrigin::Hdmi => "Display audio path",
+        crate::services::controls::AudioRouteOrigin::Virtual => "Software-routed path",
+        crate::services::controls::AudioRouteOrigin::Unknown => "Latency unknown",
+    }
+}
+
+fn warning_label(route: &crate::services::controls::AudioRouteInfo) -> Option<&'static str> {
+    let lower = route.name.to_ascii_lowercase();
+    match route.origin {
+        crate::services::controls::AudioRouteOrigin::Bluetooth => {
+            if lower.contains("a2dp") {
+                Some("NO MIC")
+            } else if lower.contains("handsfree")
+                || lower.contains("hfp")
+                || lower.contains("headset")
+                || lower.contains("hsp")
+            {
+                Some("LOW FIDELITY")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn conflict_detail(route: &crate::services::controls::AudioRouteInfo) -> Option<&'static str> {
+    let lower = route.name.to_ascii_lowercase();
+    match route.origin {
+        crate::services::controls::AudioRouteOrigin::Bluetooth => {
+            if lower.contains("a2dp") {
+                Some("microphone path unavailable")
+            } else if lower.contains("handsfree")
+                || lower.contains("hfp")
+                || lower.contains("headset")
+                || lower.contains("hsp")
+            {
+                Some("reduced media quality")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn route_detail(route: &crate::services::controls::AudioRouteInfo) -> String {
+    let mut detail = format!(
+        "{} • {}",
+        route.origin.summary_label(),
+        latency_label(route)
+    );
+    if let Some(conflict) = conflict_detail(route) {
+        detail.push_str(" • ");
+        detail.push_str(conflict);
+    }
+    detail
+}
+
+fn unavailable_detail(
+    opposite_routes: &[crate::services::controls::AudioRouteInfo],
+    capability_label: &'static str,
+) -> String {
+    let has_bt_media = opposite_routes.iter().any(|route| {
+        route.origin == crate::services::controls::AudioRouteOrigin::Bluetooth
+            && route.name.to_ascii_lowercase().contains("a2dp")
+    });
+    let has_bt_call = opposite_routes.iter().any(|route| {
+        route.origin == crate::services::controls::AudioRouteOrigin::Bluetooth && {
+            let lower = route.name.to_ascii_lowercase();
+            lower.contains("handsfree")
+                || lower.contains("hfp")
+                || lower.contains("headset")
+                || lower.contains("hsp")
+        }
+    });
+
+    match capability_label {
+        "SOURCE" if has_bt_media => {
+            "SOURCE unavailable: Bluetooth media profile hides microphone path".to_string()
+        }
+        "SINK" if has_bt_call => {
+            "SINK unavailable: Bluetooth call profile did not expose media output".to_string()
+        }
+        _ if has_bt_media || has_bt_call => {
+            format!("{capability_label} unavailable on active Bluetooth profile")
+        }
+        _ => format!("{capability_label} unavailable on current runtime"),
+    }
 }
 
 pub fn group_by_origin(

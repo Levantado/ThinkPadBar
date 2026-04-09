@@ -1,3 +1,4 @@
+pub mod audio_visualizer;
 pub mod capabilities;
 pub mod coalescing;
 pub mod compositor;
