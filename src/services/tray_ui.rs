@@ -15,16 +15,15 @@ pub enum TrayUiSecondaryAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayUiSelectionAction {
-    ActivateMenuItem {
-        menu_item_id: i32,
-        prefetch_path: Vec<i32>,
-    },
+    NavigateMenu,
+    ActivateMenuItem(i32),
     CloseMenu,
 }
 
 pub struct TrayUiService {
     tray: crate::services::tray_model::Tray,
     open_menu_id: Option<String>,
+    menu_navigation_path: Vec<i32>,
     menu_cursor: Option<(i32, i32)>,
 }
 
@@ -33,6 +32,7 @@ impl TrayUiService {
         Self {
             tray: crate::services::tray_model::Tray::new(),
             open_menu_id: None,
+            menu_navigation_path: Vec::new(),
             menu_cursor: None,
         }
     }
@@ -57,12 +57,17 @@ impl TrayUiService {
             .and_then(|id| self.tray.owned_menu_for(id))
     }
 
+    pub fn open_menu_path(&self) -> &[i32] {
+        &self.menu_navigation_path
+    }
+
     pub fn diagnostics(&self) -> crate::services::tray_model::TrayDiagnostics {
         self.tray.diagnostics()
     }
 
     pub fn close_transient_ui(&mut self) {
         self.open_menu_id = None;
+        self.menu_navigation_path.clear();
         self.menu_cursor = None;
     }
 
@@ -100,6 +105,7 @@ impl TrayUiService {
                 return TrayUiSecondaryAction::CloseMenu;
             }
             self.open_menu_id = Some(id);
+            self.menu_navigation_path.clear();
             self.menu_cursor = cursor;
             return TrayUiSecondaryAction::OpenMenu;
         }
@@ -125,25 +131,46 @@ impl TrayUiService {
             self.close_transient_ui();
             return TrayUiSelectionAction::CloseMenu;
         };
-        let action = self
-            .tray
-            .owned_menu_for(&id)
-            .and_then(|menu| menu.action(menu_item_id).cloned());
-        self.close_transient_ui();
+
+        let action = self.tray.owned_menu_for(&id).and_then(|menu| {
+            menu.item_in_level(&self.menu_navigation_path, menu_item_id)
+                .cloned()
+        });
+
         let Some(action) = action else {
+            self.close_transient_ui();
             return TrayUiSelectionAction::CloseMenu;
         };
+
+        if !action.children.is_empty() {
+            self.menu_navigation_path.push(action.id);
+            return TrayUiSelectionAction::NavigateMenu;
+        }
+
+        self.close_transient_ui();
         if !action.enabled || !action.activatable {
             return TrayUiSelectionAction::CloseMenu;
         }
+
         self.tray
             .update(crate::services::tray_model::TrayMessage::ActivateMenuItem(
-                id.clone(),
+                id,
                 menu_item_id,
             ));
-        TrayUiSelectionAction::ActivateMenuItem {
-            menu_item_id,
-            prefetch_path: action.prefetch_path,
+        TrayUiSelectionAction::ActivateMenuItem(menu_item_id)
+    }
+
+    pub fn handle_menu_back(&mut self) -> TrayUiSelectionAction {
+        if self.open_menu_id.is_none() {
+            self.close_transient_ui();
+            return TrayUiSelectionAction::CloseMenu;
+        }
+
+        if self.menu_navigation_path.pop().is_some() {
+            TrayUiSelectionAction::NavigateMenu
+        } else {
+            self.close_transient_ui();
+            TrayUiSelectionAction::CloseMenu
         }
     }
 
@@ -407,21 +434,19 @@ mod tests {
             },
         );
         let _ = service.handle_secondary_click("item".to_string(), Some((1, 2)));
+        assert_eq!(
+            service.handle_menu_selection(5, None),
+            TrayUiSelectionAction::NavigateMenu
+        );
 
         let action = service.handle_menu_selection(7, None);
-        assert_eq!(
-            action,
-            TrayUiSelectionAction::ActivateMenuItem {
-                menu_item_id: 7,
-                prefetch_path: vec![5, 7]
-            }
-        );
+        assert_eq!(action, TrayUiSelectionAction::ActivateMenuItem(7));
         assert_eq!(service.open_menu_id, None);
         assert_eq!(service.menu_cursor(), None);
     }
 
     #[test]
-    fn submenu_header_selection_closes_menu_without_dispatch() {
+    fn submenu_header_selection_navigates_and_back_stays_open() {
         let mut service = TrayUiService::new();
         let mut parent = system_tray::menu::MenuItem {
             id: 41,
@@ -464,10 +489,16 @@ mod tests {
         );
         let _ = service.handle_secondary_click("item".to_string(), Some((1, 2)));
 
-        let action = service.handle_menu_selection(41, None);
-
-        assert_eq!(action, TrayUiSelectionAction::CloseMenu);
-        assert_eq!(service.open_menu_id, None);
-        assert_eq!(service.menu_cursor(), None);
+        assert_eq!(
+            service.handle_menu_selection(41, None),
+            TrayUiSelectionAction::NavigateMenu
+        );
+        assert_eq!(service.open_menu_path(), &[41]);
+        assert_eq!(
+            service.handle_menu_back(),
+            TrayUiSelectionAction::NavigateMenu
+        );
+        assert!(service.open_menu_path().is_empty());
+        assert!(service.open_menu().is_some());
     }
 }

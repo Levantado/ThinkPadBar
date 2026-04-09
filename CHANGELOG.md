@@ -2,6 +2,54 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.66] - 2026-04-10
+
+### Changed
+- Added a shared popup typography scale and applied it across popup chrome and metric-heavy popup content to reduce per-popup font drift.
+- Standardized popup scroll-content breathing space by wrapping scrollable bodies with consistent right/bottom padding in the long-content popup surfaces.
+- Extended unified button-state behavior to popup action controls (Wi-Fi/Bluetooth toggles, scan/actions, power controls, and shortcut rows), so hover/pressed/disabled states now match across domains.
+
+### Quality
+- Kept popup typography and button-state contracts under regression coverage through shared popup/chrome tests.
+
+## [1.0.65] - 2026-04-10
+
+### Changed
+- Unified popup control interaction states around shared hover, pressed, disabled, accent, and ghost button behavior instead of each popup defining its own button-state treatment.
+- Aligned the main popup control groups to a shared height rhythm so shortcut buttons, Wi-Fi/Bluetooth toggles, Bluetooth scan/actions, and power actions no longer feel vertically inconsistent.
+
+### Quality
+- Added regression coverage for the shared popup button-state contract.
+
+## [1.0.64] - 2026-04-10
+
+### Changed
+- Unified layer-surface sizing and top-edge anchoring for the main popups so right-aligned popups now open from the same vertical offset and share one stable right-edge column instead of drifting by popup kind.
+- Standardized popup surface widths around the shared popup chrome, reducing horizontal jumps when switching between stats, power, controls, connectivity, displays, audio routes, Bluetooth devices, calendar, and system info.
+
+### Quality
+- Extended popup-anchor regression coverage to lock the shared top margin and standardized popup surface sizes.
+
+## [1.0.63] - 2026-04-09
+
+### Changed
+- Unified popup chrome across the main popup surfaces around a shared panel/card language, tighter spacing, and consistent header actions instead of each popup defining its own panel treatment.
+- Normalized primary popup headers so `Stats`, `Power`, `Controls`, and `Connectivity` now expose `System Info` through the same action slot and share the same close affordance.
+- Tightened popup rhythm and palette usage across stats, power, controls, connectivity, displays, Bluetooth devices, audio routes, calendar, and tray menu so spacing, card emphasis, and surface contrast now read as one system.
+
+### Quality
+- Added regression coverage for the expanded shared popup-header action contract.
+
+## [1.0.62] - 2026-04-09
+
+### Changed
+- Rebuilt the right-click tray popup into a compact drill-in menu instead of a flat indented tree, so submenu parents now open a focused second-level menu with an explicit back row instead of mixing parent and child actions in one long list.
+- Tightened tray popup sizing and rhythm for context-menu usage: the tray surface is now narrower, row height is standardized, separators are deduped, and the popup height is derived from the currently visible menu level instead of the full flattened tree.
+- Removed the redundant tray-menu title header and shifted emphasis to clearer row affordances, with dedicated submenu chevrons, muted disabled items, and a distinct back-navigation state.
+
+### Quality
+- Added regression coverage for hierarchical owned tray-menu modeling, submenu navigation/back behavior in `TrayUiService`, and tray popup model rendering for root and submenu levels.
+
 ## [1.0.61] - 2026-04-09
 
 ### Fixed

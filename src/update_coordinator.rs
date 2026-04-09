@@ -49,9 +49,10 @@ pub fn tray_popup_plan_from_secondary(action: TrayUiSecondaryAction) -> TrayPopu
 
 pub fn tray_popup_plan_from_selection(action: TrayUiSelectionAction) -> TrayPopupPlan {
     match action {
-        TrayUiSelectionAction::CloseMenu | TrayUiSelectionAction::ActivateMenuItem { .. } => {
+        TrayUiSelectionAction::CloseMenu | TrayUiSelectionAction::ActivateMenuItem(_) => {
             TrayPopupPlan::CloseMenu
         }
+        TrayUiSelectionAction::NavigateMenu => TrayPopupPlan::None,
     }
 }
 

@@ -117,8 +117,10 @@ pub fn view(
     opacity: f32,
     model: DisplaysPopupModel,
 ) -> Element<'static, Message> {
+    let type_scale = super::standard_popup_type_scale();
+    let layout = super::standard_domain_popup_layout();
     let mut content = Column::new()
-        .spacing(14)
+        .spacing(layout.section_spacing)
         .push(chrome::detail_popup_header_row(
             theme,
             "Displays",
@@ -142,29 +144,28 @@ pub fn view(
         .push(Space::with_height(Length::Fixed(8.0)))
         .push(
             text("Output Details")
-                .size(14)
-                .style(|_| iced::widget::text::Style {
-                    color: Some(Color::from_rgb8(0x7a, 0xa2, 0xf7)),
+                .size(type_scale.section)
+                .style(move |_| iced::widget::text::Style {
+                    color: Some(theme.accent),
                 }),
         )
-        .push(output_cards_column(model.output_cards));
+        .push(output_cards_column(theme, model.output_cards));
 
     container(
-        container(scrollable(content))
+        container(scrollable(container(content).padding([0, 14, 12, 0])))
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(Padding::from([20, 24]))
-            .style(move |_| iced::widget::container::Style {
-                background: Some(iced::Background::Color(Color {
+            .padding(Padding::from([
+                layout.outer_padding_y,
+                layout.outer_padding_x,
+            ]))
+            .style(move |_| {
+                let mut style = chrome::popup_panel_style(theme);
+                style.background = Some(iced::Background::Color(Color {
                     a: opacity,
-                    ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                })),
-                text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
+                    ..theme.panel
+                }));
+                style
             }),
     )
     .width(Length::Fill)
@@ -186,12 +187,15 @@ fn metric_row(metric: PopupMetricRow) -> Element<'static, Message> {
         .into()
 }
 
-fn output_cards_column(cards: Vec<DisplayOutputCard>) -> Column<'static, Message> {
+fn output_cards_column(
+    theme: ThemeTokens,
+    cards: Vec<DisplayOutputCard>,
+) -> Column<'static, Message> {
     let mut column = Column::new().spacing(10);
     for card in cards {
         let mut badges_row = Row::new().spacing(6);
         for badge_label in card.badges {
-            badges_row = badges_row.push(output_badge(badge_label));
+            badges_row = badges_row.push(output_badge(theme, badge_label));
         }
         column = column.push(
             container(
@@ -208,31 +212,16 @@ fn output_cards_column(cards: Vec<DisplayOutputCard>) -> Column<'static, Message
                     ),
             )
             .padding(12)
-            .style(|_| iced::widget::container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                border: iced::Border {
-                    radius: 10.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
+            .style(move |_| chrome::popup_card_style(theme)),
         );
     }
     column
 }
 
-fn output_badge(label: String) -> iced::widget::Container<'static, Message> {
+fn output_badge(theme: ThemeTokens, label: String) -> iced::widget::Container<'static, Message> {
     container(text(label).size(10))
         .padding(Padding::from([4, 8]))
-        .style(|_| iced::widget::container::Style {
-            background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
-            text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-            border: iced::Border {
-                radius: 999.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
+        .style(move |_| chrome::popup_badge_style(theme))
 }
 
 trait ColumnRowsExt<'a> {

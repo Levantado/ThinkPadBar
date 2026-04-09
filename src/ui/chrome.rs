@@ -1,6 +1,6 @@
 use iced::{
-    widget::{button, text, Row, Space},
-    Alignment, Background, Length, Padding,
+    widget::{button, container, text, Row, Space},
+    Alignment, Background, Color, Length, Padding,
 };
 
 use crate::app::{Message, Popup};
@@ -22,8 +22,23 @@ pub struct DetailHeaderAction {
     pub target: Popup,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupButtonTone {
+    Surface,
+    SurfaceAlt,
+    Accent,
+    Ghost,
+}
+
 pub fn detail_popup_header_action(popup: &Popup) -> Option<DetailHeaderAction> {
     match popup {
+        Popup::Stats | Popup::Power | Popup::Controls | Popup::Connectivity => {
+            Some(DetailHeaderAction {
+                icon: "󰈈",
+                label: "System Info",
+                target: Popup::SystemMonitor,
+            })
+        }
         Popup::Displays => Some(DetailHeaderAction {
             icon: "󰈈",
             label: "System Info",
@@ -38,10 +53,11 @@ pub fn detail_popup_header_row(
     title: &'static str,
     popup: &Popup,
 ) -> Row<'static, Message> {
+    let type_scale = crate::ui::popups::standard_popup_type_scale();
     let mut row = Row::new()
         .spacing(theme.gap_medium)
         .align_y(Alignment::Center)
-        .push(text(title).size(18))
+        .push(text(title).size(type_scale.title))
         .push(Space::with_width(Length::Fill));
 
     if let Some(action) = detail_popup_header_action(popup) {
@@ -50,15 +66,19 @@ pub fn detail_popup_header_row(
             Row::new()
                 .spacing(theme.gap_small)
                 .align_y(Alignment::Center)
-                .push(text(action.icon).size(13))
-                .push(text(action.label).size(11)),
+                .push(text(action.icon).size(type_scale.body))
+                .push(text(action.label).size(type_scale.meta)),
             Message::TogglePopup(action.target),
         ));
     }
 
     row.push(chrome_button(
         theme,
-        text("Close").size(11),
+        Row::new()
+            .spacing(theme.gap_small)
+            .align_y(Alignment::Center)
+            .push(text("󰅖").size(type_scale.meta))
+            .push(text("Close").size(type_scale.meta)),
         Message::TogglePopup(popup.clone()),
     ))
 }
@@ -75,6 +95,7 @@ pub fn domain_nav_focus_popup(popup: &Popup) -> Popup {
 }
 
 pub fn domain_popup_nav_row(theme: ThemeTokens, active_popup: &Popup) -> Row<'static, Message> {
+    let type_scale = crate::ui::popups::standard_popup_type_scale();
     let mut row = Row::new().spacing(theme.gap_medium);
 
     for (icon, label, target, is_active) in domain_popup_nav_items(active_popup) {
@@ -82,11 +103,11 @@ pub fn domain_popup_nav_row(theme: ThemeTokens, active_popup: &Popup) -> Row<'st
             Row::new()
                 .spacing(theme.gap_small)
                 .align_y(Alignment::Center)
-                .push(text(icon).size(14))
-                .push(text(label).size(11)),
+                .push(text(icon).size(type_scale.section))
+                .push(text(label).size(type_scale.meta)),
         )
         .width(Length::FillPortion(1))
-        .padding(Padding::from([8, 10]))
+        .padding(Padding::from([9, 12]))
         .style(move |_, _| {
             if is_active {
                 iced::widget::button::Style {
@@ -274,6 +295,128 @@ pub fn device_summary_items(
     ]
 }
 
+pub fn popup_panel_style(theme: ThemeTokens) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(theme.panel)),
+        text_color: Some(theme.text),
+        border: iced::Border {
+            radius: theme.panel_radius.into(),
+            width: 1.0,
+            color: Color::from_rgba8(0xc0, 0xca, 0xf5, 0.12),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn popup_card_style(theme: ThemeTokens) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(theme.surface)),
+        text_color: Some(theme.text),
+        border: iced::Border {
+            radius: theme.button_radius.into(),
+            width: 1.0,
+            color: Color::from_rgba8(0xc0, 0xca, 0xf5, 0.08),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn popup_card_alt_style(theme: ThemeTokens) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(theme.surface_alt)),
+        text_color: Some(theme.text),
+        border: iced::Border {
+            radius: theme.button_radius.into(),
+            width: 1.0,
+            color: Color::from_rgba8(0xc0, 0xca, 0xf5, 0.10),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn popup_badge_style(theme: ThemeTokens) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(theme.surface_alt)),
+        text_color: Some(theme.text),
+        border: iced::Border {
+            radius: 999.0.into(),
+            width: 1.0,
+            color: Color::from_rgba8(0xc0, 0xca, 0xf5, 0.08),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn popup_button_style(
+    theme: ThemeTokens,
+    status: button::Status,
+    tone: PopupButtonTone,
+    enabled: bool,
+) -> button::Style {
+    let (base_background, base_text, border_color) = match tone {
+        PopupButtonTone::Surface => (
+            Some(Background::Color(theme.surface)),
+            theme.text,
+            Color::from_rgba8(0xc0, 0xca, 0xf5, 0.08),
+        ),
+        PopupButtonTone::SurfaceAlt => (
+            Some(Background::Color(theme.surface_alt)),
+            theme.text,
+            Color::from_rgba8(0xc0, 0xca, 0xf5, 0.10),
+        ),
+        PopupButtonTone::Accent => (
+            Some(Background::Color(theme.accent)),
+            theme.text_on_accent,
+            Color::from_rgba8(0x7a, 0xa2, 0xf7, 0.35),
+        ),
+        PopupButtonTone::Ghost => (None, theme.text, Color::TRANSPARENT),
+    };
+
+    let (background, text_color) = if !enabled {
+        (base_background, Color::from_rgba8(0xe7, 0xec, 0xff, 0.38))
+    } else {
+        match status {
+            button::Status::Active => (base_background, base_text),
+            button::Status::Hovered => (
+                Some(Background::Color(match tone {
+                    PopupButtonTone::Accent => theme.accent,
+                    PopupButtonTone::Ghost => Color::from_rgba8(0xc0, 0xca, 0xf5, 0.08),
+                    PopupButtonTone::Surface => Color::from_rgba8(0xc0, 0xca, 0xf5, 0.08),
+                    PopupButtonTone::SurfaceAlt => Color::from_rgba8(0xc0, 0xca, 0xf5, 0.12),
+                })),
+                base_text,
+            ),
+            button::Status::Pressed => (
+                Some(Background::Color(match tone {
+                    PopupButtonTone::Accent => Color::from_rgba8(0x7a, 0xa2, 0xf7, 0.88),
+                    PopupButtonTone::Ghost => Color::from_rgba8(0xc0, 0xca, 0xf5, 0.12),
+                    PopupButtonTone::Surface => Color::from_rgba8(0xc0, 0xca, 0xf5, 0.12),
+                    PopupButtonTone::SurfaceAlt => Color::from_rgba8(0xc0, 0xca, 0xf5, 0.16),
+                })),
+                base_text,
+            ),
+            button::Status::Disabled => {
+                (base_background, Color::from_rgba8(0xe7, 0xec, 0xff, 0.38))
+            }
+        }
+    };
+
+    button::Style {
+        background,
+        text_color,
+        border: iced::Border {
+            radius: theme.button_radius.into(),
+            width: if matches!(tone, PopupButtonTone::Ghost) {
+                0.0
+            } else {
+                1.0
+            },
+            color: border_color,
+        },
+        ..Default::default()
+    }
+}
+
 fn chrome_button<'a>(
     theme: ThemeTokens,
     content: impl Into<iced::Element<'a, Message>>,
@@ -282,15 +425,7 @@ fn chrome_button<'a>(
     button(content)
         .padding(Padding::from([6, 10]))
         .on_press(message)
-        .style(move |_, _| iced::widget::button::Style {
-            background: Some(Background::Color(theme.surface)),
-            text_color: theme.text,
-            border: iced::Border {
-                radius: 9.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
+        .style(move |_, status| popup_button_style(theme, status, PopupButtonTone::Surface, true))
 }
 
 #[cfg(test)]
@@ -298,7 +433,8 @@ mod tests {
     use super::{
         audio_percent_label, battery_percent_label, bluetooth_pill_summary,
         detail_popup_header_action, device_summary_items, display_pill_summary,
-        domain_nav_focus_popup, domain_popup_nav_items, power_summary_items,
+        domain_nav_focus_popup, domain_popup_nav_items, popup_button_style, power_summary_items,
+        PopupButtonTone,
     };
     use crate::app::Popup;
     use crate::services::{
@@ -308,9 +444,27 @@ mod tests {
         },
         wayland_runtime::{WaylandOutputInfo, WaylandRuntimeSnapshot},
     };
+    use crate::ui::theme::ThemeTokens;
+    use iced::{widget::button, Color};
 
     #[test]
     fn detail_popup_header_action_remains_contextual() {
+        assert_eq!(
+            detail_popup_header_action(&Popup::Stats).map(|action| (
+                action.icon,
+                action.label,
+                action.target
+            )),
+            Some(("󰈈", "System Info", Popup::SystemMonitor))
+        );
+        assert_eq!(
+            detail_popup_header_action(&Popup::Controls).map(|action| (
+                action.icon,
+                action.label,
+                action.target
+            )),
+            Some(("󰈈", "System Info", Popup::SystemMonitor))
+        );
         assert_eq!(
             detail_popup_header_action(&Popup::Displays).map(|action| (
                 action.icon,
@@ -511,5 +665,39 @@ mod tests {
             }),
             "65%"
         );
+    }
+
+    #[test]
+    fn popup_button_style_dims_disabled_controls() {
+        let theme = ThemeTokens::from_config(&crate::config::Config::default());
+        let style = popup_button_style(
+            theme,
+            button::Status::Disabled,
+            PopupButtonTone::SurfaceAlt,
+            false,
+        );
+
+        assert_eq!(style.text_color, Color::from_rgba8(0xe7, 0xec, 0xff, 0.38));
+        assert_eq!(style.border.width, 1.0);
+    }
+
+    #[test]
+    fn popup_button_style_keeps_accent_foreground_on_interaction() {
+        let theme = ThemeTokens::from_config(&crate::config::Config::default());
+        let hovered = popup_button_style(
+            theme,
+            button::Status::Hovered,
+            PopupButtonTone::Accent,
+            true,
+        );
+        let pressed = popup_button_style(
+            theme,
+            button::Status::Pressed,
+            PopupButtonTone::Accent,
+            true,
+        );
+
+        assert_eq!(hovered.text_color, theme.text_on_accent);
+        assert_eq!(pressed.text_color, theme.text_on_accent);
     }
 }

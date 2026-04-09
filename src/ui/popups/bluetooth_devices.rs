@@ -177,8 +177,10 @@ pub fn view(
     opacity: f32,
     model: BluetoothDevicesPopupModel,
 ) -> Element<'static, Message> {
+    let type_scale = super::standard_popup_type_scale();
+    let layout = super::standard_domain_popup_layout();
     let mut content = Column::new()
-        .spacing(14)
+        .spacing(layout.section_spacing)
         .push(chrome::detail_popup_header_row(
             theme,
             "Bluetooth Devices",
@@ -190,43 +192,46 @@ pub fn view(
         ))
         .push(summary_row("Bluetooth Adapter", model.adapter_summary))
         .push(summary_row("Scan Status", model.scan_status))
-        .push(scan_button(model.bluetooth_enabled, model.scan_running))
+        .push(scan_button(
+            theme,
+            model.bluetooth_enabled,
+            model.scan_running,
+        ))
         .push(
             button(
                 Row::new()
                     .spacing(6)
                     .align_y(Alignment::Center)
-                    .push(text("󰳋").size(14))
-                    .push(text("Open Overskride").size(12)),
+                    .push(text("󰳋").size(type_scale.section))
+                    .push(text("Open Overskride").size(type_scale.meta)),
             )
             .padding(Padding::from([8, 10]))
             .on_press(Message::OpenOverskride),
         );
 
     if model.device_cards.is_empty() {
-        content = content.push(empty_state_card());
+        content = content.push(empty_state_card(theme));
     } else {
         for device in model.device_cards {
-            content = content.push(device_card(device, model.bluetooth_enabled));
+            content = content.push(device_card(theme, device, model.bluetooth_enabled));
         }
     }
 
     container(
-        container(scrollable(content))
+        container(scrollable(container(content).padding([0, 14, 12, 0])))
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(Padding::from([20, 24]))
-            .style(move |_| iced::widget::container::Style {
-                background: Some(iced::Background::Color(Color {
+            .padding(Padding::from([
+                layout.outer_padding_y,
+                layout.outer_padding_x,
+            ]))
+            .style(move |_| {
+                let mut style = chrome::popup_panel_style(theme);
+                style.background = Some(iced::Background::Color(Color {
                     a: opacity,
-                    ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                })),
-                text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
+                    ..theme.panel
+                }));
+                style
             }),
     )
     .width(Length::Fill)
@@ -249,6 +254,7 @@ fn summary_row(label: &'static str, value: String) -> Element<'static, Message> 
 }
 
 fn scan_button(
+    theme: ThemeTokens,
     bluetooth_enabled: bool,
     scan_running: bool,
 ) -> iced::widget::Button<'static, Message> {
@@ -269,35 +275,42 @@ fn scan_button(
     } else {
         None
     })
+    .height(Length::Fixed(32.0))
+    .style(move |_, status| {
+        chrome::popup_button_style(
+            theme,
+            status,
+            if scan_running {
+                chrome::PopupButtonTone::Accent
+            } else {
+                chrome::PopupButtonTone::SurfaceAlt
+            },
+            bluetooth_enabled,
+        )
+    })
 }
 
-fn empty_state_card() -> iced::widget::Container<'static, Message> {
+fn empty_state_card(theme: ThemeTokens) -> iced::widget::Container<'static, Message> {
     container(text("No Bluetooth devices discovered").size(12).style(|_| {
         iced::widget::text::Style {
             color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
         }
     }))
     .padding(12)
-    .style(|_| iced::widget::container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb8(0x21, 0x26, 0x38))),
-        border: iced::Border {
-            radius: 10.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    })
+    .style(move |_| chrome::popup_card_alt_style(theme))
 }
 
 fn device_card(
+    theme: ThemeTokens,
     device: BluetoothDeviceCard,
     bluetooth_enabled: bool,
 ) -> iced::widget::Container<'static, Message> {
     let mut badges_row = Row::new().spacing(6);
     for badge_label in device.badges.iter().cloned() {
-        badges_row = badges_row.push(badge(badge_label));
+        badges_row = badges_row.push(badge(theme, badge_label));
     }
     if device.is_new {
-        badges_row = badges_row.push(badge("NEW".to_string()));
+        badges_row = badges_row.push(badge(theme, "NEW".to_string()));
     }
 
     let connect_action = if device.connected {
@@ -324,6 +337,7 @@ fn device_card(
                     .push(text(device.label.clone()).size(13))
                     .push(Space::with_width(Length::Fill))
                     .push(action_button(
+                        theme,
                         if device.connected {
                             "Disconnect"
                         } else {
@@ -348,41 +362,35 @@ fn device_card(
             .push(
                 Row::new()
                     .spacing(8)
-                    .push(action_button("Pair", pair_action))
-                    .push(action_button("Trust", trust_action))
-                    .push(action_button("Remove", remove_action)),
+                    .push(action_button(theme, "Pair", pair_action))
+                    .push(action_button(theme, "Trust", trust_action))
+                    .push(action_button(theme, "Remove", remove_action)),
             ),
     )
     .padding(12)
-    .style(|_| iced::widget::container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb8(0x21, 0x26, 0x38))),
-        border: iced::Border {
-            radius: 10.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    })
+    .style(move |_| chrome::popup_card_alt_style(theme))
 }
 
-fn action_button(label: &'static str, message: Option<Message>) -> Element<'static, Message> {
+fn action_button(
+    theme: ThemeTokens,
+    label: &'static str,
+    message: Option<Message>,
+) -> Element<'static, Message> {
+    let enabled = message.is_some();
     button(text(label).size(10))
         .padding(Padding::from([4, 8]))
+        .height(Length::Fixed(28.0))
         .on_press_maybe(message)
+        .style(move |_, status| {
+            chrome::popup_button_style(theme, status, chrome::PopupButtonTone::Surface, enabled)
+        })
         .into()
 }
 
-fn badge(label: String) -> iced::widget::Container<'static, Message> {
+fn badge(theme: ThemeTokens, label: String) -> iced::widget::Container<'static, Message> {
     container(text(label).size(9))
         .padding(Padding::from([2, 6]))
-        .style(|_| iced::widget::container::Style {
-            background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
-            text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-            border: iced::Border {
-                radius: 999.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
+        .style(move |_| chrome::popup_badge_style(theme))
 }
 
 #[cfg(test)]

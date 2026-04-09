@@ -123,18 +123,20 @@ pub fn view(
     popup: Popup,
     model: AudioRoutesPopupModel,
 ) -> Element<'static, Message> {
+    let type_scale = super::standard_popup_type_scale();
+    let layout = super::standard_domain_popup_layout();
     let summary_item = |label: &str, val: String| -> Element<'static, Message> {
         Row::new()
             .spacing(12)
             .align_y(Alignment::Center)
             .push(
                 text(label.to_string())
-                    .size(13)
+                    .size(type_scale.body)
                     .width(Length::FillPortion(2)),
             )
             .push(
                 text(val)
-                    .size(13)
+                    .size(type_scale.body)
                     .width(Length::FillPortion(3))
                     .align_x(iced::alignment::Horizontal::Right),
             )
@@ -142,7 +144,7 @@ pub fn view(
     };
 
     let content = Column::new()
-        .spacing(14)
+        .spacing(layout.section_spacing)
         .push(chrome::detail_popup_header_row(
             theme,
             "Audio Routes",
@@ -157,32 +159,33 @@ pub fn view(
         .push(route_section(
             "Output Routes",
             "󰕾",
+            theme,
             model.output_routes,
             true,
         ))
         .push(route_section(
             "Input Routes",
             "",
+            theme,
             model.input_routes,
             false,
         ));
 
     container(
-        container(scrollable(content))
+        container(scrollable(container(content).padding([0, 14, 12, 0])))
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(Padding::from([20, 24]))
-            .style(move |_| iced::widget::container::Style {
-                background: Some(iced::Background::Color(Color {
+            .padding(Padding::from([
+                layout.outer_padding_y,
+                layout.outer_padding_x,
+            ]))
+            .style(move |_| {
+                let mut style = chrome::popup_panel_style(theme);
+                style.background = Some(iced::Background::Color(Color {
                     a: opacity,
-                    ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                })),
-                text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
+                    ..theme.panel
+                }));
+                style
             }),
     )
     .width(Length::Fill)
@@ -193,6 +196,7 @@ pub fn view(
 fn route_section(
     title: &'static str,
     icon: &'static str,
+    theme: ThemeTokens,
     items: Vec<AudioRoutePopupItem>,
     is_output: bool,
 ) -> iced::widget::Container<'static, Message> {
@@ -223,14 +227,9 @@ fn route_section(
         }
     }
 
-    container(column).padding(16).style(|_| container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb8(0x21, 0x26, 0x38))),
-        border: iced::Border {
-            radius: 12.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    })
+    container(column)
+        .padding(16)
+        .style(move |_| chrome::popup_card_style(theme))
 }
 
 fn route_button(

@@ -1389,12 +1389,7 @@ mod tests {
 
         let menu = tray.owned_menu_for("item").expect("menu should exist");
         let child = menu
-            .nodes()
-            .iter()
-            .find_map(|n| match n {
-                crate::services::tray_menu::OwnedTrayMenuNode::Action(a) if a.id == 2 => Some(a),
-                _ => None,
-            })
+            .item_in_level(&[1], 2)
             .expect("child action should exist");
         assert_eq!(child.label, "Child Disabled");
         assert!(!child.enabled);

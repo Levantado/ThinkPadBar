@@ -1,5 +1,5 @@
 use iced::{
-    widget::{button, container, text, Column, Row, Space},
+    widget::{container, text, Column, Row, Space},
     Alignment, Color, Element, Length, Padding,
 };
 
@@ -51,37 +51,31 @@ pub fn normalize_value(value: impl Into<String>) -> String {
 }
 
 pub fn view(theme: ThemeTokens, model: StatsPopupModel) -> Element<'static, Message> {
+    let layout = super::standard_domain_popup_layout();
     let content = Column::new()
         .width(Length::Shrink)
-        .spacing(12)
-        .push(
-            Row::new()
-                .align_y(Alignment::Center)
-                .push(text("Stats").size(18))
-                .push(Space::with_width(Length::Fill))
-                .push(
-                    button(text("System Info").size(11))
-                        .padding(Padding::from([6, 10]))
-                        .on_press(Message::TogglePopup(Popup::SystemMonitor)),
-                ),
-        )
+        .spacing(layout.section_spacing)
+        .push(chrome::detail_popup_header_row(
+            theme,
+            "Stats",
+            &Popup::Stats,
+        ))
         .push(chrome::domain_popup_nav_row(theme, &Popup::Stats))
         .push_rows(model.rows.into_iter().map(metric_row));
 
     let card = container(content)
-        .padding(Padding::from([16, 20]))
-        .max_width(420.0)
-        .style(move |_| iced::widget::container::Style {
-            background: Some(iced::Background::Color(Color {
+        .padding(Padding::from([
+            layout.outer_padding_y,
+            layout.outer_padding_x,
+        ]))
+        .max_width(f32::from(layout.width))
+        .style(move |_| {
+            let mut style = chrome::popup_panel_style(theme);
+            style.background = Some(iced::Background::Color(Color {
                 a: model.background_alpha,
-                ..Color::from_rgb8(0x11, 0x12, 0x1d)
-            })),
-            text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-            border: iced::Border {
-                radius: 12.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
+                ..theme.panel
+            }));
+            style
         });
 
     container(card)
@@ -96,25 +90,24 @@ pub fn view(theme: ThemeTokens, model: StatsPopupModel) -> Element<'static, Mess
 }
 
 fn metric_row(metric: PopupMetricRow) -> Element<'static, Message> {
+    let type_scale = super::standard_popup_type_scale();
     Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
         .width(Length::Fill)
         .push(
-            container(text(metric.icon).size(14))
+            container(text(metric.icon).size(type_scale.section))
                 .width(Length::Fixed(16.0))
                 .align_x(iced::alignment::Horizontal::Center),
         )
-        .push(text(metric.label).size(13))
+        .push(text(metric.label).size(type_scale.body))
         .push(Space::with_width(Length::Fill))
         .push(
-            container(
-                text(metric.value)
-                    .size(13)
-                    .style(|_| iced::widget::text::Style {
-                        color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                    }),
-            )
+            container(text(metric.value).size(type_scale.body).style(|_| {
+                iced::widget::text::Style {
+                    color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
+                }
+            }))
             .width(Length::Fixed(108.0))
             .align_x(iced::alignment::Horizontal::Right),
         )

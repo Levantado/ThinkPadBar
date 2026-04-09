@@ -138,27 +138,22 @@ pub fn view(
     opacity: f32,
     model: SystemInfoPopupModel,
 ) -> Element<'static, Message> {
+    let type_scale = super::standard_popup_type_scale();
+    let layout = super::standard_domain_popup_layout();
     let sections = model.sections();
     let mut content = Column::new()
-        .spacing(12)
+        .spacing(layout.section_spacing)
+        .push(chrome::detail_popup_header_row(
+            theme,
+            "System Info",
+            &Popup::SystemMonitor,
+        ))
         .push(
-            Row::new()
-                .align_y(Alignment::Center)
-                .push(
-                    text("System Info")
-                        .size(18)
-                        .style(move |_| iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                        }),
-                )
-                .push(Space::with_width(Length::Fill))
-                .push(
-                    text(format!("ver {}", model.version))
-                        .size(10)
-                        .style(move |_| iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
-                        }),
-                ),
+            text(format!("ver {}", model.version))
+                .size(type_scale.micro)
+                .style(move |_| iced::widget::text::Style {
+                    color: Some(theme.text_muted),
+                }),
         )
         .push(chrome::domain_popup_nav_row(
             theme,
@@ -174,21 +169,20 @@ pub fn view(
     }
 
     container(
-        container(scrollable(container(content).padding([0, 18, 0, 0])))
+        container(scrollable(container(content).padding([0, 14, 12, 0])))
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(Padding::from([20, 24]))
-            .style(move |_| iced::widget::container::Style {
-                background: Some(iced::Background::Color(Color {
+            .padding(Padding::from([
+                layout.outer_padding_y,
+                layout.outer_padding_x,
+            ]))
+            .style(move |_| {
+                let mut style = chrome::popup_panel_style(theme);
+                style.background = Some(iced::Background::Color(Color {
                     a: opacity,
-                    ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                })),
-                text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
+                    ..theme.panel
+                }));
+                style
             }),
     )
     .width(Length::Fill)
@@ -212,9 +206,17 @@ fn metric_row(metric: PopupMetricRow) -> Element<'static, Message> {
     Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
-        .push(text(metric.icon).size(16))
+        .push(
+            container(text(metric.icon).size(16))
+                .width(Length::Fixed(16.0))
+                .align_x(iced::alignment::Horizontal::Center),
+        )
         .push(text(metric.label).size(13).width(Length::Fill))
-        .push(text(metric.value).size(13))
+        .push(
+            text(metric.value)
+                .size(13)
+                .align_x(iced::alignment::Horizontal::Right),
+        )
         .into()
 }
 

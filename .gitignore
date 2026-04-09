@@ -23,3 +23,11 @@ config.toml
 *.swo
 fan_test
 .worktrees/
+check_data.rs
+check_pw.rs
+test.rs
+test_leak
+test_leak.rs
+test_perf
+test_perf.rs
+thinkpadbar_test.log

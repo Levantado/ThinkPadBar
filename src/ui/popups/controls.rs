@@ -1,5 +1,5 @@
 use iced::{
-    widget::{button, container, slider, text, Column, Row, Space},
+    widget::{button, container, slider, text, Column, Row},
     Alignment, Color, Element, Length, Padding,
 };
 
@@ -289,21 +289,15 @@ pub fn view(theme: ThemeTokens, model: ControlsPopupModel) -> Element<'static, M
 
     let content = Column::new()
         .spacing(layout.section_spacing)
-        .push(
-            Row::new()
-                .align_y(Alignment::Center)
-                .push(text("Controls").size(18))
-                .push(Space::with_width(Length::Fill))
-                .push(
-                    button(text("Close").size(12))
-                        .padding(Padding::from([6, 10]))
-                        .on_press(Message::TogglePopup(Popup::Controls)),
-                ),
-        )
+        .push(chrome::detail_popup_header_row(
+            theme,
+            "Controls",
+            &Popup::Controls,
+        ))
         .push(chrome::domain_popup_nav_row(theme, &Popup::Controls))
         .push(
             Column::new()
-                .spacing(8)
+                .spacing(layout.card_spacing)
                 .push(brt_row)
                 .push(vol_row)
                 .push(mic_row),
@@ -312,11 +306,13 @@ pub fn view(theme: ThemeTokens, model: ControlsPopupModel) -> Element<'static, M
             Row::new()
                 .spacing(8)
                 .push(shortcut_button(
+                    theme,
                     "󰑓",
                     "Audio Routes".to_string(),
                     Message::TogglePopup(Popup::AudioRoutes),
                 ))
                 .push(shortcut_button(
+                    theme,
                     "󰈈",
                     "System Info".to_string(),
                     Message::TogglePopup(Popup::SystemMonitor),
@@ -329,22 +325,19 @@ pub fn view(theme: ThemeTokens, model: ControlsPopupModel) -> Element<'static, M
             layout.outer_padding_x,
         ]))
         .width(Length::Fixed(f32::from(layout.width)))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(Color {
+        .style(move |_| {
+            let mut style = chrome::popup_panel_style(theme);
+            style.background = Some(iced::Background::Color(Color {
                 a: model.opacity,
-                ..Color::from_rgb8(0x1a, 0x1b, 0x26)
-            })),
-            border: iced::Border {
-                radius: 16.0.into(),
-                color: Color::from_rgb8(0x29, 0x2e, 0x42),
-                width: 1.5,
-            },
-            ..Default::default()
+                ..theme.panel
+            }));
+            style
         })
         .into()
 }
 
 fn shortcut_button(
+    theme: ThemeTokens,
     icon: &'static str,
     label: String,
     message: Message,
@@ -357,16 +350,11 @@ fn shortcut_button(
             .push(text(label).size(11)),
     )
     .width(Length::FillPortion(1))
+    .height(Length::Fixed(40.0))
     .padding(Padding::from([12, 12]))
     .on_press(message)
-    .style(|_, _| iced::widget::button::Style {
-        background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
-        text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-        border: iced::Border {
-            radius: 16.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
+    .style(move |_, status| {
+        chrome::popup_button_style(theme, status, chrome::PopupButtonTone::SurfaceAlt, true)
     })
     .into()
 }

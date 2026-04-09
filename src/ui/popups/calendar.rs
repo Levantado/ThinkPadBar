@@ -5,6 +5,7 @@ use iced::{
 };
 
 use crate::app::Message;
+use crate::ui::{chrome, theme::ThemeTokens};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarPopupModel {
@@ -59,6 +60,7 @@ impl CalendarPopupModel {
 }
 
 pub fn view(opacity: f32, model: CalendarPopupModel) -> Element<'static, Message> {
+    let theme = ThemeTokens::from_config(&crate::config::Config::default());
     let title_row = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
@@ -122,17 +124,13 @@ pub fn view(opacity: f32, model: CalendarPopupModel) -> Element<'static, Message
         container(content)
             .width(Length::Fill)
             .padding(24)
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(Color {
+            .style(move |_| {
+                let mut style = chrome::popup_panel_style(theme);
+                style.background = Some(iced::Background::Color(Color {
                     a: opacity,
-                    ..Color::from_rgb8(0x11, 0x12, 0x1d)
-                })),
-                text_color: Some(Color::from_rgb8(0xc0, 0xca, 0xf5)),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
+                    ..theme.panel
+                }));
+                style
             }),
     )
     .width(Length::Fill)

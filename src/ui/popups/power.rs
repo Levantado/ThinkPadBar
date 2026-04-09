@@ -1,6 +1,6 @@
 use iced::{
     widget::{button, container, text, Column, Row, Space},
-    Alignment, Color, Element, Length, Padding, Theme,
+    Alignment, Color, Element, Length, Padding,
 };
 
 use crate::{
@@ -92,19 +92,19 @@ pub fn view(theme: ThemeTokens, model: PowerPopupModel) -> Element<'static, Mess
             )
             .padding(8)
             .on_press(Message::CyclePerformanceProfile)
-            .style(circular_btn_style),
+            .style(move |_, status| circular_btn_style(theme, status)),
         )
         .push(
             button(text("󰌾").size(16))
                 .padding(8)
                 .on_press(Message::PowerAction(PowerAction::Lock))
-                .style(circular_btn_style),
+                .style(move |_, status| circular_btn_style(theme, status)),
         )
         .push(
             button(text("").size(16))
                 .padding(8)
                 .on_press(Message::TogglePowerMenu)
-                .style(circular_btn_style),
+                .style(move |_, status| circular_btn_style(theme, status)),
         );
 
     let mut prof_row = Row::new().width(Length::Fill).spacing(8);
@@ -130,28 +130,26 @@ pub fn view(theme: ThemeTokens, model: PowerPopupModel) -> Element<'static, Mess
         .height(Length::Fixed(32.0))
         .padding(Padding::from([0, 4]))
         .on_press(Message::SetPowerProfile(vid_str))
-        .style(move |_, _| {
+        .style(move |_, status| {
             if is_active {
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x3a, 0x42, 0x5f))),
-                    text_color: profile_color,
-                    border: iced::Border {
-                        radius: 8.0.into(),
-                        width: 1.0,
-                        color: profile_color,
-                    },
-                    ..Default::default()
-                }
+                let mut style = chrome::popup_button_style(
+                    theme,
+                    status,
+                    chrome::PopupButtonTone::SurfaceAlt,
+                    true,
+                );
+                style.text_color = profile_color;
+                style.border.color = profile_color;
+                style
             } else {
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                    text_color: profile_color,
-                    border: iced::Border {
-                        radius: 8.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
+                let mut style = chrome::popup_button_style(
+                    theme,
+                    status,
+                    chrome::PopupButtonTone::Surface,
+                    true,
+                );
+                style.text_color = profile_color;
+                style
             }
         });
         prof_row = prof_row.push(btn);
@@ -167,37 +165,18 @@ pub fn view(theme: ThemeTokens, model: PowerPopupModel) -> Element<'static, Mess
         )
         .width(Length::FillPortion(1))
         .padding(Padding::from([12, 12]))
-        .style(move |_, _| {
+        .style(move |_, status| {
             if model.idle_snapshot.enabled {
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
-                    text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                    border: iced::Border {
-                        radius: 16.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
+                chrome::popup_button_style(theme, status, chrome::PopupButtonTone::Accent, true)
             } else if model.idle_snapshot.available {
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                    text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                    border: iced::Border {
-                        radius: 16.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
+                chrome::popup_button_style(theme, status, chrome::PopupButtonTone::Surface, true)
             } else {
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb8(0x23, 0x27, 0x38))),
-                    text_color: Color::from_rgb8(0x56, 0x5f, 0x89),
-                    border: iced::Border {
-                        radius: 16.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
+                chrome::popup_button_style(
+                    theme,
+                    status,
+                    chrome::PopupButtonTone::SurfaceAlt,
+                    false,
+                )
             }
         });
         if model.idle_snapshot.available {
@@ -254,30 +233,17 @@ pub fn view(theme: ThemeTokens, model: PowerPopupModel) -> Element<'static, Mess
                     "System-managed (read-only)".to_string(),
                 )),
         )
-        .padding(16)
-        .style(|_| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-            border: iced::Border {
-                radius: 12.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
+        .padding(layout.card_padding)
+        .style(move |_| chrome::popup_card_style(theme))
     };
 
     let content = Column::new()
         .spacing(layout.section_spacing)
-        .push(
-            Row::new()
-                .align_y(Alignment::Center)
-                .push(text("Power").size(18))
-                .push(Space::with_width(Length::Fill))
-                .push(
-                    button(text("Close").size(12))
-                        .padding(Padding::from([6, 10]))
-                        .on_press(Message::TogglePopup(Popup::Power)),
-                ),
-        )
+        .push(chrome::detail_popup_header_row(
+            theme,
+            "Power",
+            &Popup::Power,
+        ))
         .push(chrome::domain_popup_nav_row(theme, &Popup::Power))
         .push(top_row)
         .push(
@@ -286,11 +252,13 @@ pub fn view(theme: ThemeTokens, model: PowerPopupModel) -> Element<'static, Mess
                 .width(Length::Fill)
                 .push(idle_btn)
                 .push(shortcut_button(
+                    theme,
                     "󰈈",
                     "System Info".to_string(),
                     Message::TogglePopup(Popup::SystemMonitor),
                 ))
                 .push(shortcut_button(
+                    theme,
                     "󰍹",
                     "Displays".to_string(),
                     Message::TogglePopup(Popup::Displays),
@@ -336,22 +304,19 @@ pub fn view(theme: ThemeTokens, model: PowerPopupModel) -> Element<'static, Mess
             layout.outer_padding_x,
         ]))
         .width(Length::Fixed(f32::from(layout.width)))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(Color {
+        .style(move |_| {
+            let mut style = chrome::popup_panel_style(theme);
+            style.background = Some(iced::Background::Color(Color {
                 a: model.opacity,
-                ..Color::from_rgb8(0x1a, 0x1b, 0x26)
-            })),
-            border: iced::Border {
-                radius: 16.0.into(),
-                color: Color::from_rgb8(0x29, 0x2e, 0x42),
-                width: 1.5,
-            },
-            ..Default::default()
+                ..theme.panel
+            }));
+            style
         })
         .into()
 }
 
 fn view_power_menu(opacity: f32) -> Element<'static, Message> {
+    let theme = ThemeTokens::from_config(&crate::config::Config::default());
     let power_action_btn = |label: &str, icon: &str, action: PowerAction| {
         button(
             Row::new()
@@ -361,16 +326,11 @@ fn view_power_menu(opacity: f32) -> Element<'static, Message> {
                 .push(text(label.to_string()).size(14)),
         )
         .width(Length::Fill)
+        .height(Length::Fixed(40.0))
         .padding(12)
         .on_press(Message::PowerAction(action))
-        .style(move |_, _| iced::widget::button::Style {
-            background: Some(iced::Background::Color(Color::TRANSPARENT)),
-            text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-            border: iced::Border {
-                radius: 8.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
+        .style(move |_, status| {
+            chrome::popup_button_style(theme, status, chrome::PopupButtonTone::Ghost, true)
         })
     };
 
@@ -479,19 +439,18 @@ fn fan_row(fan: &crate::services::controls::FanInfo) -> Row<'static, Message> {
     row
 }
 
-fn circular_btn_style(_: &Theme, _: iced::widget::button::Status) -> iced::widget::button::Style {
-    iced::widget::button::Style {
-        background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-        text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-        border: iced::Border {
-            radius: 24.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
+fn circular_btn_style(
+    theme: ThemeTokens,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let mut style =
+        chrome::popup_button_style(theme, status, chrome::PopupButtonTone::Surface, true);
+    style.border.radius = 24.0.into();
+    style
 }
 
 fn shortcut_button(
+    theme: ThemeTokens,
     icon: &'static str,
     label: String,
     message: Message,
@@ -504,16 +463,11 @@ fn shortcut_button(
             .push(text(label).size(11)),
     )
     .width(Length::FillPortion(1))
+    .height(Length::Fixed(40.0))
     .padding(Padding::from([12, 12]))
     .on_press(message)
-    .style(|_, _| iced::widget::button::Style {
-        background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
-        text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-        border: iced::Border {
-            radius: 16.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
+    .style(move |_, status| {
+        chrome::popup_button_style(theme, status, chrome::PopupButtonTone::SurfaceAlt, true)
     })
     .into()
 }

@@ -1,113 +1,149 @@
-use std::collections::HashMap;
 use system_tray::menu::{MenuItem, MenuType, TrayMenu};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnedTrayMenuNode {
-    Action(OwnedTrayMenuAction),
+    Item(OwnedTrayMenuItem),
     Separator,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OwnedTrayMenuAction {
+pub struct OwnedTrayMenuItem {
     pub id: i32,
     pub label: String,
     pub enabled: bool,
-    pub depth: usize,
     pub activatable: bool,
-    pub prefetch_path: Vec<i32>,
+    pub children: Vec<OwnedTrayMenuNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OwnedTrayMenu {
-    nodes: Vec<OwnedTrayMenuNode>,
-    actions: HashMap<i32, OwnedTrayMenuAction>,
+    root: Vec<OwnedTrayMenuNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedTrayMenuLevel<'a> {
+    pub title: Option<&'a str>,
+    pub nodes: &'a [OwnedTrayMenuNode],
+    pub has_back: bool,
 }
 
 impl OwnedTrayMenu {
     pub fn from_layout(layout: &TrayMenu) -> Self {
-        let mut menu = Self::default();
-        Self::collect_nodes(&layout.submenus, 0, &[], &mut menu.nodes, &mut menu.actions);
-        menu
-    }
-
-    pub fn nodes(&self) -> &[OwnedTrayMenuNode] {
-        &self.nodes
+        Self {
+            root: Self::collect_nodes(&layout.submenus),
+        }
     }
 
     pub fn has_visible_actions(&self) -> bool {
-        self.actions.values().any(|action| action.activatable)
+        Self::contains_activatable_items(&self.root)
     }
 
-    pub fn action(&self, id: i32) -> Option<&OwnedTrayMenuAction> {
-        self.actions.get(&id)
+    pub fn level<'a>(&'a self, path: &[i32]) -> OwnedTrayMenuLevel<'a> {
+        let mut title = None;
+        let mut nodes = self.root.as_slice();
+
+        for item_id in path {
+            let Some(item) = Self::find_item(nodes, *item_id) else {
+                break;
+            };
+            if item.children.is_empty() {
+                break;
+            }
+            title = Some(item.label.as_str());
+            nodes = item.children.as_slice();
+        }
+
+        OwnedTrayMenuLevel {
+            title,
+            nodes,
+            has_back: !path.is_empty(),
+        }
     }
 
-    pub fn popup_height(&self) -> u32 {
-        let rows = self.nodes.len() as u32;
-        let height = 56 + rows.saturating_mul(30);
-        height.clamp(140, 420)
+    pub fn item_in_level<'a>(
+        &'a self,
+        path: &[i32],
+        item_id: i32,
+    ) -> Option<&'a OwnedTrayMenuItem> {
+        let level = self.level(path);
+        Self::find_item(level.nodes, item_id)
     }
 
-    fn collect_nodes(
-        items: &[MenuItem],
-        depth: usize,
-        ancestors: &[i32],
-        nodes: &mut Vec<OwnedTrayMenuNode>,
-        actions: &mut HashMap<i32, OwnedTrayMenuAction>,
-    ) {
+    pub fn popup_height(&self, path: &[i32]) -> u32 {
+        let level = self.level(path);
+        let rows = level.nodes.len() as u32 + u32::from(level.has_back);
+        let height = 20 + rows.saturating_mul(32);
+        height.clamp(120, 320)
+    }
+
+    fn collect_nodes(items: &[MenuItem]) -> Vec<OwnedTrayMenuNode> {
+        let mut nodes = Vec::new();
+
         for item in items {
             if !item.visible {
                 continue;
             }
+
             if item.menu_type == MenuType::Separator {
-                nodes.push(OwnedTrayMenuNode::Separator);
+                if !matches!(nodes.last(), Some(OwnedTrayMenuNode::Separator)) {
+                    nodes.push(OwnedTrayMenuNode::Separator);
+                }
                 continue;
             }
 
+            let children = Self::collect_nodes(&item.submenu);
             let label = item
                 .label
                 .as_ref()
-                .map(|v| v.replace('_', ""))
-                .filter(|v| !v.trim().is_empty())
+                .map(|value| value.replace('_', ""))
+                .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "(item)".to_string());
+            let is_submenu =
+                !children.is_empty() && item.children_display.as_deref() == Some("submenu");
+            let activatable = item.enabled && !is_submenu;
 
-            let mut prefetch_path = ancestors.to_vec();
-            prefetch_path.push(item.id);
-            let activatable = item.enabled
-                && (item.submenu.is_empty() || item.children_display.as_deref() != Some("submenu"));
-
-            let action = OwnedTrayMenuAction {
+            nodes.push(OwnedTrayMenuNode::Item(OwnedTrayMenuItem {
                 id: item.id,
                 label,
                 enabled: item.enabled,
-                depth,
                 activatable,
-                prefetch_path: prefetch_path.clone(),
-            };
-            nodes.push(OwnedTrayMenuNode::Action(action.clone()));
-            actions.insert(item.id, action);
-
-            if !item.submenu.is_empty() {
-                Self::collect_nodes(&item.submenu, depth + 1, &prefetch_path, nodes, actions);
-            }
+                children,
+            }));
         }
+
+        while matches!(nodes.last(), Some(OwnedTrayMenuNode::Separator)) {
+            nodes.pop();
+        }
+
+        nodes
+    }
+
+    fn contains_activatable_items(nodes: &[OwnedTrayMenuNode]) -> bool {
+        nodes.iter().any(|node| match node {
+            OwnedTrayMenuNode::Separator => false,
+            OwnedTrayMenuNode::Item(item) => {
+                item.activatable || Self::contains_activatable_items(&item.children)
+            }
+        })
+    }
+
+    fn find_item(nodes: &[OwnedTrayMenuNode], item_id: i32) -> Option<&OwnedTrayMenuItem> {
+        nodes.iter().find_map(|node| match node {
+            OwnedTrayMenuNode::Separator => None,
+            OwnedTrayMenuNode::Item(item) if item.id == item_id => Some(item),
+            OwnedTrayMenuNode::Item(_) => None,
+        })
     }
 
     #[cfg(test)]
     pub fn new_for_tests(nodes: Vec<OwnedTrayMenuNode>) -> Self {
-        let mut actions = HashMap::new();
-        for node in &nodes {
-            if let OwnedTrayMenuNode::Action(action) = node {
-                actions.insert(action.id, action.clone());
-            }
-        }
-        Self { nodes, actions }
+        Self { root: nodes }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{OwnedTrayMenu, OwnedTrayMenuNode};
+    use super::{OwnedTrayMenu, OwnedTrayMenuItem, OwnedTrayMenuNode};
     use system_tray::menu::{MenuItem, MenuType, TrayMenu};
 
     fn menu_item(id: i32, label: &str, enabled: bool, visible: bool) -> MenuItem {
@@ -123,38 +159,24 @@ mod tests {
     }
 
     #[test]
-    fn owned_menu_flattens_visible_entries_and_tracks_depth() {
-        let mut parent = menu_item(10, "_Parent", true, true);
-        parent.submenu = vec![menu_item(11, "Child", true, true)];
-        let hidden = menu_item(12, "Hidden", true, false);
+    fn owned_menu_preserves_hierarchical_submenus() {
+        let mut parent = menu_item(10, "_Audio", true, true);
+        parent.children_display = Some("submenu".to_string());
+        parent.submenu = vec![menu_item(11, "Headphones", true, true)];
         let layout = TrayMenu {
             id: 0,
-            submenus: vec![parent, hidden],
+            submenus: vec![parent],
         };
 
-        let model = OwnedTrayMenu::from_layout(&layout);
-        let nodes = model.nodes();
-        assert_eq!(nodes.len(), 2);
-        match &nodes[0] {
-            OwnedTrayMenuNode::Action(action) => {
-                assert_eq!(action.id, 10);
-                assert_eq!(action.label, "Parent");
-                assert_eq!(action.depth, 0);
-                assert_eq!(action.prefetch_path, vec![10]);
-            }
-            OwnedTrayMenuNode::Separator => panic!("expected action"),
-        }
-        match &nodes[1] {
-            OwnedTrayMenuNode::Action(action) => {
-                assert_eq!(action.id, 11);
-                assert_eq!(action.depth, 1);
-                assert_eq!(action.prefetch_path, vec![10, 11]);
-            }
-            OwnedTrayMenuNode::Separator => panic!("expected action"),
-        }
-        assert!(model.action(10).is_some());
-        assert!(model.action(11).is_some());
-        assert!(model.action(12).is_none());
+        let menu = OwnedTrayMenu::from_layout(&layout);
+        let root_level = menu.level(&[]);
+        let child_level = menu.level(&[10]);
+
+        assert_eq!(root_level.nodes.len(), 1);
+        assert!(!root_level.has_back);
+        assert_eq!(child_level.title, Some("Audio"));
+        assert!(child_level.has_back);
+        assert_eq!(child_level.nodes.len(), 1);
     }
 
     #[test]
@@ -168,14 +190,12 @@ mod tests {
         };
 
         let model = OwnedTrayMenu::from_layout(&layout);
-        let parent = match &model.nodes()[0] {
-            OwnedTrayMenuNode::Action(action) => action,
-            OwnedTrayMenuNode::Separator => panic!("expected action"),
-        };
-        let child = match &model.nodes()[1] {
-            OwnedTrayMenuNode::Action(action) => action,
-            OwnedTrayMenuNode::Separator => panic!("expected action"),
-        };
+        let parent = model
+            .item_in_level(&[], 10)
+            .expect("expected parent in root level");
+        let child = model
+            .item_in_level(&[10], 11)
+            .expect("expected child in submenu level");
 
         assert!(!parent.activatable);
         assert!(child.activatable);
@@ -183,16 +203,70 @@ mod tests {
     }
 
     #[test]
-    fn popup_height_scales_with_menu_length() {
+    fn popup_height_scales_with_current_level_length() {
+        let menu = OwnedTrayMenu::new_for_tests(vec![
+            OwnedTrayMenuNode::Item(OwnedTrayMenuItem {
+                id: 1,
+                label: "Open".to_string(),
+                enabled: true,
+                activatable: true,
+                children: Vec::new(),
+            }),
+            OwnedTrayMenuNode::Item(OwnedTrayMenuItem {
+                id: 2,
+                label: "Audio".to_string(),
+                enabled: true,
+                activatable: false,
+                children: vec![OwnedTrayMenuNode::Item(OwnedTrayMenuItem {
+                    id: 3,
+                    label: "Headphones".to_string(),
+                    enabled: true,
+                    activatable: true,
+                    children: Vec::new(),
+                })],
+            }),
+        ]);
+
+        assert_eq!(menu.popup_height(&[]), 120);
+        assert_eq!(menu.popup_height(&[2]), 120);
+    }
+
+    #[test]
+    fn separators_are_deduped_and_trimmed() {
         let layout = TrayMenu {
             id: 0,
             submenus: vec![
-                menu_item(1, "One", true, true),
-                menu_item(2, "Two", true, true),
+                MenuItem {
+                    id: 1,
+                    menu_type: MenuType::Separator,
+                    ..Default::default()
+                },
+                menu_item(2, "Open", true, true),
+                MenuItem {
+                    id: 3,
+                    menu_type: MenuType::Separator,
+                    ..Default::default()
+                },
+                MenuItem {
+                    id: 4,
+                    menu_type: MenuType::Separator,
+                    ..Default::default()
+                },
             ],
         };
-        let model = OwnedTrayMenu::from_layout(&layout);
 
-        assert_eq!(model.popup_height(), 140);
+        let menu = OwnedTrayMenu::from_layout(&layout);
+        let level = menu.level(&[]);
+
+        assert_eq!(
+            level.nodes,
+            &[OwnedTrayMenuNode::Item(OwnedTrayMenuItem {
+                id: 2,
+                label: "Open".to_string(),
+                enabled: true,
+                activatable: true,
+                children: Vec::new(),
+            })]
+        );
     }
 }

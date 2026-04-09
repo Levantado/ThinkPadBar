@@ -174,6 +174,7 @@ pub enum Message {
     TrayItemRightClicked(String),
     TrayItemClickResolved(String, bool),
     TrayMenuItemSelected(i32),
+    TrayMenuBack,
     OpenOverskride,
     SessionCommandCompleted(crate::services::session::SessionFollowUp),
     DBusConnected(zbus::Connection),
@@ -465,7 +466,10 @@ impl ThinkPadBar {
     }
 
     fn build_tray_menu_popup_model(&self) -> popups::tray_menu::TrayMenuPopupModel {
-        popups::tray_menu::TrayMenuPopupModel::from_owned_menu(self.tray_ui_service.open_menu())
+        popups::tray_menu::TrayMenuPopupModel::from_owned_menu(
+            self.tray_ui_service.open_menu(),
+            self.tray_ui_service.open_menu_path(),
+        )
     }
 
     fn build_calendar_popup_model(&self) -> Option<popups::calendar::CalendarPopupModel> {
@@ -725,7 +729,7 @@ impl ThinkPadBar {
         let tray_menu_height = self
             .tray_ui_service
             .open_menu()
-            .map(crate::services::tray_menu::OwnedTrayMenu::popup_height);
+            .map(|menu| menu.popup_height(self.tray_ui_service.open_menu_path()));
         let plan = self.popup_anchor_service.plan(
             Self::popup_surface_kind(&popup),
             self.tray_ui_service.menu_cursor(),
@@ -1532,6 +1536,19 @@ impl ThinkPadBar {
                     | update_coordinator::TrayPopupPlan::OpenMenu => {}
                 }
             }
+            Message::TrayMenuBack => {
+                match update_coordinator::tray_popup_plan_from_selection(
+                    self.tray_ui_service.handle_menu_back(),
+                ) {
+                    update_coordinator::TrayPopupPlan::CloseMenu => {
+                        return Task::batch(
+                            self.apply_popup_transition_plan(PopupTransitionPlan::close_popup()),
+                        )
+                    }
+                    update_coordinator::TrayPopupPlan::None
+                    | update_coordinator::TrayPopupPlan::OpenMenu => {}
+                }
+            }
         }
         Task::none()
     }
@@ -2015,25 +2032,31 @@ mod tests {
         let mut bar_state = hermetic_bar();
         bar_state.tray_ui_service.set_open_menu_for_tests(Some(
             crate::services::tray_menu::OwnedTrayMenu::new_for_tests(vec![
-                crate::services::tray_menu::OwnedTrayMenuNode::Action(
-                    crate::services::tray_menu::OwnedTrayMenuAction {
+                crate::services::tray_menu::OwnedTrayMenuNode::Item(
+                    crate::services::tray_menu::OwnedTrayMenuItem {
                         id: 1,
                         label: "Open".to_string(),
                         enabled: true,
                         activatable: true,
-                        depth: 0,
-                        prefetch_path: vec![1],
+                        children: Vec::new(),
                     },
                 ),
                 crate::services::tray_menu::OwnedTrayMenuNode::Separator,
-                crate::services::tray_menu::OwnedTrayMenuNode::Action(
-                    crate::services::tray_menu::OwnedTrayMenuAction {
+                crate::services::tray_menu::OwnedTrayMenuNode::Item(
+                    crate::services::tray_menu::OwnedTrayMenuItem {
                         id: 2,
                         label: "Audio".to_string(),
                         enabled: true,
                         activatable: false,
-                        depth: 1,
-                        prefetch_path: vec![1, 2],
+                        children: vec![crate::services::tray_menu::OwnedTrayMenuNode::Item(
+                            crate::services::tray_menu::OwnedTrayMenuItem {
+                                id: 3,
+                                label: "Headphones".to_string(),
+                                enabled: true,
+                                activatable: true,
+                                children: Vec::new(),
+                            },
+                        )],
                     },
                 ),
             ]),
@@ -2041,14 +2064,14 @@ mod tests {
 
         let model = bar_state.build_tray_menu_popup_model();
 
-        assert_eq!(model.nodes.len(), 3);
+        assert_eq!(model.rows.len(), 3);
         assert!(matches!(
-            model.nodes[1],
-            crate::ui::popups::tray_menu::TrayMenuNode::Separator
+            model.rows[1],
+            crate::ui::popups::tray_menu::TrayMenuRow::Separator
         ));
         assert!(matches!(
-            &model.nodes[2],
-            crate::ui::popups::tray_menu::TrayMenuNode::Action(action) if action.label == "  Audio  ›"
+            &model.rows[2],
+            crate::ui::popups::tray_menu::TrayMenuRow::Action(action) if action.label == "Audio" && action.has_children
         ));
     }
 

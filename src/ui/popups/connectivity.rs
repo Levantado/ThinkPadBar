@@ -32,6 +32,8 @@ impl ConnectivityPopupModel {
 }
 
 pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'static, Message> {
+    let type_scale = super::standard_popup_type_scale();
+    let layout = super::standard_domain_popup_layout();
     let wifi_is_active = model.wifi_snapshot.wifi.enabled;
     let ssid = model.wifi_snapshot.wifi.ssid.trim();
     let has_real_ssid =
@@ -55,35 +57,25 @@ pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'stati
             .spacing(4)
             .align_y(Alignment::Center)
             .push(text(if wifi_is_active { "󰖩" } else { "󰖪" }).size(18))
-            .push(text(wifi_label).size(12)),
+            .push(text(wifi_label).size(type_scale.meta)),
     )
     .width(Length::FillPortion(1))
+    .height(Length::Fixed(40.0))
     .padding(Padding::from([12, 12]))
     .on_press(Message::NetworkCommand(
         crate::services::network::NetworkCommand::ToggleMenu,
     ))
-    .style(move |_, _| {
-        if wifi_is_active {
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
-                text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                border: iced::Border {
-                    radius: 16.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        } else {
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                border: iced::Border {
-                    radius: 16.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        }
+    .style(move |_, status| {
+        chrome::popup_button_style(
+            theme,
+            status,
+            if wifi_is_active {
+                chrome::PopupButtonTone::Accent
+            } else {
+                chrome::PopupButtonTone::Surface
+            },
+            true,
+        )
     });
 
     let bt_is_active = model.bluetooth_enabled;
@@ -93,33 +85,23 @@ pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'stati
             .spacing(4)
             .align_y(Alignment::Center)
             .push(text(if bt_is_active { "󰂯" } else { "󰂲" }).size(18))
-            .push(text(bt_label).size(12)),
+            .push(text(bt_label).size(type_scale.meta)),
     )
     .width(Length::FillPortion(1))
+    .height(Length::Fixed(40.0))
     .padding(Padding::from([12, 12]))
     .on_press(Message::ToggleBluetooth(!bt_is_active))
-    .style(move |_, _| {
-        if bt_is_active {
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x7a, 0xa2, 0xf7))),
-                text_color: Color::from_rgb8(0x1a, 0x1b, 0x26),
-                border: iced::Border {
-                    radius: 16.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        } else {
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-                text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                border: iced::Border {
-                    radius: 16.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        }
+    .style(move |_, status| {
+        chrome::popup_button_style(
+            theme,
+            status,
+            if bt_is_active {
+                chrome::PopupButtonTone::Accent
+            } else {
+                chrome::PopupButtonTone::Surface
+            },
+            true,
+        )
     });
 
     let connected_bluetooth_cards =
@@ -134,21 +116,24 @@ pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'stati
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(text("󰂯").size(16))
-                .push(text("Connected Bluetooth").size(14))
+                .push(text("Connected Bluetooth").size(type_scale.section))
                 .push(Space::with_width(Length::Fill))
                 .push(
-                    button(text("Open").size(11))
+                    button(text("Open").size(type_scale.meta))
+                        .height(Length::Fixed(28.0))
                         .padding(Padding::from([4, 8]))
                         .on_press(Message::TogglePopup(Popup::BluetoothDevices)),
                 ),
         );
 
         if connected_bluetooth_cards.is_empty() {
-            column = column.push(text("No connected Bluetooth devices").size(12).style(|_| {
-                iced::widget::text::Style {
-                    color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
-                }
-            }));
+            column = column.push(
+                text("No connected Bluetooth devices")
+                    .size(type_scale.meta)
+                    .style(|_| iced::widget::text::Style {
+                        color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
+                    }),
+            );
         } else {
             for card in connected_bluetooth_cards {
                 let summary = if let Some(detail) = &card.detail {
@@ -164,58 +149,41 @@ pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'stati
                                 Row::new()
                                     .spacing(8)
                                     .align_y(Alignment::Center)
-                                    .push(text(card.label).size(13))
+                                    .push(text(card.label).size(type_scale.body))
                                     .push(Space::with_width(Length::Fill))
                                     .push(
-                                        button(text("Disconnect").size(11))
+                                        button(text("Disconnect").size(type_scale.meta))
+                                            .height(Length::Fixed(28.0))
                                             .padding(Padding::from([6, 10]))
                                             .on_press(Message::DisconnectBluetoothDevice(
                                                 card.address.clone(),
                                             )),
                                     ),
                             )
-                            .push(text(summary).size(11).style(|_| iced::widget::text::Style {
-                                color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                            .push(text(summary).size(type_scale.meta).style(|_| {
+                                iced::widget::text::Style {
+                                    color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
+                                }
                             })),
                     )
                     .padding(10)
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x21, 0x26, 0x38,
-                        ))),
-                        border: iced::Border {
-                            radius: 10.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
+                    .style(move |_| chrome::popup_card_alt_style(theme)),
                 );
             }
         }
 
-        container(column).padding(16).style(|_| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgb8(0x29, 0x2e, 0x42))),
-            border: iced::Border {
-                radius: 12.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
+        container(column)
+            .padding(layout.card_padding)
+            .style(move |_| chrome::popup_card_style(theme))
     };
 
     let mut container_col = Column::new()
-        .spacing(20)
-        .push(
-            Row::new()
-                .align_y(Alignment::Center)
-                .push(text("Connectivity").size(18))
-                .push(Space::with_width(Length::Fill))
-                .push(
-                    button(text("Close").size(12))
-                        .padding(Padding::from([6, 10]))
-                        .on_press(Message::TogglePopup(Popup::Connectivity)),
-                ),
-        )
+        .spacing(layout.section_spacing)
+        .push(chrome::detail_popup_header_row(
+            theme,
+            "Connectivity",
+            &Popup::Connectivity,
+        ))
         .push(chrome::domain_popup_nav_row(theme, &Popup::Connectivity))
         .push(Row::new().spacing(16).push(wifi_btn).push(bt_btn));
 
@@ -226,7 +194,7 @@ pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'stati
             .status_message()
             .map(|message| message.into_owned())
         {
-            inner_col = inner_col.push(text(status_message).size(12).style(|_| {
+            inner_col = inner_col.push(text(status_message).size(type_scale.meta).style(|_| {
                 iced::widget::text::Style {
                     color: Some(Color::from_rgb8(0x9a, 0xb0, 0xe6)),
                 }
@@ -244,15 +212,10 @@ pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'stati
             crate::services::network::NetworkCommand::ToggleWifi(!wifi_is_active),
         ))
         .width(Length::Fill)
+        .height(Length::Fixed(36.0))
         .padding(8)
-        .style(|_, _| iced::widget::button::Style {
-            background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
-            text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-            border: iced::Border {
-                radius: 8.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
+        .style(move |_, status| {
+            chrome::popup_button_style(theme, status, chrome::PopupButtonTone::SurfaceAlt, true)
         });
         inner_col = inner_col.push(toggle_power_btn);
 
@@ -272,17 +235,35 @@ pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'stati
                 .spacing(8)
                 .push(
                     button(text("Connect"))
+                        .height(Length::Fixed(32.0))
                         .on_press(Message::NetworkCommand(
                             crate::services::network::NetworkCommand::SubmitPassword,
                         ))
-                        .padding(8),
+                        .padding(8)
+                        .style(move |_, status| {
+                            chrome::popup_button_style(
+                                theme,
+                                status,
+                                chrome::PopupButtonTone::Accent,
+                                true,
+                            )
+                        }),
                 )
                 .push(
                     button(text("Cancel"))
+                        .height(Length::Fixed(32.0))
                         .on_press(Message::NetworkCommand(
                             crate::services::network::NetworkCommand::CancelPassword,
                         ))
-                        .padding(8),
+                        .padding(8)
+                        .style(move |_, status| {
+                            chrome::popup_button_style(
+                                theme,
+                                status,
+                                chrome::PopupButtonTone::Surface,
+                                true,
+                            )
+                        }),
                 );
             inner_col = inner_col
                 .push(text(format!("Connect to {}", ssid)))
@@ -300,41 +281,36 @@ pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'stati
                                 security: net.security.clone(),
                             },
                         ))
-                        .style(|_, _| iced::widget::button::Style {
-                            background: Some(iced::Background::Color(Color::TRANSPARENT)),
-                            text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-                            ..Default::default()
+                        .style(move |_, status| {
+                            chrome::popup_button_style(
+                                theme,
+                                status,
+                                chrome::PopupButtonTone::Ghost,
+                                true,
+                            )
                         }),
                 );
             }
             inner_col = inner_col.push(scrollable(net_list).height(Length::Fixed(150.0)));
         }
-        container_col =
-            container_col.push(
-                container(inner_col)
-                    .padding(16)
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb8(
-                            0x29, 0x2e, 0x42,
-                        ))),
-                        border: iced::Border {
-                            radius: 12.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            );
+        container_col = container_col.push(
+            container(inner_col)
+                .padding(layout.card_padding)
+                .style(move |_| chrome::popup_card_style(theme)),
+        );
     }
 
     container_col = container_col.push(bluetooth_quick_card).push(
         Row::new()
             .spacing(8)
             .push(shortcut_button(
+                theme,
                 "󰂯",
                 "Bluetooth Devices".to_string(),
                 Message::TogglePopup(Popup::BluetoothDevices),
             ))
             .push(shortcut_button(
+                theme,
                 "󰈈",
                 "System Info".to_string(),
                 Message::TogglePopup(Popup::SystemMonitor),
@@ -342,24 +318,24 @@ pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'stati
     );
 
     container(container_col)
-        .padding(Padding::from([24, 24]))
-        .width(Length::Fixed(440.0))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(Color {
+        .padding(Padding::from([
+            layout.outer_padding_y,
+            layout.outer_padding_x,
+        ]))
+        .width(Length::Fixed(f32::from(layout.width)))
+        .style(move |_| {
+            let mut style = chrome::popup_panel_style(theme);
+            style.background = Some(iced::Background::Color(Color {
                 a: model.opacity,
-                ..Color::from_rgb8(0x1a, 0x1b, 0x26)
-            })),
-            border: iced::Border {
-                radius: 16.0.into(),
-                color: Color::from_rgb8(0x29, 0x2e, 0x42),
-                width: 1.5,
-            },
-            ..Default::default()
+                ..theme.panel
+            }));
+            style
         })
         .into()
 }
 
 fn shortcut_button(
+    theme: ThemeTokens,
     icon: &'static str,
     label: String,
     message: Message,
@@ -372,16 +348,11 @@ fn shortcut_button(
             .push(text(label).size(11)),
     )
     .width(Length::FillPortion(1))
+    .height(Length::Fixed(40.0))
     .padding(Padding::from([12, 12]))
     .on_press(message)
-    .style(|_, _| iced::widget::button::Style {
-        background: Some(iced::Background::Color(Color::from_rgb8(0x41, 0x48, 0x68))),
-        text_color: Color::from_rgb8(0xc0, 0xca, 0xf5),
-        border: iced::Border {
-            radius: 16.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
+    .style(move |_, status| {
+        chrome::popup_button_style(theme, status, chrome::PopupButtonTone::SurfaceAlt, true)
     })
     .into()
 }
