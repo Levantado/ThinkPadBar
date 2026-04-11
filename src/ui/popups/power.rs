@@ -156,14 +156,16 @@ pub fn view(theme: ThemeTokens, model: PowerPopupModel) -> Element<'static, Mess
     }
 
     let idle_btn = {
+        let idle_label = model.idle_snapshot.label().to_string();
         let mut btn = button(
             Row::new()
-                .spacing(4)
+                .spacing(6)
                 .align_y(Alignment::Center)
-                .push(text("").size(18))
-                .push(text(model.idle_snapshot.label()).size(12)),
+                .push(text("").size(14))
+                .push(text(idle_label).size(11)),
         )
         .width(Length::FillPortion(1))
+        .height(Length::Fixed(40.0))
         .padding(Padding::from([12, 12]))
         .style(move |_, status| {
             if model.idle_snapshot.enabled {
@@ -185,58 +187,6 @@ pub fn view(theme: ThemeTokens, model: PowerPopupModel) -> Element<'static, Mess
         btn
     };
 
-    let battery_care_card = {
-        let info_row = |icon: &'static str, label: &'static str, value: String| {
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(text(icon).size(13))
-                .push(
-                    text(label)
-                        .size(12)
-                        .width(Length::FillPortion(2))
-                        .style(|_| iced::widget::text::Style {
-                            color: Some(Color::from_rgb8(0x86, 0x90, 0xb2)),
-                        }),
-                )
-                .push(
-                    text(value)
-                        .size(12)
-                        .width(Length::FillPortion(3))
-                        .align_x(iced::alignment::Horizontal::Right),
-                )
-        };
-
-        container(
-            Column::new()
-                .spacing(8)
-                .push(
-                    Row::new()
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .push(text("󰚥").size(16))
-                        .push(text("Battery Care").size(14)),
-                )
-                .push(info_row(
-                    "󰁹",
-                    "Charge State",
-                    battery_charge_state_summary(&model.battery),
-                ))
-                .push(info_row(
-                    "󰂄",
-                    "Thresholds",
-                    battery_threshold_summary(&model.battery),
-                ))
-                .push(info_row(
-                    "󰛨",
-                    "Control Mode",
-                    "System-managed (read-only)".to_string(),
-                )),
-        )
-        .padding(layout.card_padding)
-        .style(move |_| chrome::popup_card_style(theme))
-    };
-
     let content = Column::new()
         .spacing(layout.section_spacing)
         .push(chrome::detail_popup_header_row(
@@ -248,19 +198,13 @@ pub fn view(theme: ThemeTokens, model: PowerPopupModel) -> Element<'static, Mess
         .push(top_row)
         .push(
             Row::new()
-                .spacing(16)
+                .spacing(8)
                 .width(Length::Fill)
                 .push(idle_btn)
-                .push(shortcut_button(
-                    theme,
-                    "󰈈",
-                    "System Info".to_string(),
-                    Message::TogglePopup(Popup::SystemMonitor),
-                ))
-                .push(shortcut_button(
+                .push(chrome::domain_shortcut_button(
                     theme,
                     "󰍹",
-                    "Displays".to_string(),
+                    "Displays",
                     Message::TogglePopup(Popup::Displays),
                 )),
         )
@@ -295,8 +239,7 @@ pub fn view(theme: ThemeTokens, model: PowerPopupModel) -> Element<'static, Mess
                         .width(Length::Fill)
                         .align_x(iced::alignment::Horizontal::Center),
                 ),
-        )
-        .push(battery_care_card);
+        );
 
     container(content)
         .padding(Padding::from([
@@ -447,29 +390,6 @@ fn circular_btn_style(
         chrome::popup_button_style(theme, status, chrome::PopupButtonTone::Surface, true);
     style.border.radius = 24.0.into();
     style
-}
-
-fn shortcut_button(
-    theme: ThemeTokens,
-    icon: &'static str,
-    label: String,
-    message: Message,
-) -> Element<'static, Message> {
-    button(
-        Row::new()
-            .spacing(6)
-            .align_y(Alignment::Center)
-            .push(text(icon).size(14))
-            .push(text(label).size(11)),
-    )
-    .width(Length::FillPortion(1))
-    .height(Length::Fixed(40.0))
-    .padding(Padding::from([12, 12]))
-    .on_press(message)
-    .style(move |_, status| {
-        chrome::popup_button_style(theme, status, chrome::PopupButtonTone::SurfaceAlt, true)
-    })
-    .into()
 }
 
 pub fn battery_icon_and_color(

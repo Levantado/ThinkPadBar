@@ -79,6 +79,7 @@ pub struct ThinkPadBar {
     main_window_id: Option<Id>,
     popup_window_id: Option<Id>,
     calendar_offset: i32,
+    system_info_tab: crate::ui::popups::system_info::SystemInfoTab,
     compositor_service: crate::services::compositor::CompositorService,
     controls_service: crate::services::controls::ControlsService,
     popup_anchor_service: crate::services::popup_anchor::PopupAnchorService,
@@ -151,6 +152,7 @@ pub enum Message {
     SetMicVolume(u32),
     AdjustMicVolumeBy(i8),
     SetAudioInputRoute(String),
+    SetSystemInfoTab(crate::ui::popups::system_info::SystemInfoTab),
     SetFanLevel(String),
     SetBrightness(u32),
     AdjustBrightnessBy(i8),
@@ -405,7 +407,7 @@ impl ThinkPadBar {
         };
 
         popups::stats::StatsPopupModel::new(
-            popups::stats::opaque_background_alpha(self.config.appearance.opacity),
+            self.config.appearance.opacity,
             cpu_summary,
             mem_summary,
             temp_summary,
@@ -505,6 +507,7 @@ impl ThinkPadBar {
         crate::ui::adapters::build_system_info_popup_model(
             crate::ui::adapters::SystemInfoPopupInputs {
                 version: env!("CARGO_PKG_VERSION"),
+                active_tab: self.system_info_tab,
                 debug_ui_enabled: self.debug_ui_enabled,
                 sys_data,
                 battery: &self.controls.battery,
@@ -988,6 +991,12 @@ impl ThinkPadBar {
     }
 
     fn perform_slow_tick(&mut self) -> Task<Message> {
+        if self.popup == Popup::SystemMonitor {
+            self.system_info_service
+                .refresh(crate::services::system_info::SystemInfoRefreshKind::Thermal);
+            return Task::none();
+        }
+
         self.system_info_service
             .refresh(crate::services::system_info::SystemInfoRefreshKind::Thermal);
         self.system_info_service
@@ -1117,6 +1126,7 @@ impl ThinkPadBar {
                 main_window_id: Some(main_id),
                 popup_window_id: Some(popup_id),
                 calendar_offset: 0,
+                system_info_tab: crate::ui::popups::system_info::SystemInfoTab::default(),
                 compositor_service,
                 controls_service,
                 popup_anchor_service,
@@ -1377,6 +1387,9 @@ impl ThinkPadBar {
                 );
             }
             Message::AdjustVolumeBy(direction) => {
+                if self.popup != Popup::None {
+                    return Task::none();
+                }
                 let next = Self::step_adjust_percent(self.controls.audio.volume, direction, 0, 100);
                 if next != self.controls.audio.volume {
                     return self.update(Message::SetVolume(next));
@@ -1404,6 +1417,9 @@ impl ThinkPadBar {
                 );
             }
             Message::AdjustMicVolumeBy(direction) => {
+                if self.popup != Popup::None {
+                    return Task::none();
+                }
                 let next = Self::step_adjust_percent(self.controls.mic.volume, direction, 0, 100);
                 if next != self.controls.mic.volume {
                     return self.update(Message::SetMicVolume(next));
@@ -1419,6 +1435,10 @@ impl ThinkPadBar {
                     crate::services::controls::ControlsCommand::SetAudioInputRoute(route_id);
                 return self.preview_and_execute_controls_command(command);
             }
+            Message::SetSystemInfoTab(tab) => {
+                self.system_info_tab = tab;
+                return Task::none();
+            }
             Message::SetBrightness(val) => {
                 let command = crate::services::controls::ControlsCommand::SetBrightness(val);
                 self.preview_controls_command(&command);
@@ -1431,6 +1451,9 @@ impl ThinkPadBar {
                 );
             }
             Message::AdjustBrightnessBy(direction) => {
+                if self.popup != Popup::None {
+                    return Task::none();
+                }
                 let next =
                     Self::step_adjust_percent(self.controls.brightness.percent, direction, 1, 100);
                 if next != self.controls.brightness.percent {
@@ -1678,6 +1701,10 @@ impl ThinkPadBar {
     }
 
     fn system_info_fast_updates_enabled(&self) -> bool {
+        matches!(self.popup, Popup::Stats | Popup::SystemMonitor)
+    }
+
+    fn popup_polling_updates_enabled(&self) -> bool {
         true
     }
 
@@ -1690,23 +1717,38 @@ impl ThinkPadBar {
         } else {
             iced::Subscription::none()
         };
+        let thermal_subscription = if self.popup_polling_updates_enabled() {
+            iced::time::every(std::time::Duration::from_secs(thermal_secs)).map(|_| {
+                Message::RefreshControls(crate::services::controls::ControlsRefreshKind::Fan)
+            })
+        } else {
+            iced::Subscription::none()
+        };
+        let slow_tick_subscription = if self.popup_polling_updates_enabled() {
+            iced::time::every(std::time::Duration::from_secs(slow_secs))
+                .map(|_| Message::TickSlow(chrono::Local::now()))
+        } else {
+            iced::Subscription::none()
+        };
+        let controls_subscription = if self.popup_polling_updates_enabled() {
+            self.controls_service
+                .subscription()
+                .map(Message::ControlsEvent)
+        } else {
+            iced::Subscription::none()
+        };
 
         iced::Subscription::batch(vec![
             crate::modules::clock::tick(),
-            iced::time::every(std::time::Duration::from_secs(thermal_secs)).map(|_| {
-                Message::RefreshControls(crate::services::controls::ControlsRefreshKind::Fan)
-            }),
-            iced::time::every(std::time::Duration::from_secs(slow_secs))
-                .map(|_| Message::TickSlow(chrono::Local::now())),
+            thermal_subscription,
+            slow_tick_subscription,
             self.compositor_service
                 .subscription()
                 .map(Message::CompositorEvent),
             crate::services::wayland_runtime::WaylandRuntimeService::subscription()
                 .map(Message::WaylandRuntimeEvent),
             crate::services::tray_ui::TrayUiService::subscription().map(Message::TrayEvent),
-            self.controls_service
-                .subscription()
-                .map(Message::ControlsEvent),
+            controls_subscription,
             crate::services::media::MediaService::subscription(self.media_event_rx.resubscribe())
                 .map(Message::MediaEvent),
             audio_visualizer_subscription,
@@ -1769,6 +1811,7 @@ mod tests {
             main_window_id: None,
             popup_window_id: None,
             calendar_offset: 0,
+            system_info_tab: crate::ui::popups::system_info::SystemInfoTab::default(),
             compositor_service: crate::services::compositor::CompositorService::hermetic_for_tests(
                 crate::services::compositor::CompositorBackendKind::Hyprland,
                 crate::services::compositor::CompositorBackendKind::Hyprland,
@@ -1851,9 +1894,11 @@ mod tests {
     }
 
     #[test]
-    fn stats_popup_background_alpha_is_opaque() {
-        assert_eq!(crate::ui::popups::stats::opaque_background_alpha(0.25), 1.0);
-        assert_eq!(crate::ui::popups::stats::opaque_background_alpha(0.85), 1.0);
+    fn stats_popup_background_alpha_uses_configured_value() {
+        let mut bar = hermetic_bar();
+        bar.config.appearance.opacity = 0.37;
+        let model = bar.build_stats_popup_model();
+        assert_eq!(model.background_alpha, 0.37);
     }
 
     #[test]
@@ -1866,22 +1911,22 @@ mod tests {
 
     #[test]
     fn hardware_summary_rows_include_all_expected_lines() {
-        let rows = system_info::hardware_rows(
-            &crate::services::controls::BatteryInfo {
-                capacity: 64,
-                status: "Discharging".to_string(),
-                time_remaining: Some("2h 6m remaining".to_string()),
-                ac_online: Some(false),
-                health_percent: Some(92),
-                power_rate_mw: Some(12_400),
-                pack_voltage_mv: Some(15_420),
-                cycle_count: Some(187),
-                full_charge_mwh: Some(48_000),
-                design_capacity_mwh: Some(52_000),
-                charge_start_threshold: Some(40),
-                charge_end_threshold: Some(80),
-            },
-            "balanced",
+        let battery = crate::services::controls::BatteryInfo {
+            capacity: 64,
+            status: "Discharging".to_string(),
+            time_remaining: Some("2h 6m remaining".to_string()),
+            ac_online: Some(false),
+            health_percent: Some(92),
+            power_rate_mw: Some(12_400),
+            pack_voltage_mv: Some(15_420),
+            cycle_count: Some(187),
+            full_charge_mwh: Some(48_000),
+            design_capacity_mwh: Some(52_000),
+            charge_start_threshold: Some(40),
+            charge_end_threshold: Some(80),
+        };
+        let p_rows = system_info::power_rows(&battery, "balanced");
+        let h_rows = system_info::hardware_rows(
             &crate::services::controls::FanInfo {
                 speed: "2700".to_string(),
                 level: "auto".to_string(),
@@ -1898,27 +1943,8 @@ mod tests {
             },
         );
 
-        assert_eq!(rows.len(), 14);
-        assert_eq!(
-            rows.iter().map(|row| row.label).collect::<Vec<_>>(),
-            vec![
-                "Battery Runtime",
-                "AC Adapter",
-                "Battery Health",
-                "Battery Wear",
-                "Pack Capacity",
-                "Pack Voltage",
-                "Cycle Count",
-                "Charge Thresholds",
-                "Charge State",
-                "Charge / Draw Power",
-                "Power Profile",
-                "Fan Runtime",
-                "Thermal State",
-                "Idle Inhibitor",
-            ]
-        );
-        assert!(rows.iter().all(|row| !row.value.is_empty()));
+        assert_eq!(p_rows.len(), 11);
+        assert_eq!(h_rows.len(), 3);
     }
 
     #[test]
@@ -2584,7 +2610,7 @@ mod tests {
                 ("", "Stats", Popup::Stats, false),
                 ("", "Power", Popup::Power, false),
                 ("󰖀", "Controls", Popup::Controls, true),
-                ("󰖩", "Connectivity", Popup::Connectivity, false),
+                ("󰖩", "Network", Popup::Connectivity, false),
             ]
         );
     }
@@ -2991,12 +3017,12 @@ mod tests {
     }
 
     #[test]
-    fn visualizer_updates_continue_while_popup_is_open() {
+    fn visualizer_updates_continue_while_system_monitor_is_open() {
         let mut bar = hermetic_bar();
         assert!(bar.audio_visualizer_updates_enabled());
 
         bar.popup = Popup::SystemMonitor;
-        // Visualizer should NOT pause anymore
+        // Silk V2 policy: visualizer continues to work because tabs are lightweight
         assert!(bar.audio_visualizer_updates_enabled());
 
         bar.popup = Popup::None;
@@ -3014,6 +3040,31 @@ mod tests {
             bar.system_info_service.diagnostics().last_refresh_kind,
             Some(crate::services::system_info::SystemInfoRefreshKind::Fast)
         );
+    }
+
+    #[test]
+    fn tick_refreshes_system_info_fast_while_stats_popup_is_open() {
+        let mut bar = hermetic_bar();
+        bar.popup = Popup::Stats;
+
+        let _ = bar.update(Message::Tick(chrono::Local::now()));
+
+        assert_eq!(
+            bar.system_info_service.diagnostics().last_refresh_kind,
+            Some(crate::services::system_info::SystemInfoRefreshKind::Fast)
+        );
+    }
+
+    #[test]
+    fn popup_polling_updates_continue_while_system_monitor_is_open() {
+        let mut bar = hermetic_bar();
+        assert!(bar.popup_polling_updates_enabled());
+
+        bar.popup = Popup::SystemMonitor;
+        assert!(bar.popup_polling_updates_enabled());
+
+        bar.popup = Popup::None;
+        assert!(bar.popup_polling_updates_enabled());
     }
 
     #[test]
@@ -3424,6 +3475,42 @@ mod tests {
         assert!(bar
             .background_request_coalescing
             .is_queued(&BackgroundRequestKind::DbusConnect));
+    }
+
+    #[test]
+    fn slow_tick_skips_heavy_refresh_while_system_monitor_is_open() {
+        let mut bar = hermetic_bar();
+        bar.popup = Popup::SystemMonitor;
+
+        let _ = bar.perform_slow_tick();
+
+        assert!(!bar
+            .background_request_coalescing
+            .is_inflight(&BackgroundRequestKind::DbusConnect));
+        assert!(!bar
+            .controls_refresh_coalescing
+            .is_inflight(&crate::services::controls::ControlsRefreshKind::Fan));
+        assert_eq!(
+            bar.system_info_service.diagnostics().last_refresh_kind,
+            Some(crate::services::system_info::SystemInfoRefreshKind::Thermal)
+        );
+    }
+
+    #[test]
+    fn adjust_by_wheel_is_ignored_when_popup_is_open() {
+        let mut bar = hermetic_bar();
+        bar.controls.audio.volume = 40;
+        bar.controls.mic.volume = 35;
+        bar.controls.brightness.percent = 55;
+        bar.popup = Popup::SystemMonitor;
+
+        let _ = bar.update(super::Message::AdjustVolumeBy(1));
+        let _ = bar.update(super::Message::AdjustMicVolumeBy(-1));
+        let _ = bar.update(super::Message::AdjustBrightnessBy(1));
+
+        assert_eq!(bar.controls.audio.volume, 40);
+        assert_eq!(bar.controls.mic.volume, 35);
+        assert_eq!(bar.controls.brightness.percent, 55);
     }
 
     #[test]

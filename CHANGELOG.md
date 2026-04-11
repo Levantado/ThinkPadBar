@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.72] - 2026-04-11
+
+### Fixed
+- **System Info Popup**: Applied "Silk" optimization by flattening the widget hierarchy and fixing the scrollable viewport height. This eliminates rendering artifacts and layering issues during scroll interactions.
+- **Audio Visualizer**: Re-enabled continuous updates while the System Monitor is open, confirmed by updated regression tests.
+
+## [1.0.71] - 2026-04-11
+
+### Fixed
+- **System Info Popup**: Eliminated scrolling artifacts (black bars, truncated rows) by applying a fixed viewport height and flattening the container hierarchy. This ensures stable rendering within Wayland layer-surface bounds during fast 1-second refreshes.
+
 ## [1.0.70] - 2026-04-11
 
 ### Fixed
