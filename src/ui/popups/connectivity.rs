@@ -300,22 +300,14 @@ pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'stati
         );
     }
 
-    container_col = container_col.push(bluetooth_quick_card).push(
-        Row::new()
-            .spacing(8)
-            .push(shortcut_button(
-                theme,
-                "󰂯",
-                "Bluetooth Devices".to_string(),
-                Message::TogglePopup(Popup::BluetoothDevices),
-            ))
-            .push(shortcut_button(
-                theme,
-                "󰈈",
-                "System Info".to_string(),
-                Message::TogglePopup(Popup::SystemMonitor),
-            )),
-    );
+    container_col = container_col
+        .push(bluetooth_quick_card)
+        .push(Row::new().spacing(8).push(chrome::domain_shortcut_button(
+            theme,
+            "󰂯",
+            "Bluetooth Devices",
+            Message::TogglePopup(Popup::BluetoothDevices),
+        )));
 
     container(container_col)
         .padding(Padding::from([
@@ -332,29 +324,6 @@ pub fn view(theme: ThemeTokens, model: ConnectivityPopupModel) -> Element<'stati
             style
         })
         .into()
-}
-
-fn shortcut_button(
-    theme: ThemeTokens,
-    icon: &'static str,
-    label: String,
-    message: Message,
-) -> Element<'static, Message> {
-    button(
-        Row::new()
-            .spacing(6)
-            .align_y(Alignment::Center)
-            .push(text(icon).size(14))
-            .push(text(label).size(11)),
-    )
-    .width(Length::FillPortion(1))
-    .height(Length::Fixed(40.0))
-    .padding(Padding::from([12, 12]))
-    .on_press(message)
-    .style(move |_, status| {
-        chrome::popup_button_style(theme, status, chrome::PopupButtonTone::SurfaceAlt, true)
-    })
-    .into()
 }
 
 #[cfg(test)]
