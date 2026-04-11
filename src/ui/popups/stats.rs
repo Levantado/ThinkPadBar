@@ -36,10 +36,6 @@ impl StatsPopupModel {
     }
 }
 
-pub fn opaque_background_alpha(_configured_alpha: f32) -> f32 {
-    1.0
-}
-
 pub fn normalize_value(value: impl Into<String>) -> String {
     let value = value.into();
     let normalized = value.trim();
@@ -53,7 +49,7 @@ pub fn normalize_value(value: impl Into<String>) -> String {
 pub fn view(theme: ThemeTokens, model: StatsPopupModel) -> Element<'static, Message> {
     let layout = super::standard_domain_popup_layout();
     let content = Column::new()
-        .width(Length::Shrink)
+        .width(Length::Fill)
         .spacing(layout.section_spacing)
         .push(chrome::detail_popup_header_row(
             theme,
@@ -68,7 +64,8 @@ pub fn view(theme: ThemeTokens, model: StatsPopupModel) -> Element<'static, Mess
             layout.outer_padding_y,
             layout.outer_padding_x,
         ]))
-        .max_width(f32::from(layout.width))
+        .width(Length::Fill)
+        .height(Length::Fill)
         .style(move |_| {
             let mut style = chrome::popup_panel_style(theme);
             style.background = Some(iced::Background::Color(Color {
@@ -79,13 +76,13 @@ pub fn view(theme: ThemeTokens, model: StatsPopupModel) -> Element<'static, Mess
         });
 
     container(card)
-        .padding(Padding::from([8, 12]))
+        .padding(Padding::from([0, 0]))
         .style(|_| iced::widget::container::Style {
             background: None,
             ..Default::default()
         })
-        .width(Length::Shrink)
-        .height(Length::Shrink)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
 }
 
@@ -133,13 +130,7 @@ impl<'a> ColumnRowsExt<'a> for Column<'a, Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_value, opaque_background_alpha, StatsPopupModel};
-
-    #[test]
-    fn opaque_background_alpha_always_forces_opaque_surface() {
-        assert_eq!(opaque_background_alpha(0.25), 1.0);
-        assert_eq!(opaque_background_alpha(0.85), 1.0);
-    }
+    use super::{normalize_value, StatsPopupModel};
 
     #[test]
     fn normalize_value_collapses_blank_strings() {

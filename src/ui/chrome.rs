@@ -1,6 +1,6 @@
 use iced::{
     widget::{button, container, text, Row, Space},
-    Alignment, Background, Color, Length, Padding,
+    Alignment, Background, Color, Element, Length, Padding,
 };
 
 use crate::app::{Message, Popup};
@@ -154,7 +154,7 @@ pub fn domain_popup_nav_items(
         ),
         (
             "󰖩",
-            "Connectivity",
+            "Network",
             Popup::Connectivity,
             active_popup == &Popup::Connectivity,
         ),
@@ -428,6 +428,27 @@ fn chrome_button<'a>(
         .style(move |_, status| popup_button_style(theme, status, PopupButtonTone::Surface, true))
 }
 
+pub fn domain_shortcut_button(
+    theme: ThemeTokens,
+    icon: &'static str,
+    label: &str,
+    message: Message,
+) -> Element<'static, Message> {
+    button(
+        Row::new()
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .push(text(icon).size(14))
+            .push(text(label.to_string()).size(11)),
+    )
+    .width(Length::FillPortion(1))
+    .height(Length::Fixed(40.0))
+    .padding(Padding::from([12, 12]))
+    .on_press(message)
+    .style(move |_, status| popup_button_style(theme, status, PopupButtonTone::SurfaceAlt, true))
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -495,7 +516,7 @@ mod tests {
                 ("", "Stats", Popup::Stats, false),
                 ("", "Power", Popup::Power, false),
                 ("󰖀", "Controls", Popup::Controls, true),
-                ("󰖩", "Connectivity", Popup::Connectivity, false),
+                ("󰖩", "Network", Popup::Connectivity, false),
             ]
         );
     }

@@ -31,7 +31,7 @@ pub struct PopupAnchorService {
 
 impl PopupAnchorService {
     const RIGHT_EDGE_WIDTH: u32 = 472;
-    const COMPACT_HEIGHT: u32 = 320;
+    const COMPACT_HEIGHT: u32 = 280;
     const MEDIUM_HEIGHT: u32 = 540;
     const TALL_HEIGHT: u32 = 640;
     const XL_HEIGHT: u32 = 700;
@@ -190,7 +190,7 @@ mod tests {
         let service = PopupAnchorService::new(24);
         let plan = service.plan(PopupSurfaceKind::Stats, None, None);
         assert_eq!(plan.width, 472);
-        assert_eq!(plan.height, 320);
+        assert_eq!(plan.height, 280);
         assert_eq!(plan.anchor, Anchor::TOP | Anchor::RIGHT);
         assert_eq!(plan.margin, (32, 8, 0, 0));
     }

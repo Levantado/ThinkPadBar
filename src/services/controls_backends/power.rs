@@ -123,17 +123,56 @@ impl super::PowerBackend for PowerProfilesDaemonBackend {
 }
 
 pub(crate) fn current_profile() -> String {
-    if let Some(profile) = read_profile_via_powerprofilesctl() {
-        return profile;
+    let sysfs_profile = match fs::read_to_string(PLATFORM_PROFILE_PATH) {
+        Ok(profile) => Some(profile),
+        Err(error) => {
+            warn!(
+                "Could not read platform profile from {}: {}",
+                PLATFORM_PROFILE_PATH, error
+            );
+            None
+        }
+    };
+
+    resolve_profile_from_sources(
+        read_profile_via_dbus(),
+        read_profile_via_powerprofilesctl(),
+        sysfs_profile,
+    )
+}
+
+fn read_profile_via_dbus() -> Option<String> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return None;
     }
 
-    match fs::read_to_string(PLATFORM_PROFILE_PATH) {
-        Ok(profile) => canonical_profile_value(profile.trim()),
-        Err(error) => {
-            warn!("Could not read power profile from powerprofilesctl or {}: {}. Using 'balanced' fallback.", PLATFORM_PROFILE_PATH, error);
-            "balanced".to_string()
-        }
+    let connection = zbus::blocking::Connection::system().ok()?;
+    let proxy = zbus::blocking::Proxy::new(
+        &connection,
+        POWER_PROFILES_DESTINATION,
+        POWER_PROFILES_PATH,
+        POWER_PROFILES_INTERFACE,
+    )
+    .ok()?;
+    let active: String = proxy.get_property("ActiveProfile").ok()?;
+    Some(canonical_profile_value(&active))
+}
+
+fn resolve_profile_from_sources(
+    dbus_profile: Option<String>,
+    cli_profile: Option<String>,
+    sysfs_profile: Option<String>,
+) -> String {
+    if let Some(profile) = dbus_profile {
+        return canonical_profile_value(&profile);
     }
+    if let Some(profile) = cli_profile {
+        return canonical_profile_value(&profile);
+    }
+    if let Some(profile) = sysfs_profile {
+        return canonical_profile_value(profile.trim());
+    }
+    "balanced".to_string()
 }
 
 fn ppd_cli_available() -> bool {
@@ -252,7 +291,7 @@ fn power_runtime_summary(ppd_cli_available: bool, platform_profile_exists: bool)
 mod tests {
     use super::{
         canonical_profile_name, daemon_profile_name, parse_powerprofilesctl_get_output,
-        platform_profile_name, power_runtime_summary,
+        platform_profile_name, power_runtime_summary, resolve_profile_from_sources,
     };
     use crate::services::controls_backends::privileged::stderr_summary;
 
@@ -320,5 +359,30 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should initialize");
         let result = runtime.block_on(async { std::panic::catch_unwind(super::current_profile) });
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn resolve_profile_prefers_dbus_then_cli_then_sysfs() {
+        assert_eq!(
+            resolve_profile_from_sources(
+                Some("performance".to_string()),
+                Some("power-saver".to_string()),
+                Some("balanced".to_string())
+            ),
+            "performance"
+        );
+        assert_eq!(
+            resolve_profile_from_sources(
+                None,
+                Some("power-saver".to_string()),
+                Some("performance".to_string())
+            ),
+            "low-power"
+        );
+        assert_eq!(
+            resolve_profile_from_sources(None, None, Some("performance\n".to_string())),
+            "performance"
+        );
+        assert_eq!(resolve_profile_from_sources(None, None, None), "balanced");
     }
 }

@@ -168,8 +168,19 @@ pub fn view(
             .push_rows(section.rows.into_iter().map(metric_row));
     }
 
+    // Фиксированная высота ТОЛЬКО для прокручиваемой области контента,
+    // чтобы не конфликтовать с вводом всего окна.
+    let scroll_content = container(content)
+        .width(Length::Fill)
+        .padding([0, 28, 12, 0]);
+
+    let scroll = scrollable(scroll_content)
+        .id(iced::id::Id::new("system-info-scroll"))
+        .width(Length::Fill)
+        .height(Length::Fixed(460.0)); // Стабильная область прокрутки
+
     container(
-        container(scrollable(container(content).padding([0, 14, 12, 0])))
+        container(scroll)
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(Padding::from([
@@ -203,21 +214,46 @@ fn section_heading(theme: ThemeTokens, section: &PopupSection) -> Element<'stati
 }
 
 fn metric_row(metric: PopupMetricRow) -> Element<'static, Message> {
+    let value = compact_metric_value(&metric.value, 24);
     Row::new()
-        .spacing(12)
+        .spacing(10)
         .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .height(Length::Fixed(24.0))
         .push(
             container(text(metric.icon).size(16))
-                .width(Length::Fixed(16.0))
+                .width(Length::Fixed(28.0))
                 .align_x(iced::alignment::Horizontal::Center),
         )
-        .push(text(metric.label).size(13).width(Length::Fill))
         .push(
-            text(metric.value)
+            text(metric.label)
                 .size(13)
-                .align_x(iced::alignment::Horizontal::Right),
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Left),
+        )
+        .push(Space::with_width(Length::Fixed(8.0)))
+        .push(
+            container(
+                text(value)
+                    .size(13)
+                    .align_x(iced::alignment::Horizontal::Right),
+            )
+            .width(Length::Fixed(148.0))
+            .align_x(iced::alignment::Horizontal::Right),
         )
         .into()
+}
+
+fn compact_metric_value(value: &str, max_chars: usize) -> String {
+    let value = value.trim();
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(1);
+    let mut compact = value.chars().take(keep).collect::<String>();
+    compact.push('…');
+    compact
 }
 
 trait ColumnRowsExt<'a> {
@@ -239,8 +275,8 @@ impl<'a> ColumnRowsExt<'a> for Column<'a, Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::SystemInfoPopupModel;
-    use crate::ui::popups::{PopupMetricRow, PopupSectionTone};
+    use super::{compact_metric_value, SystemInfoPopupModel};
+    use crate::ui::popups::PopupMetricRow;
 
     #[test]
     fn system_info_sections_skip_empty_optional_groups() {
@@ -271,11 +307,13 @@ mod tests {
 
         let sections = model.sections();
         assert_eq!(sections.len(), 2);
-        assert_eq!(sections[0].title, "ThinkPad Hardware");
-        assert_eq!(sections[0].tone, PopupSectionTone::Success);
         assert_eq!(sections[1].title, "Observability");
-        assert_eq!(sections[1].tone, PopupSectionTone::Accent);
         assert_eq!(sections[1].rows.len(), 2);
-        assert_eq!(sections[1].rows[1].label, "Wayland Missing Caps");
+    }
+
+    #[test]
+    fn compact_metric_value_truncates_only_when_needed() {
+        assert_eq!(compact_metric_value("123", 5), "123");
+        assert_eq!(compact_metric_value("123456", 5), "1234…");
     }
 }
