@@ -1,5 +1,5 @@
 use iced::{
-    widget::{button, container, scrollable, text, Column, Row, Space},
+    widget::{button, container, text, Column, Row, Space},
     Alignment, Color, Element, Length, Padding,
 };
 
@@ -31,10 +31,10 @@ impl SystemInfoTab {
 
     pub fn label(&self) -> &'static str {
         match self {
-            SystemInfoTab::Overview => "Metrics",
+            SystemInfoTab::Overview => "Stats",
             SystemInfoTab::Power => "Power",
-            SystemInfoTab::Hardware => "Hardware",
-            SystemInfoTab::Runtime => "Runtime",
+            SystemInfoTab::Hardware => "HW",
+            SystemInfoTab::Runtime => "Diag",
         }
     }
 
@@ -164,9 +164,9 @@ pub fn view(
 ) -> Element<'static, Message> {
     let type_scale = super::standard_popup_type_scale();
     let layout = super::standard_domain_popup_layout();
-    
-    // Tab Navigation Row
-    let mut tab_row = Row::new().spacing(8).align_y(Alignment::Center);
+
+    // Tab Navigation Row - No scrollable, just a Row
+    let mut tab_row = Row::new().spacing(6).align_y(Alignment::Center);
     for tab in SystemInfoTab::all() {
         let is_active = *tab == model.active_tab;
         let (bg, fg) = if is_active {
@@ -174,26 +174,26 @@ pub fn view(
         } else {
             (theme.surface_alt, theme.text_muted)
         };
-        
+
         let tab_btn = button(
             Row::new()
-                .spacing(6)
+                .spacing(4)
                 .align_y(Alignment::Center)
                 .push(text(tab.icon()).size(14))
-                .push(text(tab.label()).size(12))
+                .push(text(tab.label()).size(11)),
         )
-        .padding(Padding::from([6, 12]))
+        .padding(Padding::from([4, 10]))
         .on_press(Message::SetSystemInfoTab(*tab))
         .style(move |_, _| iced::widget::button::Style {
             background: Some(iced::Background::Color(bg)),
             text_color: fg,
             border: iced::Border {
-                radius: 8.0.into(),
+                radius: 6.0.into(),
                 ..Default::default()
             },
             ..Default::default()
         });
-        
+
         tab_row = tab_row.push(tab_btn);
     }
 
@@ -204,7 +204,7 @@ pub fn view(
         SystemInfoTab::Runtime => model.runtime_rows,
     };
 
-    let content = Column::new()
+    let mut content = Column::new()
         .spacing(layout.section_spacing)
         .push(chrome::detail_popup_header_row(
             theme,
@@ -212,21 +212,27 @@ pub fn view(
             &Popup::SystemMonitor,
         ))
         .push(
-            text(format!("ver {}", model.version))
-                .size(type_scale.micro)
-                .style(move |_| iced::widget::text::Style {
-                    color: Some(theme.text_muted),
-                }),
+            Row::new()
+                .align_y(Alignment::Center)
+                .push(tab_row)
+                .push(Space::with_width(Length::Fill))
+                .push(
+                    text(format!("v{}", model.version))
+                        .size(type_scale.micro)
+                        .style(move |_| iced::widget::text::Style {
+                            color: Some(theme.text_muted),
+                        }),
+                ),
         )
-        .push(
-            container(scrollable(Row::new().push(tab_row).push(Space::with_width(Length::Fixed(12.0)))))
-                .width(Length::Fill)
-        )
-        .push(Space::with_height(Length::Fixed(4.0)))
-        .push_rows(active_rows.into_iter().map(metric_row));
+        .push(Space::with_height(Length::Fixed(4.0)));
+
+    for row in active_rows {
+        content = content.push(metric_row(row));
+    }
 
     container(content)
         .width(Length::Fill)
+        .height(Length::Fill)
         .padding(Padding::from([
             layout.outer_padding_y,
             layout.outer_padding_x,
@@ -248,22 +254,18 @@ fn metric_row(metric: PopupMetricRow) -> Element<'static, Message> {
         .spacing(10)
         .align_y(Alignment::Center)
         .width(Length::Fill)
-        .height(Length::Fixed(28.0))
+        .height(Length::Fixed(24.0))
         .push(
             text(metric.icon)
                 .size(16)
-                .width(Length::Fixed(28.0))
+                .width(Length::Fixed(24.0))
                 .align_x(iced::alignment::Horizontal::Center),
         )
-        .push(
-            text(metric.label)
-                .size(13)
-                .width(Length::Fill),
-        )
+        .push(text(metric.label).size(13).width(Length::Fill))
         .push(
             text(value)
                 .size(13)
-                .width(Length::Fixed(160.0))
+                .width(Length::Fixed(140.0))
                 .align_x(iced::alignment::Horizontal::Right),
         )
         .into()
@@ -279,23 +281,6 @@ fn compact_metric_value(value: &str, max_chars: usize) -> String {
     let mut compact = value.chars().take(keep).collect::<String>();
     compact.push('…');
     compact
-}
-
-trait ColumnRowsExt<'a> {
-    fn push_rows(self, rows: impl IntoIterator<Item = Element<'a, Message>>)
-        -> Column<'a, Message>;
-}
-
-impl<'a> ColumnRowsExt<'a> for Column<'a, Message> {
-    fn push_rows(
-        mut self,
-        rows: impl IntoIterator<Item = Element<'a, Message>>,
-    ) -> Column<'a, Message> {
-        for row in rows {
-            self = self.push(row);
-        }
-        self
-    }
 }
 
 #[cfg(test)]

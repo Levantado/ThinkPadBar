@@ -29,18 +29,12 @@ pub fn view(theme: ThemeTokens, model: &MediaPopupModel) -> Element<'static, Mes
     let snap = &model.snapshot;
     let opacity = model.opacity;
 
-    let cover = if let Some(bytes) = &snap.cover_bytes {
+    let cover = if let Some(handle) = &snap.cover_handle {
         container(
-            container(
-                image(image::Handle::from_bytes(bytes.to_vec()))
-                    .width(Length::Shrink)
-                    .height(Length::Fixed(240.0))
-                    .content_fit(iced::ContentFit::Contain),
-            )
-            .width(Length::Fill)
-            .height(Length::Fixed(240.0))
-            .align_x(iced::alignment::Horizontal::Center)
-            .align_y(iced::alignment::Vertical::Center),
+            image(handle.clone())
+                .width(Length::Fill)
+                .height(Length::Fixed(240.0))
+                .content_fit(iced::ContentFit::Cover),
         )
     } else {
         container(
@@ -171,32 +165,22 @@ pub fn view(theme: ThemeTokens, model: &MediaPopupModel) -> Element<'static, Mes
             .style(move |_, _| button::Style::default()),
         );
 
-    let volume_control: Element<'static, Message> = if snap.volume_supported {
-        slider(0.0..=100.0, (snap.volume * 100.0).clamp(0.0, 100.0), |v| {
-            Message::MediaCommand(crate::services::media::MediaCommand::SetVolume(v / 100.0))
-        })
-        .width(Length::Fixed(120.0))
-        .into()
-    } else {
-        text("Player volume unavailable")
-            .size(type_scale.micro)
-            .style(|_| iced::widget::text::Style {
-                color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
-            })
-            .into()
-    };
-
     let volume_row = Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
         .push(text("󰝚").size(16).style(|_| iced::widget::text::Style {
             color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
         }))
-        .push(volume_control);
+        .push(
+            slider(0.0..=1.0, snap.volume, |v| {
+                Message::MediaCommand(crate::services::media::MediaCommand::SetVolume(v))
+            })
+            .width(Length::Fixed(120.0)),
+        );
 
     let content = Column::new()
         .width(Length::Fill)
-        .spacing(16) // Более плотная верстка
+        .spacing(16)
         .push(chrome::detail_popup_header_row(
             theme,
             "Media Player",

@@ -67,25 +67,6 @@ impl PopupMetricRow {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PopupSectionTone {
-    Accent,
-    Success,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PopupSection {
-    pub title: &'static str,
-    pub tone: PopupSectionTone,
-    pub rows: Vec<PopupMetricRow>,
-}
-
-impl PopupSection {
-    pub fn new(title: &'static str, tone: PopupSectionTone, rows: Vec<PopupMetricRow>) -> Self {
-        Self { title, tone, rows }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{standard_domain_popup_layout, standard_popup_type_scale};

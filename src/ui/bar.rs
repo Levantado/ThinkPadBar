@@ -1,7 +1,7 @@
 use iced::{
     mouse,
     widget::{button, container, image, mouse_area, stack, text, Row, Space},
-    Alignment, Background, Color, Element, Length, Padding,
+    Alignment, Background, Color, Element, Font, Length, Padding,
 };
 
 use crate::app::{Message, Popup};
@@ -147,18 +147,38 @@ pub fn view(model: MainBarModel) -> Element<'static, Message> {
     )
     .width(Length::Shrink);
 
-    let pill_bg = Color {
-        a: model.opacity,
-        ..Color::from_rgb8(0x29, 0x2e, 0x42)
-    };
+    let pill_bg = Color::from_rgb8(0x29, 0x2e, 0x42);
     let pill_fg = Color::from_rgb8(0xc0, 0xca, 0xf5);
     let pill_border_radius = 12.0;
 
-    let stats_pill = stats_pill(&model.stats, pill_bg, pill_fg, pill_border_radius);
-    let controls_pill = controls_pill(&model.controls, pill_bg, pill_fg, pill_border_radius);
-    let connectivity_pill =
-        connectivity_pill(&model.connectivity, pill_bg, pill_fg, pill_border_radius);
-    let battery_pill = battery_pill(&model.battery, pill_bg, pill_fg, pill_border_radius);
+    let stats_pill = stats_pill(
+        &model.stats,
+        pill_bg,
+        pill_fg,
+        pill_border_radius,
+        model.opacity,
+    );
+    let controls_pill = controls_pill(
+        &model.controls,
+        pill_bg,
+        pill_fg,
+        pill_border_radius,
+        model.opacity,
+    );
+    let connectivity_pill = connectivity_pill(
+        &model.connectivity,
+        pill_bg,
+        pill_fg,
+        pill_border_radius,
+        model.opacity,
+    );
+    let battery_pill = battery_pill(
+        &model.battery,
+        pill_bg,
+        pill_fg,
+        pill_border_radius,
+        model.opacity,
+    );
 
     if model.media.has_player {
         left = left.push(media_pill(
@@ -166,6 +186,7 @@ pub fn view(model: MainBarModel) -> Element<'static, Message> {
             pill_bg,
             pill_fg,
             pill_border_radius,
+            model.opacity,
         ));
     }
     let kbd_pill = plain_pill(
@@ -174,18 +195,26 @@ pub fn view(model: MainBarModel) -> Element<'static, Message> {
         pill_bg,
         pill_fg,
         pill_border_radius,
+        model.opacity,
     );
-    let clock_pill = plain_pill(model.clock, 14, pill_bg, pill_fg, pill_border_radius);
+    let clock_pill = plain_pill(
+        model.clock,
+        14,
+        pill_bg,
+        pill_fg,
+        pill_border_radius,
+        model.opacity,
+    );
 
     let mut right_row = Row::new()
         .spacing(4)
         .align_y(Alignment::Center)
         .push(tray_row(&model.tray_items))
-        .push(mouse_area(stats_pill).on_press(Message::TogglePopup(Popup::Stats)))
+        .push(stats_pill)
         .push(controls_pill)
-        .push(mouse_area(connectivity_pill).on_press(Message::TogglePopup(Popup::Connectivity)))
-        .push(mouse_area(battery_pill).on_press(Message::TogglePopup(Popup::Power)))
-        .push(mouse_area(kbd_pill).on_press(Message::NextKeyboardLayout));
+        .push(connectivity_pill)
+        .push(battery_pill)
+        .push(kbd_pill.on_press(Message::NextKeyboardLayout));
 
     if model.show_debug_toggle {
         let dbg_pill = plain_pill_with_color(
@@ -194,13 +223,13 @@ pub fn view(model: MainBarModel) -> Element<'static, Message> {
             pill_bg,
             Color::from_rgb8(0x7a, 0xa2, 0xf7),
             pill_border_radius,
+            model.opacity,
             Padding::from([4, 10]),
         );
-        right_row = right_row.push(mouse_area(dbg_pill).on_press(Message::ToggleDebugOverlay));
+        right_row = right_row.push(dbg_pill.on_press(Message::ToggleDebugOverlay));
     }
 
-    right_row =
-        right_row.push(mouse_area(clock_pill).on_press(Message::TogglePopup(Popup::Calendar)));
+    right_row = right_row.push(clock_pill.on_press(Message::TogglePopup(Popup::Calendar)));
 
     let right = container(right_row).width(Length::Shrink);
 
@@ -508,17 +537,56 @@ fn tray_row(items: &[TrayItemModel]) -> Row<'static, Message> {
     row
 }
 
+fn pill_button_style(
+    bg: Color,
+    fg: Color,
+    radius: f32,
+    opacity: f32,
+) -> impl Fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style {
+    move |_, status| {
+        let active_bg = Color { a: opacity, ..bg };
+        let (background, text_color) = match status {
+            iced::widget::button::Status::Hovered => (
+                Some(Background::Color(Color {
+                    a: (opacity + 0.1).min(1.0),
+                    ..bg
+                })),
+                fg,
+            ),
+            iced::widget::button::Status::Pressed => (
+                Some(Background::Color(Color {
+                    a: (opacity + 0.2).min(1.0),
+                    ..bg
+                })),
+                fg,
+            ),
+            _ => (Some(Background::Color(active_bg)), fg),
+        };
+
+        iced::widget::button::Style {
+            background,
+            text_color,
+            border: iced::Border {
+                radius: radius.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
 fn stats_pill(
     model: &StatsPillModel,
     pill_bg: Color,
     pill_fg: Color,
     radius: f32,
-) -> iced::widget::Container<'static, Message> {
+    opacity: f32,
+) -> iced::widget::Button<'static, Message> {
     let cpu_summary = model.cpu_summary.clone();
     let temp_summary = model.temp_summary.clone();
     let temp_color = model.temp_color;
     let fan_speed = model.fan_speed.clone();
-    container(
+    button(
         Row::new()
             .spacing(6)
             .align_y(Alignment::Center)
@@ -542,7 +610,8 @@ fn stats_pill(
             .push(text(fan_speed).size(14)),
     )
     .padding(Padding::from([4, 12]))
-    .style(move |_| pill_style(pill_bg, pill_fg, radius))
+    .on_press(Message::TogglePopup(Popup::Stats))
+    .style(pill_button_style(pill_bg, pill_fg, radius, opacity))
 }
 
 fn controls_pill(
@@ -550,8 +619,9 @@ fn controls_pill(
     pill_bg: Color,
     pill_fg: Color,
     radius: f32,
-) -> iced::widget::Container<'static, Message> {
-    container(
+    opacity: f32,
+) -> Element<'static, Message> {
+    button(
         Row::new()
             .spacing(3)
             .align_y(Alignment::Center)
@@ -592,7 +662,9 @@ fn controls_pill(
             ),
     )
     .padding(Padding::from([4, 8]))
-    .style(move |_| pill_style(pill_bg, pill_fg, radius))
+    .on_press(Message::TogglePopup(Popup::Controls))
+    .style(pill_button_style(pill_bg, pill_fg, radius, opacity))
+    .into()
 }
 
 fn connectivity_pill(
@@ -600,8 +672,9 @@ fn connectivity_pill(
     pill_bg: Color,
     pill_fg: Color,
     radius: f32,
-) -> iced::widget::Container<'static, Message> {
-    container(
+    opacity: f32,
+) -> iced::widget::Button<'static, Message> {
+    button(
         Row::new()
             .spacing(6)
             .align_y(Alignment::Center)
@@ -616,7 +689,8 @@ fn connectivity_pill(
             ),
     )
     .padding(Padding::from([4, 12]))
-    .style(move |_| pill_style(pill_bg, pill_fg, radius))
+    .on_press(Message::TogglePopup(Popup::Connectivity))
+    .style(pill_button_style(pill_bg, pill_fg, radius, opacity))
 }
 
 fn battery_pill(
@@ -624,14 +698,15 @@ fn battery_pill(
     pill_bg: Color,
     pill_fg: Color,
     radius: f32,
-) -> iced::widget::Container<'static, Message> {
+    opacity: f32,
+) -> iced::widget::Button<'static, Message> {
     let battery_icon = model.battery_icon;
     let battery_color = model.battery_color;
     let battery_label = model.battery_label.clone();
     let power_profile_label = model.power_profile_label.clone();
     let power_profile_color = model.power_profile_color;
     let idle_enabled = model.idle_enabled;
-    container({
+    button({
         let mut battery_row = Row::new()
             .spacing(6)
             .align_y(Alignment::Center)
@@ -666,7 +741,8 @@ fn battery_pill(
         battery_row
     })
     .padding(Padding::from([4, 12]))
-    .style(move |_| pill_style(pill_bg, pill_fg, radius))
+    .on_press(Message::TogglePopup(Popup::Power))
+    .style(pill_button_style(pill_bg, pill_fg, radius, opacity))
 }
 
 fn plain_pill(
@@ -675,13 +751,15 @@ fn plain_pill(
     pill_bg: Color,
     pill_fg: Color,
     radius: f32,
-) -> iced::widget::Container<'static, Message> {
+    opacity: f32,
+) -> iced::widget::Button<'static, Message> {
     plain_pill_with_color(
         label,
         font_size,
         pill_bg,
         pill_fg,
         radius,
+        opacity,
         Padding::from([4, 12]),
     )
 }
@@ -692,11 +770,12 @@ fn plain_pill_with_color(
     pill_bg: Color,
     pill_fg: Color,
     radius: f32,
+    opacity: f32,
     padding: Padding,
-) -> iced::widget::Container<'static, Message> {
-    container(text(label.into()).size(font_size))
+) -> iced::widget::Button<'static, Message> {
+    button(text(label.into()).size(font_size))
         .padding(padding)
-        .style(move |_| pill_style(pill_bg, pill_fg, radius))
+        .style(pill_button_style(pill_bg, pill_fg, radius, opacity))
 }
 
 fn separator_dot() -> iced::widget::Text<'static> {
@@ -755,40 +834,29 @@ fn workspace_button_style(
     }
 }
 
-fn pill_style(background: Color, text_color: Color, radius: f32) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(background)),
-        text_color: Some(text_color),
-        border: iced::Border {
-            radius: radius.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
 fn media_pill(
     model: &MediaPillModel,
     bg: Color,
     fg: Color,
     radius: f32,
+    opacity: f32,
 ) -> Element<'static, Message> {
-    let controls = mouse_area(
+    let play_pause_icon = if model.playback_status == "Playing" {
+        "󰏤"
+    } else {
+        "󰐊"
+    };
+
+    let controls = button(
         container(
             Row::new()
                 .spacing(10)
                 .align_y(Alignment::Center)
                 .push(
                     button(
-                        container(
-                            text("")
-                                .size(13)
-                                .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-                        )
-                        .width(Length::Fixed(18.0))
-                        .height(Length::Fixed(18.0))
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .align_y(iced::alignment::Vertical::Center),
+                        text("󰒮")
+                            .size(14)
+                            .style(move |_| iced::widget::text::Style { color: Some(fg) }),
                     )
                     .padding(0)
                     .on_press(Message::MediaCommand(
@@ -798,19 +866,9 @@ fn media_pill(
                 )
                 .push(
                     button(
-                        container(
-                            text(if model.playback_status == "Playing" {
-                                ""
-                            } else {
-                                ""
-                            })
-                            .size(13)
+                        text(play_pause_icon)
+                            .size(16)
                             .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-                        )
-                        .width(Length::Fixed(18.0))
-                        .height(Length::Fixed(18.0))
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .align_y(iced::alignment::Vertical::Center),
                     )
                     .padding(0)
                     .on_press(Message::MediaCommand(
@@ -820,15 +878,9 @@ fn media_pill(
                 )
                 .push(
                     button(
-                        container(
-                            text("")
-                                .size(13)
-                                .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-                        )
-                        .width(Length::Fixed(18.0))
-                        .height(Length::Fixed(18.0))
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .align_y(iced::alignment::Vertical::Center),
+                        text("󰒭")
+                            .size(14)
+                            .style(move |_| iced::widget::text::Style { color: Some(fg) }),
                     )
                     .padding(0)
                     .on_press(Message::MediaCommand(
@@ -837,27 +889,21 @@ fn media_pill(
                     .style(move |_, _| button::Style::default()),
                 ),
         )
-        .padding(Padding::from([4, 12])) // Идентичный паддинг как у Stats/Battery
-        .style(move |_| pill_style(bg, fg, radius)),
-    );
+        .padding(Padding::from([4, 12])),
+    )
+    .style(pill_button_style(bg, fg, radius, opacity));
 
-    let title_pill = mouse_area(
+    let title_pill = button(
         container(
             text(model.title.clone())
                 .size(11)
+                .font(Font::MONOSPACE)
                 .style(move |_| iced::widget::text::Style { color: Some(fg) }),
         )
-        .padding(Padding::from([4, 12])) // Идентичный паддинг
-        .style(move |_| container::Style {
-            background: Some(Background::Color(bg)),
-            border: iced::Border {
-                radius: radius.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
+        .padding(Padding::from([4, 12])),
     )
-    .on_press(Message::TogglePopup(Popup::Media));
+    .on_press(Message::TogglePopup(Popup::Media))
+    .style(pill_button_style(bg, fg, radius, opacity));
 
     Row::new()
         .spacing(4)

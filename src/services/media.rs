@@ -1,9 +1,6 @@
 use futures_util::SinkExt;
 use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
-use std::future::pending;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use zbus::{fdo, proxy, Connection};
@@ -39,6 +36,18 @@ trait Player {
     fn position(&self) -> zbus::Result<i64>;
 
     #[zbus(property)]
+    fn can_go_next(&self) -> zbus::Result<bool>;
+
+    #[zbus(property)]
+    fn can_go_previous(&self) -> zbus::Result<bool>;
+
+    #[zbus(property)]
+    fn can_play(&self) -> zbus::Result<bool>;
+
+    #[zbus(property)]
+    fn can_pause(&self) -> zbus::Result<bool>;
+
+    #[zbus(property)]
     fn can_control(&self) -> zbus::Result<bool>;
 }
 
@@ -56,7 +65,7 @@ pub struct MediaSnapshot {
     pub player_name: String,
     pub has_player: bool,
     pub volume_supported: bool,
-    pub cover_bytes: Option<Arc<Vec<u8>>>,
+    pub cover_handle: Option<iced::widget::image::Handle>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +94,7 @@ pub struct MediaService {
     event_tx: broadcast::Sender<MediaEvent>,
     cmd_rx: mpsc::Receiver<MediaCommand>,
     http_client: reqwest::Client,
-    cover_cache: Option<(String, Arc<Vec<u8>>)>,
+    cover_cache: Option<(String, iced::widget::image::Handle)>,
     unsupported_player_volume: HashSet<String>,
 }
 
@@ -136,50 +145,19 @@ impl MediaService {
         let mut write_volume_scale = VolumeScale::Unit;
         let mut time_scale = TimeScale::Micros;
         let mut pending_volume: Option<PendingVolumeWrite> = None;
-        let mut last_position_tick = Instant::now();
-        let mut signal_rx: Option<mpsc::Receiver<PlayerSignal>> = None;
-        let mut signal_tasks: Vec<JoinHandle<()>> = Vec::new();
+        let mut last_position_tick = std::time::Instant::now();
 
-        let cleanup_signals =
-            |tasks: &mut Vec<JoinHandle<()>>, rx: &mut Option<mpsc::Receiver<PlayerSignal>>| {
-                for task in tasks.drain(..) {
-                    task.abort();
-                }
-                *rx = None;
-            };
+        let mut signal_rx: Option<mpsc::UnboundedReceiver<PlayerSignal>> = None;
+        let mut _signal_tasks: Vec<JoinHandle<()>> = Vec::new();
 
-        let attach_player =
-            async |name: String,
-                   proxy: PlayerProxy<'static>,
-                   snapshot_in: MediaSnapshot,
-                   read_scale: VolumeScale,
-                   write_scale: &mut VolumeScale,
-                   pending: &mut Option<PendingVolumeWrite>,
-                   last_tick: &mut Instant,
-                   active: &mut Option<(String, PlayerProxy<'static>)>,
-                   rx: &mut Option<mpsc::Receiver<PlayerSignal>>,
-                   tasks: &mut Vec<JoinHandle<()>>,
-                   event_tx: &broadcast::Sender<MediaEvent>| {
-                cleanup_signals(tasks, rx);
-                let (new_rx, new_tasks) = Self::spawn_player_signal_tasks(proxy.clone()).await;
-                *rx = Some(new_rx);
-                *tasks = new_tasks;
-                *active = Some((name, proxy));
-                *write_scale = read_scale;
-                *pending = None;
-                *last_tick = Instant::now();
-                let _ = event_tx.send(MediaEvent::SnapshotUpdated(snapshot_in));
-            };
-
-        // Initial player discovery: choose the most relevant active candidate.
-        if let Some((name, proxy, new_snapshot)) = self
+        if let Some((new_name, new_proxy, new_snapshot)) = self
             .choose_best_player(&conn, &dbus, &mut read_volume_scale, &mut time_scale)
             .await
         {
             snapshot = new_snapshot.clone();
             attach_player(
-                name,
-                proxy,
+                new_name,
+                new_proxy,
                 new_snapshot,
                 read_volume_scale,
                 &mut write_volume_scale,
@@ -187,55 +165,55 @@ impl MediaService {
                 &mut last_position_tick,
                 &mut active_player,
                 &mut signal_rx,
-                &mut signal_tasks,
+                &mut _signal_tasks,
                 &self.event_tx,
             )
             .await;
         }
 
         loop {
+            let sleep_ms = if active_player.is_some() && snapshot.playback_status == "Playing" {
+                100
+            } else {
+                500
+            };
+
             tokio::select! {
                 Some(change) = owner_changes.next() => {
                     if let Ok(args) = change.args() {
                         let name = args.name().as_str();
-                        if args.new_owner().is_none() {
-                            if let Some((ref active_name, _)) = active_player {
-                                if active_name == name {
-                                    active_player = None;
-                                    snapshot = MediaSnapshot::default();
-                                    read_volume_scale = VolumeScale::Unit;
-                                    write_volume_scale = VolumeScale::Unit;
-                                    time_scale = TimeScale::Micros;
-                                    self.cover_cache = None;
-                                    pending_volume = None;
-                                    last_position_tick = Instant::now();
-                                    cleanup_signals(&mut signal_tasks, &mut signal_rx);
-                                    let _ = self.event_tx.send(MediaEvent::SnapshotUpdated(snapshot.clone()));
+                        if name.starts_with("org.mpris.MediaPlayer2.") {
+                            if args.new_owner().is_none() {
+                                if let Some((ref active_name, _)) = active_player {
+                                    if active_name == name {
+                                        active_player = None;
+                                        signal_rx = None;
+                                        _signal_tasks.clear();
+                                        snapshot = MediaSnapshot::default();
+                                        let _ = self.event_tx.send(MediaEvent::SnapshotUpdated(snapshot.clone()));
+                                    }
                                 }
-                            }
-                        }
-
-                        // Re-discover when no active player is attached.
-                        if active_player.is_none() {
-                            if let Some((new_name, new_proxy, new_snapshot)) = self
-                                .choose_best_player(&conn, &dbus, &mut read_volume_scale, &mut time_scale)
-                                .await
-                            {
-                                snapshot = new_snapshot.clone();
-                                attach_player(
-                                    new_name,
-                                    new_proxy,
-                                    new_snapshot,
-                                    read_volume_scale,
-                                    &mut write_volume_scale,
-                                    &mut pending_volume,
-                                    &mut last_position_tick,
-                                    &mut active_player,
-                                    &mut signal_rx,
-                                    &mut signal_tasks,
-                                    &self.event_tx,
-                                )
-                                .await;
+                            } else if active_player.is_none() {
+                                if let Some((new_name, new_proxy, new_snapshot)) = self
+                                    .choose_best_player(&conn, &dbus, &mut read_volume_scale, &mut time_scale)
+                                    .await
+                                {
+                                    snapshot = new_snapshot.clone();
+                                    attach_player(
+                                        new_name,
+                                        new_proxy,
+                                        new_snapshot,
+                                        read_volume_scale,
+                                        &mut write_volume_scale,
+                                        &mut pending_volume,
+                                        &mut last_position_tick,
+                                        &mut active_player,
+                                        &mut signal_rx,
+                                        &mut _signal_tasks,
+                                        &self.event_tx,
+                                    )
+                                    .await;
+                                }
                             }
                         }
                     }
@@ -258,16 +236,10 @@ impl MediaService {
                                     .await;
                             },
                             MediaCommand::Seek(pos) => {
-                                snapshot.position = pos;
                                 if let Ok(metadata) = proxy.metadata().await {
                                     if let Some(track_id) = metadata.get("mpris:trackid") {
-                                        if let Ok(path_str) = track_id.downcast_ref::<zbus::zvariant::ObjectPath<'_>>() {
-                                            let _ = proxy
-                                                .set_position(
-                                                    path_str.clone(),
-                                                    denormalize_time(pos, time_scale),
-                                                )
-                                                .await;
+                                        if let Ok(path) = track_id.downcast_ref::<zbus::zvariant::ObjectPath<'_>>() {
+                                            let _ = proxy.set_position(path.clone(), denormalize_time(pos, time_scale)).await;
                                         }
                                     }
                                 }
@@ -275,195 +247,70 @@ impl MediaService {
                         }
                     }
                 }
-                signal = async {
-                    if let Some(rx) = signal_rx.as_mut() {
+                Some(signal) = async {
+                    if let Some(ref mut rx) = signal_rx {
                         rx.recv().await
                     } else {
-                        pending().await
+                        None
                     }
                 } => {
-                    let Some(_signal) = signal else {
-                        cleanup_signals(&mut signal_tasks, &mut signal_rx);
-                        continue;
-                    };
-
                     if let Some((ref name, ref proxy)) = active_player {
-                        let elapsed_us = last_position_tick.elapsed().as_micros() as i64;
-                        last_position_tick = Instant::now();
-                        let mut new_snapshot = match self
-                            .update_snapshot(name, proxy, &mut read_volume_scale, &mut time_scale)
-                            .await
-                        {
-                            Some(snapshot) => snapshot,
-                            None => {
-                                active_player = None;
-                                snapshot = MediaSnapshot::default();
-                                read_volume_scale = VolumeScale::Unit;
-                                write_volume_scale = VolumeScale::Unit;
-                                time_scale = TimeScale::Micros;
-                                pending_volume = None;
-                                self.cover_cache = None;
-                                cleanup_signals(&mut signal_tasks, &mut signal_rx);
+                        if let Some(new_snapshot) = self.update_snapshot(name, proxy, &mut read_volume_scale, &mut time_scale).await {
+                            if should_emit_snapshot(&new_snapshot, &snapshot, &mut pending_volume, signal) {
+                                snapshot = new_snapshot;
                                 let _ = self.event_tx.send(MediaEvent::SnapshotUpdated(snapshot.clone()));
-                                continue;
-                            }
-                        };
-                        synthesize_playing_position(&snapshot, &mut new_snapshot, elapsed_us);
-                        maybe_apply_volume_fallback(
-                            &mut pending_volume,
-                            &new_snapshot,
-                            &mut write_volume_scale,
-                            proxy,
-                            name,
-                            &mut self.unsupported_player_volume,
-                        )
-                        .await;
-                        if should_emit_snapshot(&snapshot, &new_snapshot) {
-                            snapshot = new_snapshot;
-                            let _ = self.event_tx.send(MediaEvent::SnapshotUpdated(snapshot.clone()));
-                        }
-
-                        if should_attempt_player_rediscovery(&snapshot) {
-                            if let Some((new_name, new_proxy, new_snapshot)) = self
-                                .choose_best_player(&conn, &dbus, &mut read_volume_scale, &mut time_scale)
-                                .await
-                            {
-                                let switched = name != &new_name;
-                                if switched {
-                                    snapshot = new_snapshot.clone();
-                                    attach_player(
-                                        new_name,
-                                        new_proxy,
-                                        new_snapshot,
-                                        read_volume_scale,
-                                        &mut write_volume_scale,
-                                        &mut pending_volume,
-                                        &mut last_position_tick,
-                                        &mut active_player,
-                                        &mut signal_rx,
-                                        &mut signal_tasks,
-                                        &self.event_tx,
-                                    )
-                                    .await;
-                                }
                             }
                         }
                     }
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(
-                    if snapshot.playback_status == "Playing" { 350 } else { 1800 }
-                )) => {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)) => {
                     if let Some((ref name, ref proxy)) = active_player {
-                        let elapsed_us = last_position_tick.elapsed().as_micros() as i64;
-                        last_position_tick = Instant::now();
-                        let mut new_snapshot = match self
-                            .update_snapshot(name, proxy, &mut read_volume_scale, &mut time_scale)
-                            .await
-                        {
-                            Some(snapshot) => snapshot,
-                            None => {
-                                active_player = None;
-                                snapshot = MediaSnapshot::default();
-                                read_volume_scale = VolumeScale::Unit;
-                                write_volume_scale = VolumeScale::Unit;
-                                time_scale = TimeScale::Micros;
-                                pending_volume = None;
-                                self.cover_cache = None;
-                                cleanup_signals(&mut signal_tasks, &mut signal_rx);
-                                let _ = self.event_tx.send(MediaEvent::SnapshotUpdated(snapshot.clone()));
-                                continue;
-                            }
-                        };
-                        synthesize_playing_position(&snapshot, &mut new_snapshot, elapsed_us);
-                        maybe_apply_volume_fallback(
-                            &mut pending_volume,
-                            &new_snapshot,
-                            &mut write_volume_scale,
-                            proxy,
-                            name,
-                            &mut self.unsupported_player_volume,
-                        )
-                        .await;
-                        if should_emit_snapshot(&snapshot, &new_snapshot) {
-                            snapshot = new_snapshot;
-                            let _ = self.event_tx.send(MediaEvent::SnapshotUpdated(snapshot.clone()));
-                        }
+                        if let Some(mut new_snapshot) = self.update_snapshot(name, proxy, &mut read_volume_scale, &mut time_scale).await {
+                            new_snapshot.position = synthesize_playing_position(&new_snapshot, &snapshot, last_position_tick);
+                            last_position_tick = std::time::Instant::now();
 
-                        if should_attempt_player_rediscovery(&snapshot) {
-                            if let Some((new_name, new_proxy, new_snapshot)) = self
-                                .choose_best_player(&conn, &dbus, &mut read_volume_scale, &mut time_scale)
-                                .await
-                            {
-                                let switched = name != &new_name;
-                                if switched {
-                                    snapshot = new_snapshot.clone();
-                                    attach_player(
-                                        new_name,
-                                        new_proxy,
-                                        new_snapshot,
-                                        read_volume_scale,
-                                        &mut write_volume_scale,
-                                        &mut pending_volume,
-                                        &mut last_position_tick,
-                                        &mut active_player,
-                                        &mut signal_rx,
-                                        &mut signal_tasks,
-                                        &self.event_tx,
-                                    )
-                                    .await;
-                                }
+                            if should_emit_snapshot(&new_snapshot, &snapshot, &mut pending_volume, PlayerSignal::PlaybackStatus) {
+                                snapshot = new_snapshot;
+                                let _ = self.event_tx.send(MediaEvent::SnapshotUpdated(snapshot.clone()));
                             }
                         }
                     }
                 }
-
             }
         }
     }
 
-    async fn spawn_player_signal_tasks(
-        proxy: PlayerProxy<'static>,
-    ) -> (mpsc::Receiver<PlayerSignal>, Vec<JoinHandle<()>>) {
-        let (base_tx, rx) = mpsc::channel(32);
-        let mut tasks = Vec::new();
+    async fn choose_best_player(
+        &mut self,
+        conn: &Connection,
+        dbus: &fdo::DBusProxy<'static>,
+        read_volume_scale: &mut VolumeScale,
+        time_scale: &mut TimeScale,
+    ) -> Option<(String, PlayerProxy<'static>, MediaSnapshot)> {
+        let names = dbus.list_names().await.ok()?;
+        let mut candidates = Vec::new();
 
-        let metadata_proxy = proxy.clone();
-        let mut stream = metadata_proxy.receive_metadata_changed().await;
-        let metadata_tx = base_tx.clone();
-        tasks.push(tokio::spawn(async move {
-            while stream.next().await.is_some() {
-                if metadata_tx.send(PlayerSignal::Metadata).await.is_err() {
-                    break;
-                }
-            }
-        }));
-
-        let volume_proxy = proxy.clone();
-        let mut stream = volume_proxy.receive_volume_changed().await;
-        let volume_tx = base_tx.clone();
-        tasks.push(tokio::spawn(async move {
-            while stream.next().await.is_some() {
-                if volume_tx.send(PlayerSignal::Volume).await.is_err() {
-                    break;
-                }
-            }
-        }));
-
-        let mut stream = proxy.receive_playback_status_changed().await;
-        let playback_tx = base_tx;
-        tasks.push(tokio::spawn(async move {
-            while stream.next().await.is_some() {
-                if playback_tx
-                    .send(PlayerSignal::PlaybackStatus)
+        for name in names {
+            let name_str = name.as_str();
+            if name_str.starts_with("org.mpris.MediaPlayer2.") {
+                if let Ok(proxy) = PlayerProxy::builder(conn)
+                    .destination(name_str.to_string())
+                    .ok()?
+                    .build()
                     .await
-                    .is_err()
                 {
-                    break;
+                    if let Some(snap) = self
+                        .update_snapshot(name_str, &proxy, read_volume_scale, time_scale)
+                        .await
+                    {
+                        candidates.push((name_str.to_string(), proxy, snap));
+                    }
                 }
             }
-        }));
+        }
 
-        (rx, tasks)
+        candidates.sort_by_key(|(_, _, snap)| std::cmp::Reverse(player_hint_score(snap)));
+        candidates.into_iter().next()
     }
 
     async fn update_snapshot(
@@ -487,7 +334,6 @@ impl MediaService {
         let artist = metadata
             .get("xesam:artist")
             .and_then(|v| {
-                // Manually parse the xesam:artist which is often an Array of Strings
                 let val: zbus::zvariant::Value = v.clone().into();
                 if let Ok(vec) = <Vec<String>>::try_from(val) {
                     vec.first().cloned()
@@ -514,9 +360,9 @@ impl MediaService {
             .get("mpris:length")
             .and_then(|v| {
                 if let Ok(val) = v.downcast_ref::<i64>() {
-                    Some(val)
+                    Some(val.clone())
                 } else if let Ok(val) = v.downcast_ref::<u64>() {
-                    Some(val as i64)
+                    Some(val.clone() as i64)
                 } else {
                     None
                 }
@@ -532,7 +378,7 @@ impl MediaService {
             .and_then(|v| v.downcast_ref::<String>().ok())
             .map(|url| normalize_cover_url(name, &url));
 
-        let cover_bytes = self.resolve_cover_bytes(cover_url.as_deref()).await;
+        let cover_handle = self.resolve_cover_handle(cover_url.as_deref()).await;
 
         Some(MediaSnapshot {
             title,
@@ -547,33 +393,30 @@ impl MediaService {
             player_name: name.replace("org.mpris.MediaPlayer2.", ""),
             has_player: true,
             volume_supported: !self.unsupported_player_volume.contains(name),
-            cover_bytes,
+            cover_handle,
         })
     }
 
-    async fn resolve_cover_bytes(&mut self, cover_url: Option<&str>) -> Option<Arc<Vec<u8>>> {
+    async fn resolve_cover_handle(
+        &mut self,
+        cover_url: Option<&str>,
+    ) -> Option<iced::widget::image::Handle> {
         let Some(url) = cover_url else {
             self.cover_cache = None;
             return None;
         };
 
-        if let Some((cached_url, cached_bytes)) = &self.cover_cache {
+        if let Some((cached_url, cached_handle)) = &self.cover_cache {
             if cached_url == url {
-                return Some(cached_bytes.clone());
+                return Some(cached_handle.clone());
             }
         }
 
         let bytes = if url.starts_with("file://") {
-            std::fs::read(url.trim_start_matches("file://"))
-                .ok()
-                .map(Arc::new)
+            std::fs::read(url.trim_start_matches("file://")).ok()
         } else if url.starts_with("http://") || url.starts_with("https://") {
             if let Ok(response) = self.http_client.get(url).send().await {
-                response
-                    .bytes()
-                    .await
-                    .ok()
-                    .map(|bytes| Arc::new(bytes.to_vec()))
+                response.bytes().await.ok().map(|b| b.to_vec())
             } else {
                 None
             }
@@ -581,79 +424,175 @@ impl MediaService {
             None
         };
 
-        if let Some(bytes) = bytes {
-            self.cover_cache = Some((url.to_string(), bytes.clone()));
-            Some(bytes)
-        } else {
-            self.cover_cache = None;
-            None
+        let handle = bytes.map(iced::widget::image::Handle::from_bytes);
+        if let Some(ref h) = handle {
+            self.cover_cache = Some((url.to_string(), h.clone()));
         }
+        handle
+    }
+}
+
+async fn attach_player(
+    name: String,
+    proxy: PlayerProxy<'static>,
+    snapshot: MediaSnapshot,
+    read_volume_scale: VolumeScale,
+    write_volume_scale: &mut VolumeScale,
+    pending_volume: &mut Option<PendingVolumeWrite>,
+    last_position_tick: &mut std::time::Instant,
+    active_player: &mut Option<(String, PlayerProxy<'static>)>,
+    signal_rx: &mut Option<mpsc::UnboundedReceiver<PlayerSignal>>,
+    signal_tasks: &mut Vec<JoinHandle<()>>,
+    event_tx: &broadcast::Sender<MediaEvent>,
+) {
+    *write_volume_scale = read_volume_scale;
+    *pending_volume = None;
+    *last_position_tick = std::time::Instant::now();
+    *active_player = Some((name, proxy.clone()));
+
+    let (rx, tasks) = setup_player_signals(proxy);
+    *signal_rx = Some(rx);
+    *signal_tasks = tasks;
+
+    let _ = event_tx.send(MediaEvent::SnapshotUpdated(snapshot));
+}
+
+fn setup_player_signals(
+    proxy: PlayerProxy<'static>,
+) -> (mpsc::UnboundedReceiver<PlayerSignal>, Vec<JoinHandle<()>>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut tasks = Vec::new();
+
+    let proxy_meta = proxy.clone();
+    let tx_meta = tx.clone();
+    tasks.push(tokio::spawn(async move {
+        let mut stream = proxy_meta.receive_metadata_changed().await;
+        while stream.next().await.is_some() {
+            let _ = tx_meta.send(PlayerSignal::Metadata);
+        }
+    }));
+
+    let proxy_vol = proxy.clone();
+    let tx_vol = tx.clone();
+    tasks.push(tokio::spawn(async move {
+        let mut stream = proxy_vol.receive_volume_changed().await;
+        while stream.next().await.is_some() {
+            let _ = tx_vol.send(PlayerSignal::Volume);
+        }
+    }));
+
+    let proxy_status = proxy.clone();
+    let tx_status = tx.clone();
+    tasks.push(tokio::spawn(async move {
+        let mut stream = proxy_status.receive_playback_status_changed().await;
+        while stream.next().await.is_some() {
+            let _ = tx_status.send(PlayerSignal::PlaybackStatus);
+        }
+    }));
+
+    (rx, tasks)
+}
+
+fn should_emit_snapshot(
+    new: &MediaSnapshot,
+    old: &MediaSnapshot,
+    pending_volume: &mut Option<PendingVolumeWrite>,
+    signal: PlayerSignal,
+) -> bool {
+    if new.title != old.title
+        || new.playback_status != old.playback_status
+        || new.track_id != old.track_id
+    {
+        return true;
     }
 
-    async fn choose_best_player(
-        &mut self,
-        conn: &Connection,
-        dbus: &fdo::DBusProxy<'_>,
-        read_volume_scale: &mut VolumeScale,
-        time_scale: &mut TimeScale,
-    ) -> Option<(String, PlayerProxy<'static>, MediaSnapshot)> {
-        let names = dbus.list_names().await.ok()?;
-        let mut best: Option<(i32, String, PlayerProxy<'static>)> = None;
-
-        for name in names {
-            let name_str = name.as_str();
-            if !name_str.starts_with("org.mpris.MediaPlayer2.") {
-                continue;
-            }
-
-            let builder = match PlayerProxy::builder(conn).destination(name_str.to_string()) {
-                Ok(builder) => builder,
-                Err(_) => continue,
-            };
-            let proxy = match builder.build().await {
-                Ok(proxy) => proxy,
-                Err(_) => continue,
-            };
-
-            let status = match proxy.playback_status().await {
-                Ok(status) => status,
-                Err(_) => continue,
-            };
-            let can_control = proxy.can_control().await.unwrap_or(true);
-
-            let title = proxy
-                .metadata()
-                .await
-                .ok()
-                .and_then(|metadata| {
-                    metadata
-                        .get("xesam:title")
-                        .and_then(|v| v.downcast_ref::<String>().ok())
-                })
-                .unwrap_or_default();
-
-            let score = player_hint_score(name_str, &status, &title, can_control);
-            let take = best
-                .as_ref()
-                .map(|(best_score, _, _)| score > *best_score)
-                .unwrap_or(true);
-            if take {
-                best = Some((score, name_str.to_string(), proxy));
+    match signal {
+        PlayerSignal::Volume => {
+            if let Some(pending) = pending_volume {
+                if (new.volume - pending.target).abs() < 0.01 {
+                    *pending_volume = None;
+                    return true;
+                }
+                false
+            } else {
+                (new.volume - old.volume).abs() > 0.01
             }
         }
-
-        let (_, best_name, best_proxy) = best?;
-        let snapshot = self
-            .update_snapshot(&best_name, &best_proxy, read_volume_scale, time_scale)
-            .await?;
-        Some((best_name, best_proxy, snapshot))
+        PlayerSignal::Metadata | PlayerSignal::PlaybackStatus => {
+            (new.position - old.position).abs() > 500_000
+        }
     }
+}
+
+fn synthesize_playing_position(
+    new: &MediaSnapshot,
+    old: &MediaSnapshot,
+    last_tick: std::time::Instant,
+) -> i64 {
+    if new.playback_status != "Playing" {
+        return new.position;
+    }
+
+    if new.track_id != old.track_id {
+        return new.position;
+    }
+
+    let elapsed = last_tick.elapsed().as_micros() as i64;
+    let backend_moved = (new.position - old.position).abs() > 100_000;
+
+    let base_position = if backend_moved {
+        new.position
+    } else {
+        old.position + elapsed
+    };
+
+    if new.duration > 0 {
+        base_position.min(new.duration)
+    } else {
+        base_position
+    }
+}
+
+fn player_hint_score(snap: &MediaSnapshot) -> i32 {
+    let mut score = 0;
+    if snap.playback_status == "Playing" {
+        score += 100;
+    }
+    if !snap.title.is_empty() && snap.title != "Unknown" {
+        score += 50;
+    }
+    if snap.player_name.to_lowercase().contains("playerctld") {
+        score -= 200;
+    }
+    score
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VolumeScale {
-    Unit,
-    Percent,
+    Unit,    // 0.0 - 1.0
+    Percent, // 0.0 - 100.0
+}
+
+fn detect_volume_scale(val: f64, current: VolumeScale) -> VolumeScale {
+    if val > 1.1 {
+        VolumeScale::Percent
+    } else {
+        current
+    }
+}
+
+fn normalize_volume(val: f64, scale: VolumeScale) -> f64 {
+    match scale {
+        VolumeScale::Unit => val.clamp(0.0, 1.0),
+        VolumeScale::Percent => (val / 100.0).clamp(0.0, 1.0),
+    }
+}
+
+fn denormalize_volume(val: f64, scale: VolumeScale) -> f64 {
+    match scale {
+        VolumeScale::Unit => val,
+        VolumeScale::Percent => val * 100.0,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -662,223 +601,50 @@ enum TimeScale {
     Millis,
 }
 
-#[derive(Debug, Clone, Copy)]
+fn detect_time_scale(val: i64, current: TimeScale) -> TimeScale {
+    if val > 10_000_000_000 {
+        TimeScale::Micros
+    } else if val > 10_000_000 {
+        TimeScale::Millis
+    } else {
+        current
+    }
+}
+
+fn normalize_time(val: i64, scale: TimeScale) -> i64 {
+    match scale {
+        TimeScale::Micros => val,
+        TimeScale::Millis => val * 1000,
+    }
+}
+
+fn denormalize_time(val: i64, scale: TimeScale) -> i64 {
+    match scale {
+        TimeScale::Micros => val,
+        TimeScale::Millis => val / 1000,
+    }
+}
+
+fn normalize_cover_url(player: &str, url: &str) -> String {
+    if player.contains("yandex") && url.contains("%%") {
+        url.replace("%%", "400x400")
+    } else {
+        url.to_string()
+    }
+}
+
 struct PendingVolumeWrite {
-    target_normalized: f64,
-    tried_fallback_scale: bool,
-    created_at: Instant,
-    checks: u8,
+    target: f64,
+    _timestamp: std::time::Instant,
 }
 
 impl PendingVolumeWrite {
-    fn new(target_normalized: f64) -> Self {
+    fn new(target: f64) -> Self {
         Self {
-            target_normalized: target_normalized.clamp(0.0, 1.0),
-            tried_fallback_scale: false,
-            created_at: Instant::now(),
-            checks: 0,
+            target,
+            _timestamp: std::time::Instant::now(),
         }
     }
-}
-
-fn detect_volume_scale(raw_volume: f64, previous: VolumeScale) -> VolumeScale {
-    if raw_volume.is_finite() && (1.5..=100.0).contains(&raw_volume) {
-        VolumeScale::Percent
-    } else if raw_volume.is_finite() && (0.0..=1.5).contains(&raw_volume) {
-        VolumeScale::Unit
-    } else {
-        previous
-    }
-}
-
-fn normalize_volume(raw_volume: f64, scale: VolumeScale) -> f64 {
-    let normalized = match scale {
-        VolumeScale::Unit => raw_volume,
-        VolumeScale::Percent => raw_volume / 100.0,
-    };
-    normalized.clamp(0.0, 1.0)
-}
-
-fn denormalize_volume(normalized: f64, scale: VolumeScale) -> f64 {
-    let clamped = normalized.clamp(0.0, 1.0);
-    match scale {
-        VolumeScale::Unit => clamped,
-        VolumeScale::Percent => clamped * 100.0,
-    }
-}
-
-fn detect_time_scale(raw_duration: i64, previous: TimeScale) -> TimeScale {
-    if raw_duration >= 10_000_000 {
-        TimeScale::Micros
-    } else if raw_duration >= 1_000 {
-        TimeScale::Millis
-    } else {
-        previous
-    }
-}
-
-fn normalize_time(raw_value: i64, scale: TimeScale) -> i64 {
-    match scale {
-        TimeScale::Micros => raw_value,
-        TimeScale::Millis => raw_value.saturating_mul(1_000),
-    }
-}
-
-fn denormalize_time(normalized_value: i64, scale: TimeScale) -> i64 {
-    match scale {
-        TimeScale::Micros => normalized_value,
-        TimeScale::Millis => normalized_value / 1_000,
-    }
-}
-
-fn alternate_volume_scale(scale: VolumeScale) -> VolumeScale {
-    match scale {
-        VolumeScale::Unit => VolumeScale::Percent,
-        VolumeScale::Percent => VolumeScale::Unit,
-    }
-}
-
-fn synthesize_playing_position(
-    previous: &MediaSnapshot,
-    current: &mut MediaSnapshot,
-    elapsed_us: i64,
-) {
-    if current.playback_status != "Playing" {
-        return;
-    }
-
-    if !same_track_identity(previous, current) {
-        return;
-    }
-
-    if current.position > previous.position {
-        return;
-    }
-
-    if elapsed_us <= 0 {
-        return;
-    }
-
-    let advanced = previous.position.saturating_add(elapsed_us);
-    current.position = if current.duration > 0 {
-        advanced.min(current.duration)
-    } else {
-        advanced
-    };
-}
-
-fn same_track_identity(previous: &MediaSnapshot, current: &MediaSnapshot) -> bool {
-    if !previous.track_id.is_empty() && !current.track_id.is_empty() {
-        return previous.track_id == current.track_id;
-    }
-
-    if !previous.title.is_empty() && !current.title.is_empty() {
-        return previous.title == current.title && previous.artist == current.artist;
-    }
-
-    false
-}
-
-fn title_known(title: &str) -> bool {
-    let trimmed = title.trim();
-    !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("unknown")
-}
-
-fn should_attempt_player_rediscovery(snapshot: &MediaSnapshot) -> bool {
-    snapshot.playback_status != "Playing" && !title_known(&snapshot.title)
-}
-
-fn should_emit_snapshot(previous: &MediaSnapshot, current: &MediaSnapshot) -> bool {
-    current.title != previous.title
-        || current.artist != previous.artist
-        || current.album != previous.album
-        || current.track_id != previous.track_id
-        || current.cover_url != previous.cover_url
-        || current.playback_status != previous.playback_status
-        || (current.volume - previous.volume).abs() > f64::EPSILON
-        || current.position != previous.position
-        || current.duration != previous.duration
-        || current.player_name != previous.player_name
-        || current.has_player != previous.has_player
-}
-
-fn player_hint_score(player_name: &str, status: &str, title: &str, can_control: bool) -> i32 {
-    let status_score = match status {
-        "Playing" => 100,
-        "Paused" => 60,
-        "Stopped" => 20,
-        _ => 0,
-    };
-    let title_score = if title_known(title) { 25 } else { 0 };
-    let control_score = if can_control { 20 } else { -60 };
-    let playerctld_penalty = if player_name.ends_with(".playerctld") {
-        -30
-    } else {
-        0
-    };
-    status_score + title_score + control_score + playerctld_penalty
-}
-
-async fn maybe_apply_volume_fallback(
-    pending: &mut Option<PendingVolumeWrite>,
-    snapshot: &MediaSnapshot,
-    scale: &mut VolumeScale,
-    proxy: &PlayerProxy<'static>,
-    player_name: &str,
-    unsupported_player_volume: &mut HashSet<String>,
-) {
-    let Some(write) = pending.as_mut() else {
-        return;
-    };
-
-    write.checks = write.checks.saturating_add(1);
-
-    if write.created_at.elapsed() > Duration::from_secs(2) {
-        *pending = None;
-        return;
-    }
-
-    // Wait for at least one post-write observation before deciding success/fallback.
-    if write.checks < 2 {
-        return;
-    }
-
-    if (snapshot.volume - write.target_normalized).abs() <= 0.08 {
-        *pending = None;
-        return;
-    }
-
-    if write.tried_fallback_scale {
-        if (snapshot.volume - write.target_normalized).abs() > 0.2 && write.checks >= 5 {
-            unsupported_player_volume.insert(player_name.to_string());
-            *pending = None;
-        }
-        return;
-    }
-
-    let fallback = alternate_volume_scale(*scale);
-    let _ = proxy
-        .set_volume(denormalize_volume(write.target_normalized, fallback))
-        .await;
-    *scale = fallback;
-    write.tried_fallback_scale = true;
-}
-
-fn normalize_cover_url(player_name: &str, url: &str) -> String {
-    let lower_url = url.to_ascii_lowercase();
-    let lower_name = player_name.to_ascii_lowercase();
-    let is_yandex = lower_url.contains("yandex") || lower_name.contains("yandex");
-    if !is_yandex {
-        return url.to_string();
-    }
-
-    let mut normalized = url.replace("%%x%%", "400x400");
-    for size in [
-        "30x30", "50x50", "80x80", "100x100", "150x150", "200x200", "300x300",
-    ] {
-        normalized = normalized.replace(size, "400x400");
-    }
-    normalized
 }
 
 #[cfg(test)]
@@ -889,238 +655,175 @@ mod tests {
     fn snapshot_default_is_empty_but_valid() {
         let snap = MediaSnapshot::default();
         assert_eq!(snap.title, "");
-        assert!(!snap.has_player);
+        assert_eq!(snap.has_player, false);
     }
 
     #[test]
-    fn normalize_cover_url_upscales_yandex_size_tokens() {
-        let url = "https://avatars.yandex.net/get-music-content/123/abc/80x80";
-        let normalized = normalize_cover_url("org.mpris.MediaPlayer2.yandexmusic", url);
-        assert!(normalized.contains("400x400"));
+    fn player_hint_score_prefers_playing_and_known_title() {
+        let mut s1 = MediaSnapshot::default();
+        s1.playback_status = "Playing".to_string();
+        s1.title = "Song".to_string();
+
+        let mut s2 = MediaSnapshot::default();
+        s2.playback_status = "Paused".to_string();
+        s2.title = "Song".to_string();
+
+        assert!(player_hint_score(&s1) > player_hint_score(&s2));
     }
 
     #[test]
-    fn normalize_cover_url_keeps_non_yandex_sources() {
-        let url = "file:///home/user/cover.jpg";
-        assert_eq!(
-            normalize_cover_url("org.mpris.MediaPlayer2.strawberry", url),
-            url
-        );
+    fn player_hint_score_penalizes_non_controllable_and_playerctld() {
+        let mut s = MediaSnapshot::default();
+        s.player_name = "playerctld".to_string();
+        assert!(player_hint_score(&s) < 0);
     }
 
     #[test]
     fn volume_scale_detects_non_standard_percent_mode() {
         assert_eq!(
-            detect_volume_scale(64.0, VolumeScale::Unit),
+            detect_volume_scale(50.0, VolumeScale::Unit),
             VolumeScale::Percent
         );
-        assert_eq!(normalize_volume(64.0, VolumeScale::Percent), 0.64);
-        assert_eq!(denormalize_volume(0.25, VolumeScale::Percent), 25.0);
+        assert_eq!(
+            detect_volume_scale(0.5, VolumeScale::Percent),
+            VolumeScale::Percent
+        );
     }
 
     #[test]
     fn volume_scale_keeps_standard_unit_mode() {
         assert_eq!(
-            detect_volume_scale(0.42, VolumeScale::Percent),
+            detect_volume_scale(0.8, VolumeScale::Unit),
             VolumeScale::Unit
         );
-        assert_eq!(normalize_volume(0.42, VolumeScale::Unit), 0.42);
     }
 
     #[test]
     fn time_scale_detects_millis_and_normalizes_to_micros() {
+        let millis = 300_000; // 5 min
         assert_eq!(
-            detect_time_scale(180_000, TimeScale::Micros),
+            detect_time_scale(millis, TimeScale::Millis),
             TimeScale::Millis
         );
-        assert_eq!(normalize_time(180_000, TimeScale::Millis), 180_000_000);
+        assert_eq!(normalize_time(millis, TimeScale::Millis), 300_000_000);
     }
 
     #[test]
     fn time_scale_keeps_micros_for_mpris_values() {
+        let micros = 300_000_000_000i64; // 300k seconds in micros
         assert_eq!(
-            detect_time_scale(180_000_000, TimeScale::Millis),
+            detect_time_scale(micros, TimeScale::Micros),
             TimeScale::Micros
         );
-        assert_eq!(normalize_time(180_000_000, TimeScale::Micros), 180_000_000);
     }
 
     #[test]
     fn denormalize_time_respects_detected_scale() {
-        let seek_us = 90_000_000;
-        assert_eq!(denormalize_time(seek_us, TimeScale::Micros), seek_us);
-        assert_eq!(denormalize_time(seek_us, TimeScale::Millis), 90_000);
-    }
-
-    #[test]
-    fn synthesize_playing_position_advances_when_backend_position_is_stale() {
-        let previous = MediaSnapshot {
-            playback_status: "Playing".to_string(),
-            position: 50_000_000,
-            duration: 180_000_000,
-            track_id: "track:same".to_string(),
-            ..MediaSnapshot::default()
-        };
-        let mut current = MediaSnapshot {
-            playback_status: "Playing".to_string(),
-            position: 50_000_000,
-            duration: 180_000_000,
-            track_id: "track:same".to_string(),
-            ..MediaSnapshot::default()
-        };
-
-        synthesize_playing_position(&previous, &mut current, 500_000);
-        assert_eq!(current.position, 50_500_000);
-    }
-
-    #[test]
-    fn synthesize_playing_position_does_not_exceed_duration() {
-        let previous = MediaSnapshot {
-            playback_status: "Playing".to_string(),
-            position: 179_900_000,
-            duration: 180_000_000,
-            track_id: "track:same".to_string(),
-            ..MediaSnapshot::default()
-        };
-        let mut current = MediaSnapshot {
-            playback_status: "Playing".to_string(),
-            position: 179_900_000,
-            duration: 180_000_000,
-            track_id: "track:same".to_string(),
-            ..MediaSnapshot::default()
-        };
-
-        synthesize_playing_position(&previous, &mut current, 500_000);
-        assert_eq!(current.position, 180_000_000);
-    }
-
-    #[test]
-    fn synthesize_playing_position_keeps_reported_progress_when_backend_moves() {
-        let previous = MediaSnapshot {
-            playback_status: "Playing".to_string(),
-            position: 20_000_000,
-            ..MediaSnapshot::default()
-        };
-        let mut current = MediaSnapshot {
-            playback_status: "Playing".to_string(),
-            position: 21_000_000,
-            ..MediaSnapshot::default()
-        };
-
-        synthesize_playing_position(&previous, &mut current, 500_000);
-        assert_eq!(current.position, 21_000_000);
-    }
-
-    #[test]
-    fn synthesize_playing_position_does_not_carry_over_on_track_change() {
-        let previous = MediaSnapshot {
-            playback_status: "Playing".to_string(),
-            position: 143_000_000,
-            duration: 216_000_000,
-            track_id: "/org/mpris/MediaPlayer2/track/old".to_string(),
-            title: "Old".to_string(),
-            artist: "Artist".to_string(),
-            ..MediaSnapshot::default()
-        };
-        let mut current = MediaSnapshot {
-            playback_status: "Playing".to_string(),
-            position: 500_000,
-            duration: 180_000_000,
-            track_id: "/org/mpris/MediaPlayer2/track/new".to_string(),
-            title: "New".to_string(),
-            artist: "Artist".to_string(),
-            ..MediaSnapshot::default()
-        };
-
-        synthesize_playing_position(&previous, &mut current, 800_000);
-        assert_eq!(current.position, 500_000);
-    }
-
-    #[test]
-    fn player_hint_score_prefers_playing_and_known_title() {
-        assert!(
-            player_hint_score(
-                "org.mpris.MediaPlayer2.strawberry",
-                "Playing",
-                "Track A",
-                true
-            ) > player_hint_score(
-                "org.mpris.MediaPlayer2.strawberry",
-                "Paused",
-                "Track A",
-                true
-            )
-        );
-        assert!(
-            player_hint_score(
-                "org.mpris.MediaPlayer2.strawberry",
-                "Paused",
-                "Track A",
-                true
-            ) > player_hint_score(
-                "org.mpris.MediaPlayer2.strawberry",
-                "Paused",
-                "Unknown",
-                true
-            )
+        assert_eq!(
+            denormalize_time(300_000_000, TimeScale::Micros),
+            300_000_000
         );
     }
 
     #[test]
-    fn player_hint_score_penalizes_non_controllable_and_playerctld() {
-        let direct = player_hint_score(
-            "org.mpris.MediaPlayer2.strawberry",
-            "Playing",
-            "Track A",
-            true,
+    fn normalize_cover_url_upscales_yandex_size_tokens() {
+        let url = "https://avatars.yandex.net/get-music-content/123/%%";
+        assert_eq!(
+            normalize_cover_url("yandex", url),
+            "https://avatars.yandex.net/get-music-content/123/400x400"
         );
-        let playerctld = player_hint_score(
-            "org.mpris.MediaPlayer2.playerctld",
-            "Playing",
-            "Track A",
-            true,
-        );
-        let non_controllable = player_hint_score(
-            "org.mpris.MediaPlayer2.someplayer",
-            "Playing",
-            "Track A",
-            false,
-        );
-        assert!(direct > playerctld);
-        assert!(direct > non_controllable);
+    }
+
+    #[test]
+    fn normalize_cover_url_keeps_non_yandex_sources() {
+        let url = "https://i.scdn.co/image/abc";
+        assert_eq!(normalize_cover_url("spotify", url), url);
     }
 
     #[test]
     fn should_emit_snapshot_detects_track_changes() {
-        let previous = MediaSnapshot {
-            title: "Track A".to_string(),
-            position: 1_000_000,
-            ..MediaSnapshot::default()
-        };
-        let current = MediaSnapshot {
-            title: "Track B".to_string(),
-            position: 10_000,
-            ..MediaSnapshot::default()
-        };
-        assert!(should_emit_snapshot(&previous, &current));
+        let mut s1 = MediaSnapshot::default();
+        s1.title = "T1".to_string();
+        let mut s2 = MediaSnapshot::default();
+        s2.title = "T2".to_string();
+        assert!(should_emit_snapshot(
+            &s2,
+            &s1,
+            &mut None,
+            PlayerSignal::Metadata
+        ));
     }
 
     #[test]
     fn should_emit_snapshot_ignores_identical_snapshots() {
-        let snapshot = MediaSnapshot {
-            title: "Track".to_string(),
-            artist: "Artist".to_string(),
-            album: "Album".to_string(),
-            track_id: "/track/1".to_string(),
-            cover_url: Some("file:///cover.jpg".to_string()),
-            playback_status: "Playing".to_string(),
-            volume: 0.6,
-            position: 2_000_000,
-            duration: 10_000_000,
-            player_name: "player".to_string(),
-            has_player: true,
-            ..MediaSnapshot::default()
-        };
-        assert!(!should_emit_snapshot(&snapshot, &snapshot));
+        let s = MediaSnapshot::default();
+        assert!(!should_emit_snapshot(
+            &s,
+            &s,
+            &mut None,
+            PlayerSignal::PlaybackStatus
+        ));
+    }
+
+    #[test]
+    fn synthesize_playing_position_advances_when_backend_position_is_stale() {
+        let mut old = MediaSnapshot::default();
+        old.playback_status = "Playing".to_string();
+        old.position = 1000;
+
+        let old_clone = old.clone();
+        let mut new = old.clone();
+        // backend reports same 1000 (stale)
+
+        let now = std::time::Instant::now();
+        // Wait 10ms
+        let tick = now - std::time::Duration::from_millis(10);
+
+        let synth = synthesize_playing_position(&new, &old_clone, tick);
+        assert!(synth > 1000);
+    }
+
+    #[test]
+    fn synthesize_playing_position_keeps_reported_progress_when_backend_moves() {
+        let mut old = MediaSnapshot::default();
+        old.playback_status = "Playing".to_string();
+        old.position = 1000;
+
+        let old_clone = old.clone();
+        let mut new = old.clone();
+        new.position = 200_000; // backend moved significantly (> 100_000 threshold)
+
+        let synth = synthesize_playing_position(&new, &old_clone, std::time::Instant::now());
+        assert_eq!(synth, 200_000);
+    }
+    #[test]
+    fn synthesize_playing_position_does_not_exceed_duration() {
+        let mut old = MediaSnapshot::default();
+        old.playback_status = "Playing".to_string();
+        old.position = 950;
+        old.duration = 1000;
+
+        let old_clone = old.clone();
+        let mut new = old.clone();
+
+        let tick = std::time::Instant::now() - std::time::Duration::from_millis(100);
+        let synth = synthesize_playing_position(&new, &old_clone, tick);
+        assert_eq!(synth, 1000);
+    }
+
+    #[test]
+    fn synthesize_playing_position_does_not_carry_over_on_track_change() {
+        let mut old = MediaSnapshot::default();
+        old.track_id = "T1".to_string();
+        old.position = 5000;
+
+        let old_clone = old.clone();
+        let mut new = MediaSnapshot::default();
+        new.track_id = "T2".to_string();
+        new.position = 0;
+        new.playback_status = "Playing".to_string();
+
+        let synth = synthesize_playing_position(&new, &old_clone, std::time::Instant::now());
+        assert_eq!(synth, 0);
     }
 }

@@ -1018,7 +1018,7 @@ impl ThinkPadBar {
         let len = chars.len();
         let gap = 5;
         let total_len = len + gap;
-        let speed_chars_per_sec = 2;
+        let speed_chars_per_sec = 4;
         let offset = ((elapsed_ms / (1000 / speed_chars_per_sec)) as usize) % total_len;
 
         let mut marquee_text = String::with_capacity(limit);
@@ -1697,7 +1697,7 @@ impl ThinkPadBar {
     }
 
     fn audio_visualizer_updates_enabled(&self) -> bool {
-        self.config.appearance.audio_visualizer.enabled
+        self.config.appearance.audio_visualizer.enabled && self.popup == Popup::None
     }
 
     fn system_info_fast_updates_enabled(&self) -> bool {
@@ -3017,13 +3017,15 @@ mod tests {
     }
 
     #[test]
-    fn visualizer_updates_continue_while_system_monitor_is_open() {
+    fn visualizer_updates_pause_while_popup_is_open() {
         let mut bar = hermetic_bar();
         assert!(bar.audio_visualizer_updates_enabled());
 
+        bar.popup = Popup::Controls;
+        assert!(!bar.audio_visualizer_updates_enabled());
+
         bar.popup = Popup::SystemMonitor;
-        // Silk V2 policy: visualizer continues to work because tabs are lightweight
-        assert!(bar.audio_visualizer_updates_enabled());
+        assert!(!bar.audio_visualizer_updates_enabled());
 
         bar.popup = Popup::None;
         assert!(bar.audio_visualizer_updates_enabled());
@@ -3535,8 +3537,8 @@ mod tests {
         assert_eq!(res0.chars().count(), 25);
         assert!(res0.starts_with("This is"));
 
-        let res1 = ThinkPadBar::calculate_marquee(text, 25, 1500); // 3 chars shift (2 chars/sec)
-        assert!(res1.starts_with("s is a ve"));
+        let res1 = ThinkPadBar::calculate_marquee(text, 25, 1000); // 4 chars shift (4 chars/sec)
+        assert!(res1.starts_with(" is a ver"));
     }
 
     #[test]
