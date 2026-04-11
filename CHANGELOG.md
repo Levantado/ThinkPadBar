@@ -2,7 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
-## [1.0.72] - 2026-04-11
+## [1.0.74] - 2026-04-11
+
+### Fixed
+- **System Stability**: Re-enabled "global visualizer pause" whenever any popup is open. This is essential to prevent Wayland rendering artifacts and UI thread starvation during interactions with heavy popups.
+- **System Info**: Removed all scrollable components from the redesign. Tab navigation is now a static Row, and category views are kept short enough to fit without scrolling. This ensures 100% reliable button clicks and layout stability.
+
+## [1.0.73] - 2026-04-11
 
 ### Fixed
 - **System Info Popup**: Applied "Silk" optimization by flattening the widget hierarchy and fixing the scrollable viewport height. This eliminates rendering artifacts and layering issues during scroll interactions.

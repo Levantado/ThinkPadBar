@@ -1697,7 +1697,7 @@ impl ThinkPadBar {
     }
 
     fn audio_visualizer_updates_enabled(&self) -> bool {
-        self.config.appearance.audio_visualizer.enabled
+        self.config.appearance.audio_visualizer.enabled && self.popup == Popup::None
     }
 
     fn system_info_fast_updates_enabled(&self) -> bool {
@@ -3017,13 +3017,15 @@ mod tests {
     }
 
     #[test]
-    fn visualizer_updates_continue_while_system_monitor_is_open() {
+    fn visualizer_updates_pause_while_popup_is_open() {
         let mut bar = hermetic_bar();
         assert!(bar.audio_visualizer_updates_enabled());
 
+        bar.popup = Popup::Controls;
+        assert!(!bar.audio_visualizer_updates_enabled());
+
         bar.popup = Popup::SystemMonitor;
-        // Silk V2 policy: visualizer continues to work because tabs are lightweight
-        assert!(bar.audio_visualizer_updates_enabled());
+        assert!(!bar.audio_visualizer_updates_enabled());
 
         bar.popup = Popup::None;
         assert!(bar.audio_visualizer_updates_enabled());
