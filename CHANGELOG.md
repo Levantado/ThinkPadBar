@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.78] - 2026-04-11
+
+### Fixed
+- **Media Module**: Fixed track duration and position calculation by strictly following the MPRIS microsecond standard. 4-minute tracks no longer appear as 60-hour streams.
+- **Visual Consistency**: Standardized corner radius (12px) and paddings (4px 12px) across all bar elements, including the launcher, visualizer, and media pills.
+- **Bar UI**: Improved vertical alignment of all pills by unifying their internal widget structure and alignment policies.
+
+## [1.0.77] - 2026-04-11
+
+### Fixed
+- **Bar UI**: Perfectly centered media control buttons and marquee text by removing redundant nested containers.
+- **Media Module**: Robust cover art resolution with support for HTTP redirects and triple-slash `file:///` paths.
+- **Media Popup**: Forced UI updates for playback position, ensuring the progress slider moves smoothly during playback.
+
 ## [1.0.76] - 2026-04-11
 
 ### Fixed

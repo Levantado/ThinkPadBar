@@ -110,7 +110,10 @@ impl MediaService {
             Self {
                 event_tx,
                 cmd_rx,
-                http_client: reqwest::Client::new(),
+                http_client: reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::limited(5))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new()),
                 cover_cache: None,
                 unsupported_player_volume: HashSet::new(),
             },
@@ -143,7 +146,6 @@ impl MediaService {
         let mut snapshot = MediaSnapshot::default();
         let mut read_volume_scale = VolumeScale::Unit;
         let mut write_volume_scale = VolumeScale::Unit;
-        let mut time_scale = TimeScale::Micros;
         let mut pending_volume: Option<PendingVolumeWrite> = None;
         let mut last_position_tick = std::time::Instant::now();
 
@@ -151,7 +153,7 @@ impl MediaService {
         let mut _signal_tasks: Vec<JoinHandle<()>> = Vec::new();
 
         if let Some((new_name, new_proxy, new_snapshot)) = self
-            .choose_best_player(&conn, &dbus, &mut read_volume_scale, &mut time_scale)
+            .choose_best_player(&conn, &dbus, &mut read_volume_scale)
             .await
         {
             snapshot = new_snapshot.clone();
@@ -194,9 +196,9 @@ impl MediaService {
                                     }
                                 }
                             } else if active_player.is_none() {
-                                if let Some((new_name, new_proxy, new_snapshot)) = self
-                                    .choose_best_player(&conn, &dbus, &mut read_volume_scale, &mut time_scale)
-                                    .await
+                                if let Some((new_name, new_proxy, new_snapshot)) =
+                                    self.choose_best_player(&conn, &dbus, &mut read_volume_scale)
+                                        .await
                                 {
                                     snapshot = new_snapshot.clone();
                                     attach_player(
@@ -238,8 +240,10 @@ impl MediaService {
                             MediaCommand::Seek(pos) => {
                                 if let Ok(metadata) = proxy.metadata().await {
                                     if let Some(track_id) = metadata.get("mpris:trackid") {
-                                        if let Ok(path) = track_id.downcast_ref::<zbus::zvariant::ObjectPath<'_>>() {
-                                            let _ = proxy.set_position(path.clone(), denormalize_time(pos, time_scale)).await;
+                                        if let Ok(path) = track_id
+                                            .downcast_ref::<zbus::zvariant::ObjectPath<'_>>()
+                                        {
+                                            let _ = proxy.set_position(path.clone(), pos).await;
                                         }
                                     }
                                 }
@@ -255,7 +259,7 @@ impl MediaService {
                     }
                 } => {
                     if let Some((ref name, ref proxy)) = active_player {
-                        if let Some(new_snapshot) = self.update_snapshot(name, proxy, &mut read_volume_scale, &mut time_scale).await {
+                        if let Some(new_snapshot) = self.update_snapshot(name, proxy, &mut read_volume_scale).await {
                             if should_emit_snapshot(&new_snapshot, &snapshot, &mut pending_volume, signal) {
                                 snapshot = new_snapshot;
                                 let _ = self.event_tx.send(MediaEvent::SnapshotUpdated(snapshot.clone()));
@@ -265,7 +269,7 @@ impl MediaService {
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)) => {
                     if let Some((ref name, ref proxy)) = active_player {
-                        if let Some(mut new_snapshot) = self.update_snapshot(name, proxy, &mut read_volume_scale, &mut time_scale).await {
+                        if let Some(mut new_snapshot) = self.update_snapshot(name, proxy, &mut read_volume_scale).await {
                             new_snapshot.position = synthesize_playing_position(&new_snapshot, &snapshot, last_position_tick);
                             last_position_tick = std::time::Instant::now();
 
@@ -285,7 +289,6 @@ impl MediaService {
         conn: &Connection,
         dbus: &fdo::DBusProxy<'static>,
         read_volume_scale: &mut VolumeScale,
-        time_scale: &mut TimeScale,
     ) -> Option<(String, PlayerProxy<'static>, MediaSnapshot)> {
         let names = dbus.list_names().await.ok()?;
         let mut candidates = Vec::new();
@@ -300,7 +303,7 @@ impl MediaService {
                     .await
                 {
                     if let Some(snap) = self
-                        .update_snapshot(name_str, &proxy, read_volume_scale, time_scale)
+                        .update_snapshot(name_str, &proxy, read_volume_scale)
                         .await
                     {
                         candidates.push((name_str.to_string(), proxy, snap));
@@ -318,7 +321,6 @@ impl MediaService {
         name: &str,
         proxy: &PlayerProxy<'static>,
         read_volume_scale: &mut VolumeScale,
-        time_scale: &mut TimeScale,
     ) -> Option<MediaSnapshot> {
         let status = proxy.playback_status().await.ok()?;
         let raw_volume = proxy.volume().await.unwrap_or(1.0);
@@ -356,7 +358,7 @@ impl MediaService {
             .map(|p| p.to_string())
             .unwrap_or_default();
 
-        let raw_duration = metadata
+        let duration = metadata
             .get("mpris:length")
             .and_then(|v| {
                 if let Ok(val) = v.downcast_ref::<i64>() {
@@ -368,10 +370,8 @@ impl MediaService {
                 }
             })
             .unwrap_or(0);
-        *time_scale = detect_time_scale(raw_duration, *time_scale);
-        let duration = normalize_time(raw_duration, *time_scale);
-        let raw_position = proxy.position().await.unwrap_or(0);
-        let position = normalize_time(raw_position, *time_scale);
+
+        let position = proxy.position().await.unwrap_or(0);
 
         let cover_url = metadata
             .get("mpris:artUrl")
@@ -413,7 +413,13 @@ impl MediaService {
         }
 
         let bytes = if url.starts_with("file://") {
-            std::fs::read(url.trim_start_matches("file://")).ok()
+            let path = url.trim_start_matches("file://");
+            let final_path = if path.starts_with("//") {
+                &path[2..]
+            } else {
+                path
+            };
+            std::fs::read(final_path).ok()
         } else if url.starts_with("http://") || url.starts_with("https://") {
             if let Ok(response) = self.http_client.get(url).send().await {
                 response.bytes().await.ok().map(|b| b.to_vec())
@@ -427,6 +433,8 @@ impl MediaService {
         let handle = bytes.map(iced::widget::image::Handle::from_bytes);
         if let Some(ref h) = handle {
             self.cover_cache = Some((url.to_string(), h.clone()));
+        } else {
+            tracing::warn!("Failed to resolve cover art from URL: {}", url);
         }
         handle
     }
@@ -502,6 +510,7 @@ fn should_emit_snapshot(
     if new.title != old.title
         || new.playback_status != old.playback_status
         || new.track_id != old.track_id
+        || new.playback_status == "Playing"
     {
         return true;
     }
@@ -595,36 +604,6 @@ fn denormalize_volume(val: f64, scale: VolumeScale) -> f64 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TimeScale {
-    Micros,
-    Millis,
-}
-
-fn detect_time_scale(val: i64, current: TimeScale) -> TimeScale {
-    if val > 10_000_000_000 {
-        TimeScale::Micros
-    } else if val > 10_000_000 {
-        TimeScale::Millis
-    } else {
-        current
-    }
-}
-
-fn normalize_time(val: i64, scale: TimeScale) -> i64 {
-    match scale {
-        TimeScale::Micros => val,
-        TimeScale::Millis => val * 1000,
-    }
-}
-
-fn denormalize_time(val: i64, scale: TimeScale) -> i64 {
-    match scale {
-        TimeScale::Micros => val,
-        TimeScale::Millis => val / 1000,
-    }
-}
-
 fn normalize_cover_url(player: &str, url: &str) -> String {
     if player.contains("yandex") && url.contains("%%") {
         url.replace("%%", "400x400")
@@ -699,33 +678,6 @@ mod tests {
     }
 
     #[test]
-    fn time_scale_detects_millis_and_normalizes_to_micros() {
-        let millis = 300_000; // 5 min
-        assert_eq!(
-            detect_time_scale(millis, TimeScale::Millis),
-            TimeScale::Millis
-        );
-        assert_eq!(normalize_time(millis, TimeScale::Millis), 300_000_000);
-    }
-
-    #[test]
-    fn time_scale_keeps_micros_for_mpris_values() {
-        let micros = 300_000_000_000i64; // 300k seconds in micros
-        assert_eq!(
-            detect_time_scale(micros, TimeScale::Micros),
-            TimeScale::Micros
-        );
-    }
-
-    #[test]
-    fn denormalize_time_respects_detected_scale() {
-        assert_eq!(
-            denormalize_time(300_000_000, TimeScale::Micros),
-            300_000_000
-        );
-    }
-
-    #[test]
     fn normalize_cover_url_upscales_yandex_size_tokens() {
         let url = "https://avatars.yandex.net/get-music-content/123/%%";
         assert_eq!(
@@ -791,11 +743,12 @@ mod tests {
 
         let old_clone = old.clone();
         let mut new = old.clone();
-        new.position = 200_000; // backend moved significantly (> 100_000 threshold)
+        new.position = 200_000; // backend moved
 
         let synth = synthesize_playing_position(&new, &old_clone, std::time::Instant::now());
         assert_eq!(synth, 200_000);
     }
+
     #[test]
     fn synthesize_playing_position_does_not_exceed_duration() {
         let mut old = MediaSnapshot::default();
