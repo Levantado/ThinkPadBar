@@ -657,6 +657,14 @@ impl ThinkPadBar {
                     ),
             },
             media: {
+                let title_trimmed = self.media_snapshot.title.trim();
+                let artist_trimmed = self.media_snapshot.artist.trim();
+                let unknown_title =
+                    title_trimmed.is_empty() || title_trimmed.eq_ignore_ascii_case("unknown");
+                let unknown_artist = artist_trimmed.is_empty()
+                    || artist_trimmed.eq_ignore_ascii_case("unknown artist");
+                let meaningful_media = !(unknown_title && unknown_artist)
+                    || self.media_snapshot.playback_status == "Playing";
                 let full_text = format!(
                     "{} - {}",
                     self.media_snapshot.artist, self.media_snapshot.title
@@ -668,7 +676,7 @@ impl ThinkPadBar {
                     title: display_text,
                     artist: String::new(), // Artist already merged into title for marquee
                     playback_status: self.media_snapshot.playback_status.clone(),
-                    has_player: self.media_snapshot.has_player,
+                    has_player: self.media_snapshot.has_player && meaningful_media,
                 }
             },
 

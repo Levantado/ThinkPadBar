@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.70] - 2026-04-11
+
+### Fixed
+- **Media Popup**: Fixed player volume slider compatibility for non-standard MPRIS implementations by normalizing runtime scale and applying adaptive fallback writes when a player reports and accepts different volume ranges.
+- **Media Popup**: Fixed stale playback progress/time by adding a playback-position fallback that advances position when some players stop reporting live `Position` updates.
+- **Media Service**: Added cover-art URL caching to avoid repeated image fetch/read work on every media refresh tick.
+
 ## [1.0.69] - 2026-04-10
 
 ### Fixed

@@ -773,12 +773,6 @@ fn media_pill(
     fg: Color,
     radius: f32,
 ) -> Element<'static, Message> {
-    let play_pause_icon = if model.playback_status == "Playing" {
-        "󰏤"
-    } else {
-        "󰐊"
-    };
-
     let controls = mouse_area(
         container(
             Row::new()
@@ -786,9 +780,15 @@ fn media_pill(
                 .align_y(Alignment::Center)
                 .push(
                     button(
-                        text("󰒮")
-                            .size(14)
-                            .style(move |_| iced::widget::text::Style { color: Some(fg) }),
+                        container(
+                            text("")
+                                .size(13)
+                                .style(move |_| iced::widget::text::Style { color: Some(fg) }),
+                        )
+                        .width(Length::Fixed(18.0))
+                        .height(Length::Fixed(18.0))
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_y(iced::alignment::Vertical::Center),
                     )
                     .padding(0)
                     .on_press(Message::MediaCommand(
@@ -798,9 +798,19 @@ fn media_pill(
                 )
                 .push(
                     button(
-                        text(play_pause_icon)
-                            .size(16)
+                        container(
+                            text(if model.playback_status == "Playing" {
+                                ""
+                            } else {
+                                ""
+                            })
+                            .size(13)
                             .style(move |_| iced::widget::text::Style { color: Some(fg) }),
+                        )
+                        .width(Length::Fixed(18.0))
+                        .height(Length::Fixed(18.0))
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_y(iced::alignment::Vertical::Center),
                     )
                     .padding(0)
                     .on_press(Message::MediaCommand(
@@ -810,9 +820,15 @@ fn media_pill(
                 )
                 .push(
                     button(
-                        text("󰒭")
-                            .size(14)
-                            .style(move |_| iced::widget::text::Style { color: Some(fg) }),
+                        container(
+                            text("")
+                                .size(13)
+                                .style(move |_| iced::widget::text::Style { color: Some(fg) }),
+                        )
+                        .width(Length::Fixed(18.0))
+                        .height(Length::Fixed(18.0))
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_y(iced::alignment::Vertical::Center),
                     )
                     .padding(0)
                     .on_press(Message::MediaCommand(

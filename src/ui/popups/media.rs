@@ -31,10 +31,16 @@ pub fn view(theme: ThemeTokens, model: &MediaPopupModel) -> Element<'static, Mes
 
     let cover = if let Some(bytes) = &snap.cover_bytes {
         container(
-            image(image::Handle::from_bytes(bytes.to_vec()))
-                .width(Length::Fill)
-                .height(Length::Fixed(240.0))
-                .content_fit(iced::ContentFit::Cover),
+            container(
+                image(image::Handle::from_bytes(bytes.to_vec()))
+                    .width(Length::Shrink)
+                    .height(Length::Fixed(240.0))
+                    .content_fit(iced::ContentFit::Contain),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(240.0))
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center),
         )
     } else {
         container(
@@ -165,18 +171,28 @@ pub fn view(theme: ThemeTokens, model: &MediaPopupModel) -> Element<'static, Mes
             .style(move |_, _| button::Style::default()),
         );
 
+    let volume_control: Element<'static, Message> = if snap.volume_supported {
+        slider(0.0..=100.0, (snap.volume * 100.0).clamp(0.0, 100.0), |v| {
+            Message::MediaCommand(crate::services::media::MediaCommand::SetVolume(v / 100.0))
+        })
+        .width(Length::Fixed(120.0))
+        .into()
+    } else {
+        text("Player volume unavailable")
+            .size(type_scale.micro)
+            .style(|_| iced::widget::text::Style {
+                color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
+            })
+            .into()
+    };
+
     let volume_row = Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
         .push(text("󰝚").size(16).style(|_| iced::widget::text::Style {
             color: Some(Color::from_rgb8(0x56, 0x5f, 0x89)),
         }))
-        .push(
-            slider(0.0..=1.0, snap.volume, |v| {
-                Message::MediaCommand(crate::services::media::MediaCommand::SetVolume(v))
-            })
-            .width(Length::Fixed(120.0)), // Компактный слайдер громкости
-        );
+        .push(volume_control);
 
     let content = Column::new()
         .width(Length::Fill)
