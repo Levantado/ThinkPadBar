@@ -110,7 +110,10 @@ impl MediaService {
             Self {
                 event_tx,
                 cmd_rx,
-                http_client: reqwest::Client::new(),
+                http_client: reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::limited(5))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new()),
                 cover_cache: None,
                 unsupported_player_volume: HashSet::new(),
             },
@@ -413,7 +416,14 @@ impl MediaService {
         }
 
         let bytes = if url.starts_with("file://") {
-            std::fs::read(url.trim_start_matches("file://")).ok()
+            let path = url.trim_start_matches("file://");
+            // Handle both file:///path and file:/path
+            let final_path = if path.starts_with("//") {
+                &path[2..]
+            } else {
+                path
+            };
+            std::fs::read(final_path).ok()
         } else if url.starts_with("http://") || url.starts_with("https://") {
             if let Ok(response) = self.http_client.get(url).send().await {
                 response.bytes().await.ok().map(|b| b.to_vec())
@@ -427,6 +437,8 @@ impl MediaService {
         let handle = bytes.map(iced::widget::image::Handle::from_bytes);
         if let Some(ref h) = handle {
             self.cover_cache = Some((url.to_string(), h.clone()));
+        } else {
+            tracing::warn!("Failed to resolve cover art from URL: {}", url);
         }
         handle
     }
@@ -502,6 +514,8 @@ fn should_emit_snapshot(
     if new.title != old.title
         || new.playback_status != old.playback_status
         || new.track_id != old.track_id
+        || new.playback_status == "Playing"
+    // Форсируем обновление при воспроизведении
     {
         return true;
     }

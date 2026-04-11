@@ -848,60 +848,56 @@ fn media_pill(
     };
 
     let controls = button(
-        container(
-            Row::new()
-                .spacing(10)
-                .align_y(Alignment::Center)
-                .push(
-                    button(
-                        text("󰒮")
-                            .size(14)
-                            .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-                    )
-                    .padding(0)
-                    .on_press(Message::MediaCommand(
-                        crate::services::media::MediaCommand::Previous,
-                    ))
-                    .style(move |_, _| button::Style::default()),
+        Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(
+                button(
+                    text("󰒮")
+                        .size(14)
+                        .style(move |_| iced::widget::text::Style { color: Some(fg) }),
                 )
-                .push(
-                    button(
-                        text(play_pause_icon)
-                            .size(16)
-                            .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-                    )
-                    .padding(0)
-                    .on_press(Message::MediaCommand(
-                        crate::services::media::MediaCommand::PlayPause,
-                    ))
-                    .style(move |_, _| button::Style::default()),
+                .padding(0)
+                .on_press(Message::MediaCommand(
+                    crate::services::media::MediaCommand::Previous,
+                ))
+                .style(move |_, _| button::Style::default()),
+            )
+            .push(
+                button(
+                    text(play_pause_icon)
+                        .size(16)
+                        .style(move |_| iced::widget::text::Style { color: Some(fg) }),
                 )
-                .push(
-                    button(
-                        text("󰒭")
-                            .size(14)
-                            .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-                    )
-                    .padding(0)
-                    .on_press(Message::MediaCommand(
-                        crate::services::media::MediaCommand::Next,
-                    ))
-                    .style(move |_, _| button::Style::default()),
-                ),
-        )
-        .padding(Padding::from([4, 12])),
+                .padding(0)
+                .on_press(Message::MediaCommand(
+                    crate::services::media::MediaCommand::PlayPause,
+                ))
+                .style(move |_, _| button::Style::default()),
+            )
+            .push(
+                button(
+                    text("󰒭")
+                        .size(14)
+                        .style(move |_| iced::widget::text::Style { color: Some(fg) }),
+                )
+                .padding(0)
+                .on_press(Message::MediaCommand(
+                    crate::services::media::MediaCommand::Next,
+                ))
+                .style(move |_, _| button::Style::default()),
+            ),
     )
+    .padding(Padding::from([4, 12]))
     .style(pill_button_style(bg, fg, radius, opacity));
 
     let title_pill = button(
-        container(
-            text(model.title.clone())
-                .size(11)
-                .font(Font::MONOSPACE)
-                .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-        )
-        .padding(Padding::from([4, 12])),
+        text(model.title.clone())
+            .size(11)
+            .font(Font::MONOSPACE)
+            .style(move |_| iced::widget::text::Style { color: Some(fg) }),
     )
+    .padding(Padding::from([4, 12]))
     .on_press(Message::TogglePopup(Popup::Media))
     .style(pill_button_style(bg, fg, radius, opacity));
 

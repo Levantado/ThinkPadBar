@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.77] - 2026-04-11
+
+### Fixed
+- **Bar UI**: Perfectly centered media control buttons and marquee text by removing redundant nested containers.
+- **Media Module**: Robust cover art resolution with support for HTTP redirects and triple-slash `file:///` paths.
+- **Media Popup**: Forced UI updates for playback position, ensuring the progress slider moves smoothly during playback.
+
 ## [1.0.76] - 2026-04-11
 
 ### Fixed
